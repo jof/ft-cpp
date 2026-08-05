@@ -109,6 +109,130 @@ the effect was cheap enough for hardware that could not multiply quickly.
 $ python3 rotozoom.py --texture xor --spin 0.35 --zoom-min 0.4
 ```
 
+### slime
+
+![slime](screenshots/slime.png)
+
+A Physarum transport network. Sixteen thousand agents each sense the trail
+ahead of them at three angles, turn toward the strongest, move, and deposit;
+the trail map is blurred and decayed each step. Nothing draws the network — the
+filaments, junctions and loops are what those rules settle into.
+
+Three departures from the textbook rule, each fixing a specific failure:
+
+*Capping* the trail map stops it being winner-take-all. Uncapped, the busiest
+strand reads brightest, out-attracts its neighbours, and within a minute two
+fat strands hold the entire population.
+
+*Food* — weak, slowly drifting attractant sources — is the one that matters
+most. Even capped and well tuned, the network **relaxes**: strands merge, bends
+straighten, and after a few minutes all that is left is motionless vertical
+lines, which are the shortest closed paths a wrapping 64-row canvas admits. No
+decay value fixes that; it is the end state of the tuning rather than a failure
+of it. Foraging forces junctions that relaxation cannot remove, and moving
+sources keep it re-solving.
+
+*Spore batches* nucleate new colonies that grow and fuse while starved branches
+prune. They have to be a batch in one place and facing outward — scattered
+agents just join the nearest strand, and random headings give a trapped orbit
+that shows as permanent confetti.
+
+`--deposit` is expressed as the resulting equilibrium mean trail value, with
+the per-agent amount derived from it, so changing agent count or decay does not
+move the brightness — only the sharpness of pruning. Decay 0.94 is about
+sixteen steps of memory; 0.98 floods to a uniform lit field in twenty seconds
+and 0.85 never organises at all.
+
+The trail is seeded with blurred noise and given a few hundred warmup steps
+inside `build()`, so frame zero is already a network rather than something you
+wait for.
+
+```console
+$ python3 slime.py --agents 24000 --sensor-dist 5 --palette ice
+```
+
+### fireflies
+
+![fireflies](screenshots/fireflies.png)
+
+A field of oscillators that spontaneously synchronise. Each firefly has its own
+natural rate and flashes when its phase wraps; coupling pulls it toward its
+neighbours, and out of that come waves of synchrony that sweep across the panel
+and collide.
+
+Coupling is deliberately **local**, not mean-field. Mean-field is cheaper, but
+the whole field then snaps into unison at once, which is far duller to watch —
+local coupling is what produces travelling waves, and a 5:1 panel is the right
+shape to see them cross. Each phase is splatted as a unit vector into a coarse
+grid, the grid is blurred, and the result sampled back at each position: O(N)
+plus a small blur, with the blur radius acting as the coupling range.
+Normalising by the blurred *count* makes the pull depend on how much a
+neighbourhood agrees rather than how crowded it is, so a synchronised patch
+recruits its border.
+
+Two things keep it from going static, which is the real design problem — a
+fully locked field is as boring as a scattered one. The frequency spread is
+wide enough that full lock is unreachable, and the natural frequencies
+themselves drift, so there is no fixed consensus to converge on: leaders change
+and every truce eventually breaks. Measured over five minutes the global order
+parameter roams 0.08 to 0.84 indefinitely, reaching 0.8 within twenty seconds
+from a cold start, so a short slot still shows the arc. With `--coupling 0` it
+sits at 0.05 and never organises, which is the control worth keeping in mind.
+
+```console
+$ python3 fireflies.py --coupling 2.5 --range 40 --no-grass
+```
+
+### mario
+
+![mario](screenshots/mario.png)
+
+A self-playing side-scrolling platformer: a little plumber runs right through
+an endlessly generated level, jumping pipes and gaps, collecting coins and
+stomping the odd goomba, over three layers of parallax.
+
+Uses 8 px tiles with a two-tile character rather than classic 16 px ones. At
+16 the panel is four tiles: ground plus character leaves under a tile of
+headroom and there is no jump arc at all. At 8 it is eight tiles — one ground,
+two character, five of air — which is what makes a three-tile pipe clearable.
+`--scale 2` gives real 16 px tiles and demonstrates the problem: no pipe
+height passes the clearance test, so the generator emits only gaps.
+
+The level generator is bounded by the physics rather than tuned by hand.
+`build()` derives the airtime and horizontal reach of a jump, then admits an
+obstacle only if the actual trajectory clears it at *both* edges of its span —
+the apex is over the middle, so the edges are the tight part — and leaves more
+than one jump's reach of flat ground between obstacles. That is what stops it
+ever generating something unclearable, which on an unattended wall would strand
+the character hours later.
+
+```console
+$ python3 mario.py --density 0.6 --speed 70 --run-fps 14
+```
+
+### nyancat
+
+![nyancat](screenshots/nyancat.png)
+
+The pop-tart cat, trailing a rainbow through twinkling stars. The sprite lives
+in the source as rows of characters with a palette per character, so it can be
+edited in a diff rather than shipped as an image; moving parts (four tail
+poses, the paws) are separate grids composed into the six loop frames at
+startup and scaled with `np.repeat`.
+
+The sprite animates on its own clock (`--cat-fps`, default 10) rather than the
+display rate — the original is much slower than a display refresh, and tying
+the two together makes it look wrong at any frame rate but one. The trail is
+baked a whole square-wave period wider than the panel, so scrolling it is a
+slice at an offset.
+
+A 320x64 panel is close to the ideal shape for this: the cat sits right of
+centre and the rainbow reaches the far edge.
+
+```console
+$ python3 nyancat.py --cat-x 0.4 --speed 40 --no-stars
+```
+
 ### floor
 
 ![floor](screenshots/floor.png)
