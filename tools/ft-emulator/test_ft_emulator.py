@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for ft-web-server: PPM parsing, layer compositing, and the socket path.
+"""Tests for ft-emulator-server: PPM parsing, layer compositing, and the socket path.
 
-Run with `python3 test_ft_web.py` or under pytest. The end-to-end tests bind
+Run with `python3 test_ft_emulator.py` or under pytest. The end-to-end tests bind
 real sockets on the loopback interface using ephemeral ports.
 """
 
@@ -21,7 +21,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 # The module has a dash in its name, so it cannot be imported normally.
 _spec = importlib.util.spec_from_file_location(
-    "ft_web_server", os.path.join(_HERE, "ft-web-server.py"))
+    "ft_emulator_server", os.path.join(_HERE, "ft-emulator-server.py"))
 ftweb = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ftweb)
 

@@ -8,7 +8,7 @@ re-emits an ANSI escape sequence per character cell per frame and becomes the
 bottleneck well below 60 fps, this stays out of the demo's way and reports what
 the demo is actually achieving.
 
-  ./ft-web-server.py -D 320x64
+  ./ft-emulator-server.py -D 320x64
   # then open http://localhost:8080/ and run a demo against 127.0.0.1:1337
 
 Protocol and compositing are mirrored from the C++ server so that what you see
@@ -416,7 +416,7 @@ def ws_read_loop(client, reader):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "ft-web"
+    server_version = "ft-emulator"
 
     # Injected by make_server().
     hub = None

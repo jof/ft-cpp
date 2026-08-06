@@ -1,10 +1,15 @@
-# ft-web — a browser preview for FlaschenTaschen
+# ft-emulator — a browser emulator for FlaschenTaschen
 
 A FlaschenTaschen server that renders to a `<canvas>` instead of hardware, for
-developing demos without a wall in front of you.
+developing demos without a wall in front of you. It speaks the same UDP
+protocol on the same port, so a demo cannot tell the difference.
+
+(Not to be confused with [ft-web](https://github.com/FlaschenTaschen/ft-web),
+which is the opposite way round: a web app for *sending* content to a real
+wall. This one pretends to *be* the wall.)
 
 ```console
-$ ./ft-web-server.py -D 320x64
+$ ./ft-emulator-server.py -D 320x64
 UDP-server: ready to listen on 1337
 Viewer: http://localhost:8080/   (320x64, 16 layers)
 ```
@@ -24,8 +29,8 @@ Measured here on a 320x64 canvas, driven by `demos/scroller.py`:
 
 | | offered | delivered | frame interval p99 / max | CPU |
 |---|---|---|---|---|
-| ft-web | 60 fps | 60.0 fps | 16.8 / 17.0 ms | — |
-| ft-web | 240 fps | 240.1 fps | 5.1 / 5.2 ms | 8.7% of one core |
+| ft-emulator | 60 fps | 60.0 fps | 16.8 / 17.0 ms | — |
+| ft-emulator | 240 fps | 240.1 fps | 5.1 / 5.2 ms | 8.7% of one core |
 
 118 Mbit/s over loopback at the top end. The preview is not the bottleneck.
 
@@ -101,7 +106,7 @@ with a rising `skipped` count cannot keep up with `--push-fps`.
 ## Tests
 
 ```console
-$ python3 test_ft_web.py
+$ python3 test_ft_emulator.py
 ```
 
 Covers the PPM parser against the cases `ppm-reader.cc` accepts, the
