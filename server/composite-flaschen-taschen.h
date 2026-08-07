@@ -66,6 +66,24 @@ public:
     // Must be called with the writer mutex held.
     void Clear();
 
+    // Copy the visible composite into out[], row-major, width()*height()
+    // entries. This is the flattened result -- what each pixel actually shows
+    // after layering -- and it is reconstructed from the z-buffer on demand
+    // rather than kept as a fourth buffer, so it costs nothing until somebody
+    // asks.
+    //
+    // Reading back from the delegatee would be the other way to do this, but
+    // then every backend would need to grow an accessor, and the double-
+    // buffered ones would have to say which of their two canvases they mean.
+    // The composite already knows which pixel won; it just never said.
+    //
+    // Brightness and blanking are deliberately NOT applied here: those live in
+    // the backend, and the control socket's `get` already reports them. This is
+    // the content. What the panel does with it is a separate question.
+    //
+    // Must be called with the writer mutex held.
+    void Snapshot(Color *out) const;
+
 private:
     typedef int Ticks;
     class ScreenBuffer;

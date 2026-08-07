@@ -236,3 +236,21 @@ void CompositeFlaschenTaschen::Clear() {
     // itself is a no-op unless a visible pixel actually changed.
     Send();
 }
+
+void CompositeFlaschenTaschen::Snapshot(Color *out) const {
+    const Color black(0, 0, 0);
+    if (screens_.empty()) {          // constructed with zero layers
+        for (int i = 0; i < width_ * height_; ++i) out[i] = black;
+        return;
+    }
+    // Row-major, to stride with the layer and z-buffer storage the same way
+    // ClearLayer() does. One z-buffer load and one layer load per pixel: no
+    // walk down the stack, because the z-buffer already names the layer that
+    // won, and SetPixelAtLayer() maintains the invariant that it names an
+    // allocated one.
+    for (int y = 0; y < height_; ++y) {
+        for (int x = 0; x < width_; ++x) {
+            out[y * width_ + x] = screens_[z_buffer_->At(x, y)]->At(x, y);
+        }
+    }
+}

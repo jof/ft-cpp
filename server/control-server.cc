@@ -29,6 +29,24 @@
 //   $ echo "brightness 40" | nc -U /run/ft/control.sock
 //   ok
 //
+// One command answers with pixels rather than words. `snapshot` writes the
+// header in the same shape as the rest -- lines, then a blank one -- and then
+// exactly the number of bytes it just announced:
+//
+//   snapshot rgb24 320 64 61440
+//   brightness 98
+//   blanked 1
+//   dimmer 1
+//   generation 1786078494
+//
+//   <61440 bytes of RGB, row-major, no padding>
+//
+// The point is a status display that can show what is actually on the wall
+// instead of a stock picture of what is supposed to be. Note `blanked` in the
+// header: the composite keeps its content while the panel is dark, so a client
+// that ignores that field will cheerfully render a bright frame for a wall
+// nobody can see anything on.
+//
 // One command per connection, like HTTP/1.0 and for the same reason: there is
 // then no session to keep, no half-read line to remember, and a client that
 // connects and says nothing is bounded by the receive timeout rather than
@@ -43,6 +61,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +71,8 @@
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <vector>
 
 #include "composite-flaschen-taschen.h"
 #include "ft-thread.h"
@@ -119,17 +140,39 @@ private:
         if (end) *end = '\0';
 
         char reply[512];
-        Dispatch(buffer, reply, sizeof(reply));
+        std::vector<uint8_t> payload;    // pixels, for the commands that have any
+        Dispatch(buffer, reply, sizeof(reply), &payload);
         // Best effort: a client that hung up before reading is not our
         // problem, and MSG_NOSIGNAL keeps it from being fatal.
-        send(fd, reply, strlen(reply), MSG_NOSIGNAL);
+        if (!SendAll(fd, reply, strlen(reply))) return;
+        if (!payload.empty()) SendAll(fd, &payload[0], payload.size());
+    }
+
+    // strlen(reply) has always fit in one send(); 60 kB of pixels will not, and
+    // a short write there would hand the client a truncated frame that still
+    // parses. Loops until done, or until the send timeout gives up on a client
+    // that asked for a frame and then stopped reading.
+    static bool SendAll(int fd, const void *data, size_t len) {
+        const uint8_t *p = (const uint8_t *) data;
+        while (len > 0) {
+            const ssize_t n = send(fd, p, len, MSG_NOSIGNAL);
+            if (n > 0) {
+                p += n;
+                len -= n;
+                continue;
+            }
+            if (n < 0 && errno == EINTR) continue;
+            return false;                // hung up, or timed out mid-frame
+        }
+        return true;
     }
 
     // Everything below runs with the mutex held for as short as possible, and
     // never across a syscall on the client's socket. Holding it around a read
     // would let anything that can open the socket stop the display simply by
     // connecting and going quiet.
-    void Dispatch(const char *line, char *reply, size_t reply_size) {
+    void Dispatch(const char *line, char *reply, size_t reply_size,
+                  std::vector<uint8_t> *payload) {
         const char *arg = strchr(line, ' ');
         while (arg && *arg == ' ') ++arg;
 
@@ -192,6 +235,55 @@ private:
             }
             snprintf(reply, reply_size, ok
                      ? "ok\n" : "err this display cannot blank\n");
+            return;
+        }
+
+        if (strcmp(line, "snapshot") == 0) {
+            // A header in the same shape as `get` -- lines, then a blank one --
+            // followed by exactly `bytes` of RGB. Self-describing so that a
+            // client never has to assume the panel's geometry, and carrying
+            // brightness and blanked alongside the pixels so that whoever
+            // renders this cannot pair a frame with a contradicting state it
+            // read a moment earlier.
+            // Geometry is fixed for the life of the display, so it can be read
+            // without the lock -- and it has to be, because both buffers below
+            // are sized from it and allocating under the writer mutex would
+            // stall the frame path on the allocator for no reason.
+            const int width = display_->width();
+            const int height = display_->height();
+            const size_t count = (size_t) width * height;
+            std::vector<Color> pixels(count);
+            payload->resize(count * 3);
+
+            int brightness;
+            bool blanked, dimmer;
+            {
+                ft::MutexLock l(mutex_);
+                brightness = backend_->global_brightness();
+                blanked = backend_->blanked();
+                dimmer = backend_->SupportsGlobalDimmer();
+                // Copied, not referenced: the writer threads own these buffers
+                // and will keep painting them the moment we let go. Under the
+                // same lock as the state above so the frame and the state
+                // describing it cannot disagree.
+                display_->Snapshot(&pixels[0]);
+            }
+            // Widening to bytes is nobody else's business, so it happens after
+            // the lock is dropped.
+            for (size_t i = 0; i < count; ++i) {
+                (*payload)[i * 3 + 0] = pixels[i].r;
+                (*payload)[i * 3 + 1] = pixels[i].g;
+                (*payload)[i * 3 + 2] = pixels[i].b;
+            }
+            snprintf(reply, reply_size,
+                     "snapshot rgb24 %d %d %zu\n"
+                     "brightness %d\n"
+                     "blanked %d\n"
+                     "dimmer %d\n"
+                     "generation %ld\n"
+                     "\n",
+                     width, height, payload->size(),
+                     brightness, blanked ? 1 : 0, dimmer ? 1 : 0, generation);
             return;
         }
 
