@@ -17,9 +17,25 @@ The expensive facts -- systemctl, vcgencmd -- are refreshed at most once a minut
 and cached, so a burst of effect changes does not drag a subprocess along behind
 each one.
 
-The picture is the *preview* of what is playing, half-block rendered at the
-wall's own 5:1 aspect. It is not a capture of the panel: only ft_server knows the
-composite and it does not hand it out. The caption says so.
+The picture is the wall itself: ft_server's `snapshot` hands back the composite
+as raw RGB, and it is box-averaged down and drawn in half-blocks at the wall's
+own 5:1 aspect. It used to be a stock preview clip of whichever effect was
+playing, which was cheap and looked right and was capable of being badly wrong
+-- the daliclock preview was recorded at 19:51 one evening, so anybody logging
+in while the clock was up saw a wall confidently displaying 7pm. A picture of
+the wall cannot drift from the wall.
+
+Two things the frame is not. It is the *content*, so a blanked panel still has
+one: `blanked` comes back in the same reply and a dark wall is drawn as a ghost
+of what is behind it, captioned as such, rather than as a lit picture of a wall
+that is off. And it is only as fresh as the last repaint, so unlike everything
+else here the picture does get a timer -- MOTD_PICTURE_TTL, below. A frame from
+a few seconds ago is a capture; a frame from twenty minutes ago is a fib. The
+caption carries its age either way.
+
+Downsampling is done in Python rather than with Pillow on purpose: Pillow costs
+the better part of a second to import on this Pi, against a few tens of
+milliseconds of arithmetic for 20k pixels a couple of times a minute.
 
 It reaches a login through /etc/motd, which is a symlink to the rendered file.
 That is the one path pam_motd takes on every interactive session
@@ -53,6 +69,17 @@ ART_WIDTH = 62                    # columns
 ART_ROWS = ART_WIDTH // 10        # two pixels per row, so W/(2*ROWS) == 5:1
 EXTRAS_TTL = 60.0                 # seconds to cache systemctl/vcgencmd
 SERVICES = ("ft_server", "ftsched", "ftctl", "nginx")
+
+# How stale the picture may get before it is worth a repaint on its own. The
+# rest of this file repaints only on a change a person would notice; a frame of
+# the wall goes out of date quietly, all by itself, which is the one thing here
+# that actually justifies a timer.
+MOTD_PICTURE_TTL = 30.0
+# What a blanked panel is drawn at. Not zero, because six rows of pure black
+# reads as a broken banner rather than a dark wall, and the frame underneath is
+# worth seeing; not anywhere near full, because the wall is off and the picture
+# must not suggest otherwise. The caption is what actually says so.
+BLANKED_GHOST = 0.14
 
 
 def rgb(colour, text, bold=False):
@@ -111,62 +138,88 @@ class Extras(object):
 
 # -- the picture -----------------------------------------------------------
 
-def art(demo, previews, cache_dir):
-    """Half-block render of an effect's preview, cached on disk by name."""
-    if not demo:
-        return None
-    safe = "".join(c for c in demo if c.isalnum() or c in "-_")
-    if not safe:
-        return None
-    cached = os.path.join(cache_dir, safe + ".ansi") if cache_dir else None
-    if cached:
-        try:
-            with open(cached) as fh:
-                return fh.read()
-        except OSError:
-            pass
+def downsample(pixels, width, height, out_w, out_h):
+    """Box-average raw RGB down to out_w x out_h, as a grid of (r, g, b).
 
-    path = os.path.join(previews, safe + ".webp")
+    Averaging rather than sampling, because the wall is mostly small bright
+    things on black: one sample per cell drops a 3-pixel-wide clock hand
+    entirely and turns a starfield into an empty box, while the average keeps a
+    dim smudge where the light actually is.
+
+    Every input pixel is visited exactly once, and the bounds are computed so
+    that the cells tile the frame with no gaps and no overlap even when the
+    sizes do not divide evenly.
+    """
+    grid = []
+    for oy in range(out_h):
+        y0 = oy * height // out_h
+        y1 = max(y0 + 1, (oy + 1) * height // out_h)
+        row = []
+        for ox in range(out_w):
+            x0 = ox * width // out_w
+            x1 = max(x0 + 1, (ox + 1) * width // out_w)
+            r = g = b = 0
+            for y in range(y0, y1):
+                base = y * width * 3
+                for i in range(base + x0 * 3, base + x1 * 3, 3):
+                    r += pixels[i]
+                    g += pixels[i + 1]
+                    b += pixels[i + 2]
+            n = (y1 - y0) * (x1 - x0)
+            row.append((r // n, g // n, b // n))
+        grid.append(row)
+    return grid
+
+
+def art(snap):
+    """Half-block render of the frame ft_server just handed back.
+
+    Returns (picture, caption) or (None, None). The caption is part of the job:
+    the same pixels mean different things depending on whether the panel is
+    lit, and the picture cannot say which on its own.
+    """
+    if not snap or not snap.get("pixels"):
+        return None, None
+    width, height = snap.get("width"), snap.get("height")
+    if not width or not height:
+        return None, None
     try:
-        # Imported here rather than at module scope: Pillow costs the better
-        # part of a second to import on this Pi, and a caller that never needs
-        # a picture should not pay for one.
-        from PIL import Image
-        with Image.open(path) as img:
-            img.seek(0)                      # first frame of the animation
-            frame = img.convert("RGB").resize((ART_WIDTH, ART_ROWS * 2),
-                                              Image.BILINEAR)
-        px = frame.load()
-    except Exception:
-        return None
+        grid = downsample(snap["pixels"], width, height,
+                          ART_WIDTH, ART_ROWS * 2)
+    except (IndexError, ZeroDivisionError, TypeError):
+        return None, None                    # a frame we cannot make sense of
+
+    blanked = snap.get("blanked")
+    scale = BLANKED_GHOST if blanked else 1.0
 
     rows = []
     for row in range(ART_ROWS):
         cells = []
         for col in range(ART_WIDTH):
-            top = px[col, row * 2]
-            low = px[col, row * 2 + 1]
+            top = grid[row * 2][col]
+            low = grid[row * 2 + 1][col]
             # An upper half-block with the foreground painting the top pixel and
             # the background the bottom: one cell, two pixels, square aspect.
             cells.append("\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm▀"
-                         % (top[0], top[1], top[2], low[0], low[1], low[2]))
+                         % (int(top[0] * scale), int(top[1] * scale),
+                            int(top[2] * scale),
+                            int(low[0] * scale), int(low[1] * scale),
+                            int(low[2] * scale)))
         rows.append("".join(cells) + "\x1b[0m")
-    rendered = "\n".join(rows)
 
-    if cached:
-        try:
-            os.makedirs(cache_dir, exist_ok=True)
-            with open(cached + ".tmp", "w") as fh:
-                fh.write(rendered)
-            os.replace(cached + ".tmp", cached)
-        except OSError:
-            pass                             # an unwritable cache still renders
-    return rendered
+    age = max(0.0, time.time() - (snap.get("at") or 0.0))
+    when = "just now" if age < 2.0 else "%ds ago" % int(age)
+    if blanked:
+        caption = ("↑ the panel is dark · this is the frame behind the blank, "
+                   "dimmed · %s" % when)
+    else:
+        caption = "↑ the panel itself, %s · %d×%d" % (when, width, height)
+    return "\n".join(rows), caption
 
 
 # -- the banner ------------------------------------------------------------
 
-def render(display, sched, extras, previews, cache_dir, urls):
+def render(display, sched, extras, urls, snap=None):
     now = (sched or {}).get("now") or {}
     health = (sched or {}).get("health") or {}
     demo = now.get("name")
@@ -187,12 +240,11 @@ def render(display, sched, extras, previews, cache_dir, urls):
                rgb(GREY, size + " · flaschen taschen"))
     out.append("")
 
-    picture = art(demo, previews, cache_dir)
+    picture, caption = art(snap)
     if picture:
         for line in picture.split("\n"):
             out.append(pad + line)
-        out.append(pad + rgb(GREY, "↑ preview of the effect playing, not a "
-                                   "capture of the panel"))
+        out.append(pad + rgb(GREY, caption))
         out.append("")
 
     if display is None:
@@ -276,13 +328,15 @@ def write(path, text):
 class Writer(object):
     """An ftctl listener: repaint when what a person would see has changed."""
 
-    def __init__(self, path, previews, cache_dir, urls):
+    def __init__(self, path, urls, snapshot_fn=None,
+                 picture_ttl=MOTD_PICTURE_TTL):
         self.path = path
-        self.previews = previews
-        self.cache_dir = cache_dir
         self.urls = urls
+        self.snapshot_fn = snapshot_fn
+        self.picture_ttl = picture_ttl
         self.extras = Extras()
         self._key = None
+        self._painted = 0.0
 
     def update(self, display, sched):
         now = (sched or {}).get("now") or {}
@@ -291,21 +345,36 @@ class Writer(object):
                now.get("name"), (sched or {}).get("paused"),
                display is None, sched is None)
         refresh_extras = self.extras.stale()
-        if key == self._key and not refresh_extras:
+        # The picture ages on its own, with nothing in `key` to show it. Without
+        # this, a long effect would leave a banner showing its opening frame for
+        # as long as it ran, which is the class of bug that got the stock
+        # previews replaced in the first place.
+        stale_picture = (self.snapshot_fn is not None and
+                         time.time() - self._painted >= self.picture_ttl)
+        if key == self._key and not refresh_extras and not stale_picture:
             return False
         if refresh_extras:
             self.extras.refresh()
+
+        snap = None
+        if self.snapshot_fn is not None:
+            try:
+                snap = self.snapshot_fn()
+            except Exception as exc:      # a missing picture is not a reason
+                sys.stderr.write("ftmotd: no snapshot (%s)\n" % exc)
+
         self._key = key
-        write(self.path, render(display, sched, self.extras, self.previews,
-                                self.cache_dir, self.urls))
+        self._painted = time.time()
+        write(self.path, render(display, sched, self.extras, self.urls, snap))
         return True
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--ftctl", default="http://127.0.0.1:8082/api/display")
-    ap.add_argument("--previews", default="/home/pi/ft-cpp/demos/previews")
-    ap.add_argument("--cache", default="/run/ft-motd")
+    ap.add_argument("--socket", default="/run/ft/control.sock",
+                    help="ft_server's control socket, for the picture; '' to "
+                         "render without one")
     ap.add_argument("--lan", default="http://betelgeuse.local/")
     ap.add_argument("--tailnet", default="")
     ap.add_argument("--out", default=None, help="write here instead of stdout")
@@ -318,11 +387,21 @@ def main():
     except Exception:
         state = {"display": None, "scheduler": None}
 
+    # Straight to the control socket rather than through ftctl: ftctl's HTTP API
+    # deliberately serves a cache and 61 kB of pixels do not belong in it. The
+    # import is here rather than at the top because ftctl imports this module.
+    snap = None
+    if args.socket:
+        try:
+            import ftctl
+            snap = ftctl.Control(args.socket).snapshot()
+        except Exception as exc:
+            sys.stderr.write("ftmotd: no snapshot (%s)\n" % exc)
+
     extras = Extras()
     extras.refresh()
     text = render(state.get("display"), state.get("scheduler"), extras,
-                  args.previews, args.cache,
-                  {"lan": args.lan, "tailnet": args.tailnet})
+                  {"lan": args.lan, "tailnet": args.tailnet}, snap)
     if args.out:
         write(args.out, text)
     else:

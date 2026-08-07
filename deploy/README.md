@@ -252,6 +252,17 @@ Nothing is computed at login. Asking the wall for its status at every prompt cos
 fails well: `RuntimeDirectory` removes the file with the daemon, so a box with no
 `ftctl` prints nothing rather than something stale.
 
+The picture in the banner is the wall itself, from the control socket's
+`snapshot` command, not a stock clip of whichever effect is playing. That
+distinction is worth the round trip: the old preview for `daliclock` had been
+recorded at 19:51, so anybody logging in while the clock was up was shown a wall
+apparently displaying 7pm, at any hour of the day. Because the frame goes stale
+on its own with nothing in the state to show it, this is the one thing here on a
+timer -- `--motd-picture-ttl`, 30 seconds by default, `0` to repaint only on
+state changes. A blanked panel is drawn as a dimmed ghost of the frame behind
+the blank and captioned as dark, rather than as a lit picture of a wall that is
+off.
+
 ```sh
 python3 demos/ftmotd.py                    # render to stdout to see it
 ```

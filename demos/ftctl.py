@@ -57,6 +57,13 @@ SOCKET_TIMEOUT = 2.0
 SCHED_TIMEOUT = 2.0
 POLL_SECONDS = 1.0
 
+# A snapshot header is five short lines; anything longer is not one, and saying
+# so keeps a confused server from being able to make us buffer without end.
+MAX_SNAPSHOT_HEADER = 4096
+# 320x64 is 61 kB. The ceiling is for a garbled length field, not for a panel
+# anybody actually has: refusing to allocate on it is the whole point.
+MAX_SNAPSHOT_BYTES = 8 << 20
+
 # Brightness the wall reports in percent, 1..100. Home Assistant lights want
 # 0..255. Converting in one place, and rounding so that a round trip through
 # HA does not drift a percent at a time.
@@ -133,6 +140,67 @@ class Control(object):
         if reply == "ok":
             return True, ""
         return False, reply[4:].strip() if reply.startswith("err ") else reply
+
+    def snapshot(self):
+        """The composite as raw RGB, with the state that goes with it, or None.
+
+        Its own round trip rather than a field in `get`: this is 61 kB, `get`
+        runs once a second, and the only caller repaints a banner a few times a
+        minute. Paying for the pixels on every poll to have them ready for the
+        rare reader would be exactly backwards.
+
+        `blanked` and `brightness` come back in the same reply as the frame,
+        because they are what decides whether the frame is being shown at all
+        and pairing pixels with separately-read state is how a status display
+        ends up cheerfully rendering a bright picture of a dark wall.
+        """
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(SOCKET_TIMEOUT)
+        try:
+            sock.connect(self.path)
+            sock.sendall(b"snapshot\n")
+            buf = b""
+            while b"\n\n" not in buf:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    return None                  # hung up before the header
+                buf += chunk
+                if len(buf) > MAX_SNAPSHOT_HEADER:
+                    return None
+            header, _, body = buf.partition(b"\n\n")
+            lines = header.decode("ascii", "replace").splitlines()
+            fields = lines[0].split() if lines else []
+            # snapshot rgb24 <width> <height> <bytes>
+            if len(fields) != 5 or fields[0] != "snapshot" \
+                    or fields[1] != "rgb24":
+                return None                      # an older server, or an error
+            width, height, count = (int(fields[2]), int(fields[3]),
+                                    int(fields[4]))
+            if width <= 0 or height <= 0 or count != width * height * 3 \
+                    or count > MAX_SNAPSHOT_BYTES:
+                return None
+            while len(body) < count:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    return None                  # truncated mid-frame
+                body += chunk
+            state = {}
+            for row in lines[1:]:
+                key, _, value = row.partition(" ")
+                try:
+                    state[key] = int(value)
+                except ValueError:
+                    pass
+            return {"width": width, "height": height,
+                    "brightness": state.get("brightness"),
+                    "blanked": bool(state.get("blanked")),
+                    "generation": state.get("generation"),
+                    "pixels": body[:count],
+                    "at": time.time()}
+        except (socket.error, OSError, ValueError):
+            return None
+        finally:
+            sock.close()
 
 
 class Scheduler(object):
@@ -414,11 +482,13 @@ class Handler(BaseHTTPRequestHandler):
     def _thumbnail(self):
         """A PNG of the demo currently playing.
 
-        This is the preview of what is on rather than a capture of the panel:
-        only ft_server knows the composite, and it does not hand it out yet. It
-        is labelled accordingly in Home Assistant. Cached by name, because
-        Home Assistant will ask for it about once a second and converting the
-        same file each time on a Pi 3 is a waste.
+        Still the stock preview of what is on rather than a capture of the
+        panel, and labelled accordingly in Home Assistant. The control socket
+        can hand back the real composite now (see Control.snapshot, which is
+        what the login banner draws), but Home Assistant asks for this about
+        once a second, and 61 kB off the socket plus a PNG encode at that rate
+        is a different bargain from a banner repainted twice a minute. Cached by
+        name for the same reason.
         """
         sched = self.server.bridge.snapshot()["scheduler"]
         name = (sched or {}).get("now", {}).get("name")
@@ -510,6 +580,10 @@ def main():
                     help="render the login banner here whenever the state a "
                          "person would notice changes; see ftmotd.py for why "
                          "this is not computed at login time")
+    ap.add_argument("--motd-picture-ttl", type=float, default=30.0,
+                    help="seconds before the frame in the banner is stale "
+                         "enough to be worth a repaint on its own; 0 pins it "
+                         "to state changes only")
     ap.add_argument("--motd-lan-url", default="http://betelgeuse.local/")
     ap.add_argument("--motd-tailnet-url", default="")
     ap.add_argument("--public-url", default=None,
@@ -536,14 +610,17 @@ def main():
 
     if args.motd_file:
         import ftmotd
-        writer = ftmotd.Writer(args.motd_file, args.previews,
-                              os.path.dirname(args.motd_file) or "/run/ft-motd",
-                              {"lan": args.motd_lan_url,
-                               "tailnet": args.motd_tailnet_url})
+        writer = ftmotd.Writer(args.motd_file,
+                               {"lan": args.motd_lan_url,
+                                "tailnet": args.motd_tailnet_url},
+                               snapshot_fn=control.snapshot,
+                               picture_ttl=args.motd_picture_ttl)
 
         def repaint_motd():
-            snap = bridge.snapshot()
-            writer.update(snap["display"], snap["scheduler"])
+            # bridge.snapshot() is the cached state; the picture is fetched by
+            # the writer itself, and only when it has decided to repaint.
+            state = bridge.snapshot()
+            writer.update(state["display"], state["scheduler"])
 
         bridge.add_listener(repaint_motd)
 
