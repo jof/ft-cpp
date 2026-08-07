@@ -42,11 +42,13 @@ import argparse
 import json
 import os
 import socket
+import struct
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+import zlib
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -63,6 +65,62 @@ MAX_SNAPSHOT_HEADER = 4096
 # 320x64 is 61 kB. The ceiling is for a garbled length field, not for a panel
 # anybody actually has: refusing to allocate on it is the whole point.
 MAX_SNAPSHOT_BYTES = 8 << 20
+
+# How old the picture Home Assistant is shown may be. HA polls an image entity
+# about once a second; this decouples what it costs us from how often it asks,
+# and from how many dashboards are asking.
+THUMBNAIL_TTL = 2.0
+# Deflate level for that PNG. A wall frame is mostly black and compresses hard
+# whatever we ask for, so this buys speed with bytes nobody misses: level 1 on a
+# 320x64 frame is several times quicker than level 6 and lands within a few kB.
+PNG_LEVEL = 1
+_BLANKED_TABLE = None
+
+
+def blanked_table():
+    """Byte map for dimming a blanked frame, cached, from ftmotd's own constant.
+
+    One definition of how dark "dark" looks, so Home Assistant and a terminal
+    cannot disagree about it. Imported lazily and in this direction only --
+    ftctl already reaches for ftmotd to render the banner, and ftmotd importing
+    ftctl at module scope would load a second copy of this module whenever
+    ftctl is the one being run as a script.
+
+    A 256-entry table because translate() is then one pass in C; a Python loop
+    over 61 kB, twice a second, is not free on this Pi.
+    """
+    global _BLANKED_TABLE
+    if _BLANKED_TABLE is None:
+        import ftmotd
+        _BLANKED_TABLE = bytes(int(i * ftmotd.BLANKED_GHOST)
+                               for i in range(256))
+    return _BLANKED_TABLE
+
+
+def encode_png(width, height, rgb, level=PNG_LEVEL):
+    """A truecolour PNG from raw RGB, using nothing but the standard library.
+
+    Pillow would do this too, and is what the baked previews still go through,
+    but it costs the better part of a second to import on this Pi and this path
+    wants to be quick and dependency-free. A PNG is four chunks and a CRC; the
+    per-row filter byte is 0 (None) throughout, because deflate already does
+    very well on a frame that is mostly black and picking filters per row would
+    cost more than it saves here.
+    """
+    stride = width * 3
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)                        # filter: None
+        raw += rgb[y * stride:(y + 1) * stride]
+
+    def chunk(tag, data):
+        return (struct.pack(">I", len(data)) + tag + data +
+                struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff))
+
+    return (b"\x89PNG\r\n\x1a\n" +
+            chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)) +
+            chunk(b"IDAT", zlib.compress(bytes(raw), level)) +
+            chunk(b"IEND", b""))
 
 # Brightness the wall reports in percent, 1..100. Home Assistant lights want
 # 0..255. Converting in one place, and rounding so that a round trip through
@@ -509,24 +567,20 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, bridge.snapshot())
 
     def _thumbnail(self):
-        """A PNG of the demo currently playing.
+        """A PNG of the wall as it is right now.
 
-        Still the stock preview of what is on rather than a capture of the
-        panel, and labelled accordingly in Home Assistant. The control socket
-        can hand back the real composite now (see Control.snapshot, which is
-        what the login banner draws), but Home Assistant asks for this about
-        once a second, and 61 kB off the socket plus a PNG encode at that rate
-        is a different bargain from a banner repainted twice a minute. Cached by
-        name for the same reason.
+        The real composite, off the control socket, same as the login banner
+        draws -- so Home Assistant and a terminal cannot show different walls.
+
+        Served regardless of whether ftsched claims something is playing: the
+        panel has pixels on it either way, and a wall being painted by a client
+        with the rotation stopped is exactly when a picture is worth having.
+        Falls back to the baked preview only when there is no snapshot to be
+        had, which means an older server or a socket that has gone away.
         """
-        sched = self.server.bridge.snapshot()["scheduler"]
-        name = (sched or {}).get("now", {}).get("name")
-        if not name:
-            self._send(404, "nothing playing\n", "text/plain")
-            return
-        png = self.server.thumbnail(name)
+        png = self.server.screen_png()
         if png is None:
-            self._send(404, "no preview for %s\n" % name, "text/plain")
+            self._send(404, "no picture available\n", "text/plain")
             return
         self._send(200, png, "image/png")
 
@@ -536,14 +590,57 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = True
     timeout = 30
 
-    def __init__(self, addr, bridge, previews):
+    def __init__(self, addr, bridge, previews, thumbnail_ttl=THUMBNAIL_TTL):
         ThreadingHTTPServer.__init__(self, addr, Handler)
         self.bridge = bridge
         self.previews = previews
+        self.thumbnail_ttl = thumbnail_ttl
+        self._screen_lock = threading.Lock()
+        self._screen_png = None
+        self._screen_at = 0.0
         self._thumb_name = None
         self._thumb_png = None
 
+    def screen_png(self):
+        """The wall as a PNG, at most thumbnail_ttl seconds old.
+
+        Home Assistant polls this about once a second and this is a Pi that is
+        usually voltage-throttled, so the TTL is the whole design: without it,
+        every poll would be a 61 kB socket read and a deflate. With it, the cost
+        is bounded no matter how many things are watching -- three dashboards
+        open on the same wall cost exactly what one does.
+
+        The lock makes that promise hold under ThreadingHTTPServer: without it,
+        N simultaneous pollers all miss the cache and all go to the socket, which
+        is the stampede the TTL exists to prevent.
+        """
+        now = time.time()
+        with self._screen_lock:
+            if self._screen_png is not None and \
+                    now - self._screen_at < self.thumbnail_ttl:
+                return self._screen_png
+            png = self._render_screen()
+            if png is not None:
+                self._screen_png, self._screen_at = png, now
+            return png
+
+    def _render_screen(self):
+        snap = self.bridge.control.snapshot()
+        if snap is None:
+            # No snapshot: an older ft_server, or the socket has gone. Fall back
+            # to the baked preview so Home Assistant keeps showing something.
+            sched = self.bridge.snapshot()["scheduler"]
+            name = (sched or {}).get("now", {}).get("name")
+            return self.thumbnail(name) if name else None
+        pixels = snap["pixels"]
+        if snap.get("blanked"):
+            # The same dimming the login banner uses, so the two agree about
+            # what a dark wall looks like.
+            pixels = pixels.translate(blanked_table())
+        return encode_png(snap["width"], snap["height"], pixels)
+
     def thumbnail(self, name):
+        """The baked preview clip for an effect. Only a fallback now."""
         if name == self._thumb_name:
             return self._thumb_png
         png = None
@@ -583,7 +680,12 @@ def main():
     ap.add_argument("--scheduler", default="http://127.0.0.1:8081",
                     help="ftsched's base URL; absence is handled, not fatal")
     ap.add_argument("--previews", default=os.path.join(_HERE, "previews"),
-                    help="where the baked demo previews live")
+                    help="baked demo previews; only a fallback for the picture "
+                         "now that the panel itself can be captured")
+    ap.add_argument("--thumbnail-ttl", type=float, default=THUMBNAIL_TTL,
+                    help="seconds to reuse the captured PNG of the wall before "
+                         "taking another; caps what Home Assistant's polling "
+                         "costs, however many dashboards are open")
     ap.add_argument("--state-file", default="/var/lib/ftctl/desired.json",
                     help="remembered brightness and on/off; '' to not persist")
     ap.add_argument("--no-pause-when-off", dest="pause_when_off",
@@ -635,7 +737,7 @@ def main():
     bridge = Bridge(control, scheduler, desired, args.pause_when_off)
 
     host, port = parse_addr(args.listen)
-    httpd = Server((host, port), bridge, args.previews)
+    httpd = Server((host, port), bridge, args.previews, args.thumbnail_ttl)
 
     if args.motd_file:
         import ftmotd

@@ -130,7 +130,17 @@ as one device rather than eight loose entities.
 | `select` Demo | jump to a named effect |
 | `button` Next | advance the rotation |
 | `sensor` Now playing, Frame rate | what is on, and how it is doing |
-| `image` Now playing | a picture of it |
+| `image` Screen | a capture of the panel itself |
+
+The `image` entity is the real composite off the control socket, the same frame
+the login banner draws, so Home Assistant and a terminal cannot show different
+walls. Home Assistant polls an image entity roughly once a second, so the
+capture is cached for `--thumbnail-ttl` seconds (2 by default) and the cost is
+one capture per window no matter how many dashboards are watching — about 25 ms
+of Pi to take a frame and deflate it. A blanked panel is dimmed the same way the
+banner dims it. If the snapshot cannot be had at all — an older `ft_server`, or
+the socket gone — it falls back to the baked preview clip for whatever is
+playing.
 
 On/off and brightness are separate channels and **off is never brightness 0** —
 which is what AWTRIX and WLED both settled on, because people expect off to

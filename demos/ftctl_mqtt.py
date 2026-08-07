@@ -437,11 +437,12 @@ class MqttBridge(object):
         }
         if args.public_url:
             components["screen"] = {
-                # The preview of what is playing, not a capture of the panel --
-                # only ft_server knows the composite and it does not hand it
-                # out. Named for what it actually is.
+                # A capture of the panel as it is, not a stock clip of the
+                # effect: ft_server hands the composite out on the control
+                # socket now. The baked preview is still the fallback when it
+                # cannot, so the name has to be true of both.
                 "p": "image",
-                "name": "Now playing",
+                "name": "Screen",
                 "unique_id": self.node + "_screen",
                 "url_topic": self.t("screen"),
                 "availability": sched_availability,
