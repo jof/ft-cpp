@@ -375,6 +375,7 @@ class Bridge(object):
         generation = display.get("generation")
         first_sight = self._generation is None
         if generation == self._generation:
+            self._adopt(display)
             return
         self._generation = generation
         if first_sight and self.desired.brightness is None:
@@ -388,6 +389,34 @@ class Bridge(object):
         if self.desired.blanked != display.get("blanked"):
             self.control.command(
                 "blank %s" % ("on" if self.desired.blanked else "off"))
+
+    def _adopt(self, display):
+        """Take the display's word for it when it changed without us.
+
+        The control socket is world-writable and documented as such, so
+        `ftc.py blank on` from a shell, or anything else local, is a legitimate
+        way to change the wall. What is not legitimate is what used to happen
+        next: `desired` kept saying the wall was on, Home Assistant kept showing
+        it on, and the banner kept reporting the remembered state instead of the
+        real one -- until the next restart of ft_server, when the stale desire
+        was helpfully re-applied and turned the wall back on by itself.
+
+        So an observed change with the same generation is adopted rather than
+        fought. Reconciling instead -- pushing `desired` back every poll --
+        would make ftctl undo any direct command within a second, which turns a
+        documented interface into a race.
+        """
+        changed = False
+        if display.get("brightness") is not None and \
+                display["brightness"] != self.desired.brightness:
+            self.desired.brightness = display["brightness"]
+            changed = True
+        if bool(display.get("blanked")) != bool(self.desired.blanked):
+            self.desired.blanked = bool(display.get("blanked"))
+            changed = True
+        # Only on a real change: this runs once a second, on an SD card.
+        if changed:
+            self.desired.save()
 
 
 # -- HTTP ------------------------------------------------------------------
