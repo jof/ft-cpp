@@ -3,9 +3,10 @@
     {
       "kind": "py",
       "name": "console",
+      "module": "console",
       "seconds": 40,
       "fps": 30,
-      "ms": 0.7,
+      "ms": 0.9,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -13,10 +14,11 @@
     {
       "kind": "py",
       "name": "fireworks",
+      "module": "fireworks",
       "seconds": 45.0,
-      "fps": 24,
+      "fps": 20,
+      "ms": 36.5,
       "enabled": true,
-      "ms": 33.7,
       "solo": false,
       "options": {
         "rate": 3
@@ -25,56 +27,67 @@
     {
       "kind": "py",
       "name": "wopr",
+      "module": "wopr",
       "seconds": 45.0,
       "fps": 30,
-      "ms": 6.0,
+      "ms": 6.1,
       "enabled": true,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
       "name": "defcon",
+      "module": "defcon",
       "seconds": 80.0,
       "fps": 30,
-      "ms": 25.7,
+      "ms": 19.9,
       "enabled": true,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
       "name": "boing",
+      "module": "boing",
       "seconds": 45.0,
       "fps": 60,
+      "ms": 3.5,
       "enabled": true,
-      "ms": 2.0,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
       "name": "karl",
+      "module": "karl",
       "seconds": 45.0,
-      "fps": 24,
+      "fps": 20,
+      "ms": 33.9,
       "enabled": true,
-      "ms": 32.7,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
       "name": "cycle",
+      "module": "cycle",
       "seconds": 45.0,
       "fps": 60,
+      "ms": 3.0,
       "enabled": true,
-      "ms": 2.2,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
       "name": "water",
+      "module": "water",
       "seconds": 45.0,
-      "fps": 20,
+      "fps": 12,
+      "ms": 57.0,
       "enabled": true,
-      "ms": 45.8,
-      "solo": false,
+      "solo": true,
       "options": {
         "drops": 4
       }
@@ -85,7 +98,7 @@
       "module": "pixelart",
       "seconds": 30,
       "fps": 60,
-      "ms": 3.1,
+      "ms": 4.0,
       "enabled": true,
       "solo": false,
       "options": {
@@ -100,10 +113,11 @@
     {
       "kind": "py",
       "name": "metaballs",
+      "module": "metaballs",
       "seconds": 45.0,
       "fps": 24,
+      "ms": 26.7,
       "enabled": true,
-      "ms": 29.0,
       "solo": false,
       "options": {
         "palette": "magma"
@@ -112,18 +126,45 @@
     {
       "kind": "py",
       "name": "knit",
+      "module": "knit",
       "seconds": 45.0,
       "fps": 60,
+      "ms": 4.6,
       "enabled": true,
-      "ms": 4.5,
-      "solo": false
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "sort",
+      "module": "sort",
+      "seconds": 45.0,
+      "fps": 60,
+      "ms": 6.5,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "voxel",
+      "module": "voxel",
+      "seconds": 70.0,
+      "fps": 15,
+      "ms": 36.2,
+      "enabled": true,
+      "solo": false,
+      "options": {
+        "coarse": true
+      }
     },
     {
       "kind": "py",
       "name": "tron",
+      "module": "tron",
       "seconds": 45.0,
-      "fps": 30,
-      "ms": 16.1,
+      "fps": 40,
+      "ms": 12.4,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -131,15 +172,18 @@
     {
       "kind": "py",
       "name": "headroom",
+      "module": "headroom",
       "seconds": 45.0,
       "fps": 30,
-      "ms": 16.0,
+      "ms": 17.9,
       "enabled": true,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
       "name": "sneakers",
+      "module": "sneakers",
       "seconds": 45.0,
       "fps": 30,
       "ms": 8.3,
@@ -150,9 +194,10 @@
     {
       "kind": "py",
       "name": "maze",
+      "module": "maze",
       "seconds": 45,
       "fps": 24,
-      "ms": 25.2,
+      "ms": 20.3,
       "enabled": true,
       "solo": false,
       "options": {
@@ -162,10 +207,11 @@
     {
       "kind": "py",
       "name": "splitflap",
+      "module": "splitflap",
       "seconds": 45.0,
       "fps": 30,
+      "ms": 4.3,
       "enabled": true,
-      "ms": 6.2,
       "solo": false,
       "options": {
         "messages": "SEQUOIA FABRICA|DEPARTURES {TIME};FLASCHEN TASCHEN|320 X 64 PIXELS;WELCOME|MAKE SOMETHING TODAY"
@@ -174,38 +220,59 @@
     {
       "kind": "py",
       "name": "daliclock",
+      "module": "daliclock",
       "seconds": 45.0,
-      "fps": 30,
+      "fps": 24,
+      "ms": 23.9,
       "enabled": true,
-      "ms": 20.1,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
       "name": "mario",
+      "module": "mario",
       "seconds": 45.0,
       "fps": 60,
+      "ms": 10.6,
       "enabled": true,
-      "ms": 6.8,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
       "name": "sunset",
+      "module": "sunset",
       "seconds": 70.0,
-      "fps": 24,
+      "fps": 20,
+      "ms": 36.3,
       "enabled": true,
-      "ms": 30.0,
-      "solo": false
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "tunnel",
+      "module": "tunnel",
+      "seconds": 45.0,
+      "fps": 40,
+      "ms": 16.6,
+      "enabled": true,
+      "solo": false,
+      "options": {
+        "palette": "ice"
+      }
     },
     {
       "kind": "py",
       "name": "nyancat",
+      "module": "nyancat",
       "seconds": 45.0,
       "fps": 60,
+      "ms": 9.4,
       "enabled": true,
-      "ms": 8.2,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
@@ -213,7 +280,7 @@
       "module": "pixelart",
       "seconds": 30,
       "fps": 30,
-      "ms": 19.3,
+      "ms": 19.6,
       "enabled": true,
       "solo": false,
       "options": {
@@ -224,22 +291,22 @@
     },
     {
       "kind": "py",
-      "name": "tunnel",
-      "seconds": 45.0,
-      "fps": 40,
+      "name": "chladni",
+      "module": "chladni",
+      "seconds": 48.0,
+      "fps": 20,
+      "ms": 25.9,
       "enabled": true,
-      "ms": 13.5,
       "solo": false,
-      "options": {
-        "palette": "ice"
-      }
+      "options": {}
     },
     {
       "kind": "py",
       "name": "trench",
+      "module": "trench",
       "seconds": 45.0,
-      "fps": 24,
-      "ms": 29.2,
+      "fps": 30,
+      "ms": 19.8,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -250,7 +317,7 @@
       "module": "pixelart",
       "seconds": 30,
       "fps": 30,
-      "ms": 7.0,
+      "ms": 6.9,
       "enabled": true,
       "solo": false,
       "options": {
@@ -261,11 +328,13 @@
     {
       "kind": "py",
       "name": "fire",
+      "module": "fire",
       "seconds": 45.0,
-      "fps": 30,
+      "fps": 24,
+      "ms": 24.4,
       "enabled": true,
-      "ms": 18.8,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
@@ -273,7 +342,7 @@
       "module": "pixelart",
       "seconds": 30,
       "fps": 30,
-      "ms": 9.4,
+      "ms": 10.6,
       "enabled": true,
       "solo": false,
       "options": {
@@ -286,29 +355,34 @@
     {
       "kind": "py",
       "name": "grove",
+      "module": "grove",
       "seconds": 45.0,
-      "fps": 30,
+      "fps": 20,
+      "ms": 25.8,
       "enabled": true,
-      "ms": 18.7,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
       "name": "starfield",
+      "module": "starfield",
       "seconds": 45.0,
-      "fps": 50,
+      "fps": 40,
+      "ms": 14.8,
       "enabled": true,
-      "ms": 9.9,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
       "name": "fsn",
+      "module": "fsn",
       "seconds": 45.0,
       "fps": 20,
-      "ms": 46.6,
+      "ms": 38.0,
       "enabled": true,
-      "solo": true,
+      "solo": false,
       "options": {}
     },
     {
@@ -316,8 +390,8 @@
       "name": "space-invaders",
       "module": "pixelart",
       "seconds": 30,
-      "fps": 30,
-      "ms": 18.0,
+      "fps": 40,
+      "ms": 13.9,
       "enabled": true,
       "solo": false,
       "options": {
@@ -331,20 +405,24 @@
     {
       "kind": "py",
       "name": "floor",
+      "module": "floor",
       "seconds": 45.0,
       "fps": 50,
+      "ms": 12.7,
       "enabled": true,
-      "ms": 10.3,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
       "name": "printer",
+      "module": "printer",
       "seconds": 45.0,
-      "fps": 30,
+      "fps": 20,
+      "ms": 37.9,
       "enabled": true,
-      "ms": 16.9,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
@@ -352,7 +430,7 @@
       "module": "pixelart",
       "seconds": 25,
       "fps": 30,
-      "ms": 11.0,
+      "ms": 13.5,
       "enabled": true,
       "solo": false,
       "options": {
@@ -363,28 +441,55 @@
     },
     {
       "kind": "py",
-      "name": "wheel",
+      "name": "goldengate",
+      "module": "goldengate",
       "seconds": 45.0,
-      "fps": 40,
+      "fps": 30,
+      "ms": 21.1,
       "enabled": true,
-      "ms": 13.1,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
-      "name": "laser",
+      "name": "lathe",
+      "module": "lathe",
+      "seconds": 60.0,
+      "fps": 20,
+      "ms": 28.2,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "wheel",
+      "module": "wheel",
       "seconds": 45.0,
       "fps": 40,
+      "ms": 16.8,
       "enabled": true,
-      "ms": 11.9,
-      "solo": false
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
       "name": "esper",
+      "module": "esper",
       "seconds": 70.0,
       "fps": 30,
-      "ms": 10.9,
+      "ms": 7.8,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "laser",
+      "module": "laser",
+      "seconds": 45.0,
+      "fps": 40,
+      "ms": 15.6,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -392,9 +497,10 @@
     {
       "kind": "py",
       "name": "life",
+      "module": "life",
       "seconds": 45,
       "fps": 30,
-      "ms": 19.3,
+      "ms": 16.8,
       "enabled": true,
       "solo": false,
       "options": {
@@ -405,10 +511,11 @@
     {
       "kind": "py",
       "name": "rotozoom",
+      "module": "rotozoom",
       "seconds": 45.0,
       "fps": 40,
+      "ms": 16.7,
       "enabled": true,
-      "ms": 12.6,
       "solo": false,
       "options": {
         "palette": "rainbow"
@@ -416,20 +523,12 @@
     },
     {
       "kind": "py",
-      "name": "goldengate",
-      "seconds": 45.0,
-      "fps": 30,
-      "enabled": true,
-      "ms": 19.2,
-      "solo": false
-    },
-    {
-      "kind": "py",
       "name": "slime",
+      "module": "slime",
       "seconds": 60.0,
-      "fps": 8,
+      "fps": 6,
+      "ms": 123.7,
       "enabled": true,
-      "ms": 81.5,
       "solo": true,
       "options": {
         "agents": 6000,
@@ -439,19 +538,22 @@
     {
       "kind": "py",
       "name": "fireflies",
+      "module": "fireflies",
       "seconds": 60.0,
-      "fps": 12,
+      "fps": 10,
+      "ms": 69.3,
       "enabled": true,
-      "ms": 61.3,
-      "solo": true
+      "solo": true,
+      "options": {}
     },
     {
       "kind": "py",
       "name": "scroller",
+      "module": "scroller",
       "seconds": 45.0,
-      "fps": 40,
+      "fps": 20,
+      "ms": 25.8,
       "enabled": true,
-      "ms": 12.0,
       "solo": false,
       "options": {
         "plasma_frames": 60,

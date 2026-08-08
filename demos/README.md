@@ -116,22 +116,28 @@ file is rewritten within the second rather than at shutdown — this machine
 usually goes down by being unplugged.
 
 **Frame rate is per segment**, as it was when each demo ran as its own
-process: `boing` costs 2 ms and runs at 60, `water` costs 45.8 and runs at 20.
+process: `boing` costs 3.5 ms and runs at 60, `water` costs 57.0 and runs at 12.
 Holding the whole show to one rate would make the cheap effects choppier than
 they are today for no gain. Each rate leaves roughly 40% headroom over the
 measured cost. The demo is *built* at the rate it will be driven at, because
 several of them scale motion per frame off `args.fps`.
 
-**Cost.** Each card shows that effect's measured p95 on the Pi. These matter
+**Cost.** Each card shows that effect's measured p95 on the Pi — CPU time per
+frame, over the whole of that entry's own slot, with the options the entry
+ships with, on numpy 2.0.2 and the ARM at the 600 MHz the under-voltage
+throttle pins it to. Measure a demo with different settings and the figure no
+longer describes it. These matter
 in pairs, not singly: a transition renders *both* neighbours into one frame,
-so a pair can cost more than either one's own rate allows — `grove` into
-`daliclock` is 38.8 ms against the 33.3 ms frame they both run at. The
+so a pair can cost more than either one's own rate allows — `floor` into
+`printer` is 50.6 ms against the 50 ms frame the pair is held to. The
 transition is therefore paced to what the pair actually costs and steps back
 up afterwards; two seconds at a lower rate during a crossfade does not read,
 whereas frames arriving late do. `pair_check()` reports the ones that get
 paced down a long way, since that usually means the running order could be
-better. Anything that cannot fit a frame even alone — `slime` at 81.5 ms,
-`fireflies` at 61.3 — is marked `solo` and gets a cut on either side instead.
+better. Anything that cannot fit a frame even alone — meaning it does not fit
+the 50 ms of a 20 fps frame, the slowest rate the show will blend at — is
+marked `solo` and gets a cut on either side instead: `slime` at 123.7 ms,
+`fireflies` at 69.3, and, since the numpy 2 measurements, `water` at 57.0.
 
 **Building costs the current segment some frame rate.** The builder is a
 thread, and Python threads share the GIL, so while an expensive `build()` runs
@@ -189,7 +195,7 @@ their whole `-t`, false for `send-text`, which sets a layer and returns at
 once.
 
 [`rotation-betelgeuse.json`](rotation-betelgeuse.json) is the Sequoia Fabrica
-installation's running order: 34 entries, 25 minutes, and **all of them
+installation's running order: 46 entries, 35 minutes, and **all of them
 native**. The segments that predate the numpy demos were ported rather than
 shelled out to — the pixel art into [`pixelart.py`](#pixelart), the C
 binaries into [`life.py`](#life) and [`maze.py`](#maze), the `send-text` jokes
@@ -201,16 +207,24 @@ built to be; nothing in this rotation needs it.
 Site-specific text lives in that file rather than in `ftsched.py`: the marquee
 and the split-flap messages. The running order itself is generated to satisfy
 the pairing rule above and currently has **zero** transitions paced down; note
-that a `solo` neighbour cuts, so the edges either side of `slime` and
+that a `solo` neighbour cuts, so the edges either side of `water`, `slime` and
 `fireflies` are free and an expensive effect can sit there.
+
+One caveat on reading that report: `pair_check()` drops the `solo` entries
+before it walks the list, which pairs the two entries *either side* of a solo
+one with each other. Those two never actually blend — `transition_for()`
+returns a cut when either neighbour is solo — so a warning spanning a solo
+entry is describing a transition that does not happen, and the free edges the
+paragraph above relies on are invisible to it.
 
 The order is genuinely load-bearing, and it is easy to break by accident:
 removing one cheap segment leaves the two expensive ones that were either side
 of it adjacent, which is how dropping `full-moon` put `goldengate` next to
-`fire` and paced that transition down to 21 fps from 30. The floor is set by
-`water`, which at 45.8 ms cannot fit its own 20 fps frame even alone, so its
-two edges run at 80% however the rest is arranged; the order is chosen to
-bring everything else up to at least that.
+`fire` and paced that transition down to 21 fps from 30. The floor is now set
+by `printer`, which at 37.9 ms is the most expensive thing still blending, so
+its two edges run at 75% however the rest is arranged; the order is chosen to
+bring everything else up to at least that. `water` used to hold that job and
+has since gone `solo`, which is why the tightest pairs moved.
 
 An entry's `module` may differ from its `name` — the six pixel-art segments
 are one module with six sets of options — and previews are keyed by name.
