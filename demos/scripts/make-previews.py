@@ -58,6 +58,20 @@ WARMUP = {
     # the last enhance, where the iron is what is on screen.
     "tron": 16.0, "sneakers": 11.0, "fsn": 22.0, "trench": 20.0, "esper": 46.0,
     "sf-tree-bounce": 2.0, "space-invaders": 2.0, "pacman": 1.0, "sewing": 1.0,
+    # voxel has to be at the Gate: the tour is 210 s of which the bridge is a
+    # few, and every other second of it is a shoreline on the horizon that
+    # could be any coast. This puts the transit -- towers either side, deck
+    # filling the panel -- in the two seconds we get. chladni is the opposite
+    # case: build() has already settled the sand, so frame zero is a perfectly
+    # good figure, but a figure is *still*, and a still is what the screenshot
+    # is for. 6.0 lands in the sweep, where the sand comes apart and re-forms
+    # into the next mode, which is the only thing here that moves. lathe is
+    # cutting from the first frame, but it is cutting a cylinder; three passes
+    # in there is a shape to see the gouge taking material off. sort keeps its
+    # label up for the whole segment, so there is no announcement to wait for
+    # or to miss -- this is just far enough into quicksort that a partition is
+    # visibly resolving out of the confetti rather than the array sitting shuffled.
+    "voxel": 11.0, "chladni": 6.0, "lathe": 20.0, "sort": 3.0,
 }
 
 # The demos are driven at their own frame rate through the warmup and between
