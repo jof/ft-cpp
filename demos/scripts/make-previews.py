@@ -72,6 +72,22 @@ WARMUP = {
     # or to miss -- this is just far enough into quicksort that a partition is
     # visibly resolving out of the confetti rather than the array sitting shuffled.
     "voxel": 11.0, "chladni": 6.0, "lathe": 20.0, "sort": 3.0,
+    # scope is the only one of the data/instrument batch that needs any. Its
+    # phosphor is a decaying accumulator with a 0.42 s half-life, so frame zero
+    # is a bare graticule and one bright dot; two seconds is roughly five
+    # half-lives, by which point the trail behind the beam has reached the
+    # brightness it holds for the rest of the segment. It is also still inside
+    # the first signal's 7 s dwell, so the preview shows a settled trace rather
+    # than catching a switch between waveforms.
+    "scope": 2.0,
+    # Deliberately absent, and each for its own reason rather than by oversight:
+    #   wireworld  -- its 300-generation transient is spent in build(), which
+    #                 settles the board and stores the 72-generation cycle;
+    #                 render() is then a pure function of t, so t=0 is already
+    #                 on the cycle and a warmup would only rotate the phase.
+    #   propagation -- near-static by design; it is a panel of numbers, and the
+    #                 only motion is the blink, which the 2 s clip catches.
+    #   tide, twister -- settled from the first frame.
 }
 
 # The demos are driven at their own frame rate through the warmup and between
