@@ -277,6 +277,57 @@ off.
 python3 demos/ftmotd.py                    # render to stdout to see it
 ```
 
+### 6. The data fetcher
+
+Only needed if `propagation` or `tide` are in the rotation. Without it both
+render correctly and say they have no data, which is the honest answer but not
+an interesting one.
+
+```sh
+sudo cp deploy/ftdata.service deploy/ftdata.timer /etc/systemd/system/
+sudo -u pi mkdir -p /home/pi/.cache/ftdata
+sudo systemctl daemon-reload
+sudo systemctl enable --now ftdata.timer
+```
+
+The `mkdir` is load-bearing and is the step that will be skipped. `ftdata.service`
+runs `ProtectHome=read-only` and carves out that one directory with
+`ReadWritePaths=`, which systemd implements as a bind mount -- and it cannot bind
+mount a directory that is not there. A missing directory gives a unit that
+refuses to start, which is at least loud.
+
+**Enable the timer, not the service.** The service is one pass: fetch every
+product, write the cache, exit. Enabling it directly would run it once at boot
+and then never again, and the wall would show data that got older all week.
+
+**Why the cache is in `/home/pi`.** `ftsched.service` runs `ProtectHome=read-only`,
+which means it can still *read* everything under `/home/pi`. So the fetcher
+writing `~/.cache/ftdata` and the scheduler reading it need no `FT_DATA_CACHE`
+in either unit, and a demo run by hand for debugging reads the same cache the
+wall is reading. Move it to `/var/cache` and that stops being true in both
+directions.
+
+Checking it works, in increasing order of effort:
+
+```sh
+systemctl list-timers ftdata.timer          # when it last ran and next will
+systemctl status ftdata.service             # how the last run went
+journalctl -u ftdata.service -n 20          # "ftdata: 6/6 products refreshed"
+sudo -u pi python3 /home/pi/ft-cpp/demos/ftdata.py --list
+sudo systemctl start ftdata.service         # force a refresh now
+```
+
+`--list` is the useful one: it prints every product with its TTL and the age of
+what is actually cached, so `absent` or an age in hours localises the problem to
+the fetcher rather than the demo. A single product failing is normal and
+survivable -- `ftdata.py` keeps the previous record when a fetch fails, so a
+missed run degrades to slightly older data rather than to none, and the demos
+print the age either way.
+
+A failed run does not stop later ones. A service in the failed state does not
+disable or hold off its timer, so there is nothing to reset after an afternoon
+when NOAA was unreachable; the next tick just works.
+
 ## Things worth knowing
 
 **A blanked wall is not an idle Pi.** The panel keeps being refreshed with an

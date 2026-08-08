@@ -1,0 +1,51 @@
+# The clock behind ftdata.service. This is the unit to enable:
+#
+#   sudo systemctl enable --now ftdata.timer
+#   systemctl list-timers ftdata.timer
+#
+# Disabling it is the whole off switch. The demos keep rendering; they just
+# start saying their data is hours old, which is what they are built to do.
+
+[Unit]
+Description=Refresh the Flaschen Taschen data cache every 15 minutes
+Documentation=https://github.com/FlaschenTaschen/ft-cpp
+
+[Timer]
+Unit=ftdata.service
+
+# Shortly after boot rather than at boot. The Pi comes up with no route for the
+# first few seconds, and network-online.target is a weaker promise than it
+# sounds on wifi -- it means a link and an address, not that DNS answers. Two
+# minutes costs nothing on a machine that will be up for months and turns the
+# first run from a coin flip into a certainty.
+OnBootSec=2min
+
+# Fifteen minutes, measured from the end of the last run rather than on a fixed
+# grid, so a slow fetch delays the next one instead of stacking up behind it.
+#
+# It is the right interval because of what is on the other end. The fastest
+# thing here is the 1-minute Kp estimate, but the products it feeds carry TTLs
+# of an hour or more, and nothing on the wall is legible at a finer resolution
+# than that: the propagation panel prints an age in whole minutes and the tide
+# curve is a prediction that was true yesterday. Fetching every minute would be
+# six times the requests to say the same thing.
+OnUnitActiveSec=15min
+
+# Politeness to a set of free public APIs -- hamqsl in particular is one
+# person's server. Without this, every FlaschenTaschen wall that ever copies
+# this file hits them at exactly the same instant past the quarter hour, and a
+# few dozen of those is a small thundering herd. Also spreads the wakeup so it
+# does not always land with whatever else the Pi does on a quarter-hour.
+RandomizedDelaySec=3min
+
+# A minute of slop lets systemd coalesce this with other timer wakeups. Nothing
+# here cares when in the quarter hour it runs.
+AccuracySec=1min
+
+# Persistent= is deliberately absent: it only applies to OnCalendar= timers, and
+# would do nothing here. It would also be the wrong idea if it did -- catching
+# up on a missed fetch after downtime means fetching data that is current now,
+# which is exactly what the next ordinary tick does anyway.
+
+[Install]
+WantedBy=timers.target

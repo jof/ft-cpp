@@ -1,0 +1,106 @@
+# One pass of the outside-data fetcher. Driven by ftdata.timer, not enabled
+# itself. Install with:
+#
+#   sudo cp deploy/ftdata.service deploy/ftdata.timer /etc/systemd/system/
+#   sudo -u pi mkdir -p /home/pi/.cache/ftdata
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ftdata.timer
+#
+# The mkdir is not optional and is the one thing that will bite. The cache is
+# under /home, which ProtectHome= below makes read-only except for that one
+# directory -- and systemd sets that exception up as a bind mount, which it
+# cannot do for a path that does not exist. A missing directory is therefore a
+# unit that refuses to start, not one that quietly fetches nothing.
+#
+# Enable the .timer, never this. `systemctl start ftdata.service` by hand is
+# the way to force a refresh now; enabling it would run it once at boot and
+# then never again.
+
+[Unit]
+Description=Fetch outside data for the Flaschen Taschen data demos
+Documentation=https://github.com/FlaschenTaschen/ft-cpp
+
+# Deliberately NOT tied to ft_server or ftsched: no BindsTo, no Requires, not
+# even an After. The fetcher is independent of the display on purpose. If the
+# wall is down for an afternoon the cache should still be current when it comes
+# back, and a scheduler that is stopped is not a reason to stop collecting.
+# The only real dependency is a working route out.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi/ft-cpp/demos
+
+# --once: fetch every product, write the cache, exit. The repeat interval is
+# ftdata.timer's business, not a --loop inside a process that would then have
+# to be supervised, restarted and reasoned about. A fetcher that is a cron job
+# in all but name should look like one.
+ExecStart=/usr/bin/python3 /home/pi/ft-cpp/demos/ftdata.py --once
+
+# The cache lives at the default ~/.cache/ftdata, which is /home/pi/.cache/ftdata
+# for this user, and that is deliberate rather than incidental: ftsched.service
+# runs ProtectHome=read-only, which permits reads from /home/pi, so the
+# scheduler can read what this writes with no FT_DATA_CACHE plumbed into either
+# unit. Move the cache out of home and both units need the environment set, and
+# the demo that is run by hand for debugging then reads a different cache from
+# the one on the wall.
+ReadWritePaths=/home/pi/.cache/ftdata
+
+# For Type=oneshot this is the cap on the whole run, not on startup -- there is
+# no "started" for it to be measured against. Six products, each with urllib
+# timeouts of 20 s and a couple of them making two requests, so the honest
+# worst case is a few minutes. It must never be unbounded: this runs on shop
+# wifi against free public APIs, and a TCP connection to a server that accepts
+# and then says nothing will otherwise sit there until the next timer tick
+# finds the unit still running and skips it, forever.
+TimeoutStartSec=300
+
+# No Restart=. A failed run is not worth retrying immediately -- the endpoint
+# is having a bad minute and will have the same bad minute a second later --
+# and ftdata.py already keeps the previous record when a fetch fails, so a miss
+# degrades to slightly older data rather than to none. The timer keeps firing
+# regardless: a service in the failed state does not disable or hold off its
+# timer, so tomorrow's runs happen whatever today's did.
+Restart=no
+
+# It makes outbound HTTPS calls to hosts it does not control, parses their XML
+# and JSON, and writes one directory. Nothing else needs to be reachable from
+# in here.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# AF_NETLINK is not decoration: glibc's getaddrinfo() asks the kernel over
+# netlink which address families the host actually has before it will return
+# AAAA records, and without it name resolution fails in ways that look like the
+# remote end is down.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+# Comfortably more than it needs -- the largest thing it handles is the 650 kB
+# GOES X-ray feed, which is parsed and thrown away down to 96 numbers.
+MemoryMax=192M
+
+# One niceness step down. Nothing is waiting on this; if it competes with the
+# render loop for the Pi's cores, the render loop should win.
+Nice=5
+IOSchedulingClass=idle
+
+StandardOutput=journal
+StandardError=journal
+
+# No [Install] section on purpose. This is started by ftdata.timer; enabling
+# the service directly is the mistake the header warns about.
