@@ -431,6 +431,69 @@ filament.
 $ python3 printer.py --fail-rate 0.15 --speed 1.4
 ```
 
+### lathe
+
+![lathe](screenshots/lathe.png)
+
+A woodturning lathe: a blank spinning between centres, a gouge walking the
+length of it on the tool rest, shavings arcing off the cut, and a turned shape
+appearing pass by pass.
+
+A lathe bed is the rare subject that genuinely *is* this shape — headstock at
+one end, tailstock at the other, and a long thin thing spanning the gap — so a
+5:1 panel is not a constraint to design around here but the natural framing.
+The work fills nearly the whole width and there is still room under it for the
+rest and the tool.
+
+Everything comes out of one array: **a radius per column** along the axis. The
+silhouette is that profile mirrored about the axis, so drawing the blank is a
+column fill. Cutting is the gouge writing a shallower radius into the columns
+it crossed this frame. Shading is `sqrt(1 - (dy/r)^2)`, the actual cylinder
+normal, which buys the round form for a lookup. Nothing is a sprite, and no
+part of the drawing knows what shape is being turned — change the control
+points and the silhouette, the cut and the shading all follow.
+
+The growth rings are the reason to build it this way rather than as a
+silhouette plus a texture. Rings live in the log's cross section, indexed by
+distance from the pith, and every visible point on a solid of revolution at
+column x sits at exactly radius `r[x]` from the axis — so the ring texture is a
+**1-D lookup on the radius**, and taking radius off *reveals inner rings*.
+Bands crowd where the profile falls away steeply and spread out along a taper,
+which is what real turned work does, and they move as the cut deepens. Getting
+that for free is the payoff for the representation; a texture painted onto the
+silhouette would have had to be animated by hand and would still have been
+wrong.
+
+Spin is sold three ways, none of them a blur. The pith is a little off the
+axis, so the ring radius is `r - e·cos(α - β)` with α the material angle at
+that pixel — which expands onto `s` and `c`, the two shading terms already in
+hand, and needs no per-pixel trigonometry at all. That makes the bands breathe
+once a revolution. The specular band sits at a fixed angle and stays put while
+the surface moves under it, which is what a highlight on a spinning cylinder
+does. And the headstock pulley turns on the same phase, so there is one
+unambiguous rotating object on screen.
+
+Roughing creeps up on the shape over several passes, alternating direction the
+way a turner does, each pass aimed at an interpolated version of the target and
+leaving a little chatter; the finish pass lands on the target exactly and a
+sanding pass takes the ripple out and raises a sheen. Then the lathe spins
+down, the work lifts off — as a snapshot of the last frame, rising and fading,
+so the fresh blank is already turning underneath and the machine is never
+empty — and it starts again. That whole arc is about forty-two seconds.
+
+Cost is a tight window of rows around the axis, deliberately not padded for the
+once-a-cycle lift: within it a frame is one divide, four gathers and a blend
+over roughly nine thousand pixels. The ring table, the shading and specular
+ramps against position across the cylinder, the wood palettes and the whole
+static shop — bed, headstock, tailstock, tool rest — are all baked in `build()`.
+Rates are per second rather than per frame (feed in px/s, the fresh-cut glow as
+a half-life in seconds), so it looks the same at 8 fps and at 30.
+
+```console
+$ python3 lathe.py --profile baluster --species walnut --feed 24
+$ python3 lathe.py --profile beads --passes 6 --no-chips
+```
+
 ### knit
 
 ![knit](screenshots/knit.png)
@@ -1296,6 +1359,445 @@ mirror is a cycle with no ending in it.
 $ python3 esper.py --colour amber               # monochrome Esper CRT
 $ python3 esper.py --cycle 40 --speed 1.2       # the short version
 $ python3 esper.py --no-commands                # just the photograph moving
+```
+
+### chladni
+
+![chladni](screenshots/chladni.png)
+
+Cymatics: sand on a vibrating plate. Drive a metal plate at one of its
+resonances and the sand does not scatter, it migrates — grains sitting on an
+antinode are thrown up and land somewhere else, grains that happen to land on a
+nodal line, where the plate is not moving, stay put — and within a few seconds
+the sand has drawn the mode shape. Then the drive frequency sweeps to the next
+resonance, the figure comes apart and reassembles into a different one, and
+that reorganisation is the part worth watching.
+
+**The panel's shape is the reason to do this rather than a compromise to work
+around.** The Chladni figures everyone has seen are square-plate ones, where
+the two modes that superpose are `(n,m)` and `(m,n)` — degenerate because the
+plate is symmetric, which is where the familiar `cos(nπx)cos(mπy) −
+cos(mπx)cos(nπy)` comes from. On a 5:1 plate that symmetry is gone: swapping
+the indices no longer gives the same frequency, so a mode cannot be paired with
+its own transpose. What you can do instead is solve for the pairs that *are*
+degenerate — with `a` half-waves along the long axis and `b` across, the
+frequency goes as `(a/5)² + b²`, so `(a,b)` and `(c,d)` are degenerate exactly
+when `a² + 25b² = c² + 25d²`. Whole families fall out of that: (10,1)/(5,2),
+(20,2)/(10,4), (25,4)/(20,5). Because the two members of a pair can have wildly
+different aspect — one term fine along the plate and coarse across it, the
+other the reverse — the figures are far more varied than the square-plate ones,
+and the six in the rotation were chosen by rendering every exactly-degenerate
+pair up to 30 half-waves and looking at them. The rejects were mostly too fine:
+six half-waves across 64 rows is a 10 px feature that turns to hash the moment
+grains land on it.
+
+Everything per mode is precomputed, and that is what makes it affordable. Each
+term is an outer product of two 1-D cosine tables, so a whole field is two
+outer products and a subtract; `build()` bakes the field, `|s|` and both
+components of its gradient for all six modes as flat arrays. A frame during a
+hold — about two thirds of the run — is then two gathers and a `bincount` over
+a few thousand grains, a decay and a palette lookup, with no trigonometry in it
+at all. Only during a sweep is a field derived, and even then it is a dozen
+whole-array passes over 20480 pixels.
+
+Two details carry the look. The random kick a grain gets is **proportional to
+the local amplitude**, so a grain on a node is in dead air and stops while a
+grain on an antinode is being thrown around; a constant jitter blurs every
+nodal line into a band and nothing ever settles. But amplitude-proportional
+noise alone goes to *zero* on a node, so a grain that arrives stops dead in the
+pixel it landed in, forever — legible, but the lines come out dotted with the
+gaps frozen in place for the whole hold, which reads as a dashed line somebody
+drew. A small amplitude-independent `--creep` keeps settled grains shuffling
+*along* the trough they are in (across it they are pushed straight back), and
+that is the difference between the two; `--creep 0` is the control, and it
+drops the lit fraction of the panel by more than half.
+
+The sweep interpolates the two mode *fields* and takes the gradient of the
+blend, rather than blending the two precomputed gradient fields. The nodal set
+of a superposition is a real curve that moves continuously from one figure to
+the other and the grains can follow it; averaging two gradients instead gives
+every grain two places to go at once and it splits the difference into a smear.
+Jitter is boosted through the middle of a sweep, since a plate driven between
+two resonances is mostly just shaking — which is what makes a transition read
+as the sand coming apart and re-settling rather than as a crossfade between two
+pictures.
+
+Grains land in a deposit buffer with a half-life in *seconds*, so a nodal line
+builds up bright instead of flickering as a few loose pixels, and the amount
+deposited is derived from the decay rather than given — `--gain` means "grains
+per pixel that read as white" and stays true whatever `--grains` and
+`--persist` are set to. Under the sand, `--plate` paints the vibration itself
+very dimly, so an antinode is dark steel rather than dead black and the figure
+sits on something.
+
+It costs **0.20 ms a frame on a desktop** (p95, 320x64, 5000 grains, 30 fps),
+of which the sweep frames are the expensive ones; `build()` is 21 ms. It has
+**not** been measured on a Pi 3, and that is the number that decides what frame
+rate it should run at. The whole cycle is six modes at 5.5 s held plus 2.5 s
+sweeping, so 48 s, which fits a normal slot with the wrap landing on a mode
+change like any other. `build()` settles the sand for a hundred steps before
+returning, so frame zero is a figure rather than a cloud.
+
+The mode set is picked for a 5:1 plate; it renders correctly at any
+`--width`/`--height`, but on a squarer canvas the same six figures are simply
+squashed rather than replaced by ones suited to that aspect.
+
+```console
+$ python3 chladni.py --palette copper --grains 8000
+$ python3 chladni.py --hold 3 --sweep 4         # more sweeping, less sitting
+$ python3 chladni.py --creep 0 --plate 0        # the frozen, dotted control
+```
+
+### sort
+
+![sort](screenshots/sort.png)
+
+Sorting algorithms racing, one array element per column. Quicksort, radix,
+bubble and heapsort take it in turns on the same 320 values, each announced by
+a small label, each ending in the classic ascending confirmation sweep.
+
+**The panel is the array.** 320 columns is a 320-element array with a pixel to
+spare, so nothing is aggregated, scaled or sampled away — every comparison the
+algorithm makes is a column you can point at, and a wide letterbox is the
+shape an array wants to be anyway. Value is carried twice, by bar height and
+by hue, because 64 rows is only six bits of height and from across a room a
+field of one-pixel bars is a texture rather than a signal. Hue is what
+actually reads at this size: a shuffled array is confetti, a nearly-sorted one
+is visibly a rainbow with a few wrong stripes in it, and a partition settling
+appears as a smooth ramp inside a region of noise. `--style band` drops the
+bars for a full-height colour field, which carries further down a big room but
+lights every pixel flat out and loses the contrast that makes the working
+region stand out; the bars are the default for that reason.
+
+**The steps had to be decoupled from the frames.** Bubble sort on 320 elements
+is 50,830 steps, quicksort 4,580 and radix 960; one step per frame would run
+bubble for half an hour and be done with radix in half a minute, and there is
+no single rate that suits both. So each algorithm is run to completion in
+`build()` and recorded as a flat trace — at most two writes and a highlight
+state per step — and `render()` plays back as many steps as its segment's
+clock says have happened. Each algorithm then takes the same wall time
+whatever it costs, and the visible *rate* is what tells you how much work it
+is doing: quicksort strolls, bubble sort tears along and still only just gets
+there. Recording rather than stepping live is also what keeps `render()` a
+function of `t`, since the trace is replayed from a per-segment snapshot: a
+restart at t=0, a seek or a different frame rate all land on the same picture.
+
+Without the working state drawn there is nothing here but bars moving, so the
+pivot and partition bounds, radix's write cursor with the sorted prefix
+growing behind it, bubble's pair and its shrinking unsorted region and
+heapsort's sift path are all lit — two cursor columns full height, the active
+region lifted out of the dim. Between algorithms the array is thrown back in
+the air by an animated Fisher-Yates rather than cut to a fresh permutation.
+
+Cheap, and structurally so: a frame builds one index image and does one
+`np.take` through a table holding six tiers of the palette, which is where the
+highlighting comes from as well. **0.07 ms a frame measured on a desktop** —
+the Pi figure has not been taken yet, but the per-frame work is a handful of
+whole-array passes over 20,480 pixels and nothing else.
+
+The trace does cost memory rather than time: bubble's 50,830 steps are eight
+`int16` per step, about 800 kB, and the whole default set is a little over a
+megabyte of index-and-value pairs. Storing frames instead of steps would be
+two orders of magnitude worse.
+
+```console
+$ python3 sort.py --algorithms quicksort,merge,insertion --style band
+$ python3 sort.py --algorithms bubble --cycle 90        # just the slow one
+$ python3 sort.py --element-px 2 --palette magma --no-labels
+```
+
+### voxel
+
+![voxel](screenshots/voxel.png)
+
+A hang glider's tour of San Francisco Bay: in off the Pacific, through the
+Golden Gate *between the towers*, across the front of the city with Alcatraz
+opening to port, north up the bay past Treasure Island and the Bay Bridge,
+round Angel Island, back west over Sausalito and up over Hawk Hill with
+Tamalpais on the horizon, then out past Point Bonita to the open sea and round.
+Comanche-style voxel space: for every screen column, march a ray out along the
+ground, look up the height under it, and work out how far up the screen that
+lands. The nearest thing wins. It is the oldest trick for drawing landscape in
+real time and it is still the right one here, because the cost is set by the
+number of columns and the depth budget rather than by any amount of geometry.
+
+**The terrain is real, and it is in the file.** 768x768 cells of USGS 3DEP
+elevation at 45.8 x 57.6 m a cell, covering 37.635–38.035 N and 122.28–122.68 W
+— Mount Tamalpais in the north-west, the Marin Headlands over the strait, the
+Golden Gate, San Francisco out to Twin Peaks and San Bruno Mountain, Angel
+Island, Alcatraz, Yerba Buena, the Berkeley hills. 3DEP is public domain;
+`scripts/make-voxel-dem.py` is the one-off bake that downloads it, fills the
+voids where the survey stops at the continental shelf, works out which of it is
+water and writes `voxel-dem.npz`, and the provenance is written down at the top
+of that script. The demo itself reads only the committed asset and needs
+nothing but numpy — no network, no GDAL. It comes to 201 kB because the heights
+are quantised to whole metres and stored as the horizontal *difference*:
+terrain is smooth, so the differences are small numbers around zero and DEFLATE
+eats them, four or five times better than it manages on the raw heights. Sea
+level is stored as exactly zero, so the Bay and the Pacific are a comparison
+rather than a second map.
+
+**The map was labelled with the wrong box, and nothing looked wrong.** The bake
+asked the National Map's ImageServer for 0.4° of longitude by 0.31° of latitude
+as a square image. That service will not letterbox: when the bbox aspect and
+the image aspect disagree it silently widens the bbox until they match and
+returns *that*, with nothing in the response to say so. So the grid held 0.4° of
+latitude — 44 km of California — while the file said 34, and everything scaled
+from that header was wrong in proportion to how far it sat from the middle of
+the map. Alcatraz was 200 m out and looked fine. Mount Tamalpais was three
+kilometres south of where it is. The Bay Bridge got built a kilometre clear of
+Yerba Buena Island, in open water, which is the sort of thing you only catch by
+knowing where the bridge is meant to touch down. It is fixed in the header and
+in the script, and `fetch()` now refuses a bbox whose aspect does not match the
+image it is asking for, because that is the only check that would have caught
+it.
+
+**The depth march never loops over depth.** The obvious implementation walks
+the ray one step at a time per column, and that is a few thousand numpy calls a
+frame; on a Pi 3 a numpy call costs about 80 µs whatever size the array is, so
+it is over budget before it has drawn anything. Instead the whole (steps ×
+columns) grid of sample heights is built in one go and the painter's ordering
+falls out of a running minimum: down the depth axis the projected row of the
+highest-thing-so-far only ever decreases, so *the number of steps whose ceiling
+is still below a screen row is exactly the index of the first step that covers
+it*. That count, for every row at once, is a histogram of the ceilings followed
+by a cumulative sum — `np.bincount` and `np.cumsum` — and it is the whole
+reason the effect fits in a frame.
+
+**Everything on screen is one integer.** The palette is a flat table laid out
+as `(class × shade) × haze band`, so a pixel's colour is one gather at the very
+end and nothing in the frame computes RGB. Distance haze is free, because the
+depth step chooses a band and the band is already the right colour. The chop
+and the sun's glitter on the water are an integer *add* on the pixels that are
+water — a brighter shade is `+NFOG` — and they pick up the correct haze for
+their distance without knowing anything about it. A bridge is a class like any
+other, so painting it is writing class numbers into that index image before the
+gather.
+
+**The bridges have to be objects.** A heightmap cannot have sky under a road
+deck. Each column's ray is intersected with the vertical plane of the deck, a
+2x2 solve vectorised across the whole width, which gives that column's position
+along the span and its distance from the eye together; and since the raycast
+has already left a depth per pixel, hiding it behind Lime Point is one compare.
+There are two of them, and that is why the geometry is a table rather than
+code: a name, a latitude, a bearing, a list of span lengths in feet and three
+colours, from which the same compositor draws either. The Golden Gate is the
+real thing in the units `goldengate` uses — 4200 ft of main span, 526 ft of
+tower over a deck 220 ft above the water — with the detail that carries the
+silhouette, the main cable's vertex sitting *on* the deck at midspan. The Bay
+Bridge is the western crossing, 2310 ft of main span either side of the central
+anchorage, in silver-grey steel rather than International Orange; at the three
+to eleven kilometres the tour sees it from, what survives is a pale line low on
+the haze with two nubs on it where the towers are, and the temptation to scale
+it up is the temptation to draw something that is not there. Its eastern span
+is left out because Yerba Buena Island is in front of it.
+
+**The Gate transit is the shot the route is built around.** The flight crosses
+the plane of the bridge 267 m from midspan — the main span runs 640 m either
+side of that — at 161 m above the water, which is between the deck at 67 m and
+the tower tops at 227 m. So it genuinely passes between the towers and under
+the cables, and for two seconds the deck is overhead and the suspenders are
+sliding past on both sides. Everything else about the waypoints was arranged
+around making that happen on the right heading.
+
+**Sutro Tower is there and it is five pixels.** 298 m of tower on a 255 m
+ridge, which makes it the only part of San Francisco legible from across the
+bay, so it is drawn: sunset.py's sprite unchanged, three prongs on a lattice
+body stepping out to a splayed tripod base, scaled by nearest neighbour into a
+table of silhouettes at every whole pixel height and depth-tested as a
+billboard against the raycast, so Twin Peaks in front of it hides it. The
+downtown skyline was tried and left out — from six kilometres it is four rows of
+very slightly lighter grey against a hazy hill, which is to say it is nothing.
+The one thing worth knowing about the size table is why its lower bound is
+where it is: the tower crosses the threshold *during* a pass, and set one pixel
+higher — at the size where it still reads as a trident — it dropped out for a
+single frame on the way past. A landmark slightly too small beats one that
+blinks.
+
+**The route is a Fourier series, and that is not a flourish.** A closed flight
+path has to be three things at once. Exactly periodic, so a segment that
+overruns the loop lands back where it started rather than drifting off the map
+— measured at 2 × 10⁻¹⁰ m of drift after thirty-seven loops. Smooth to the
+second derivative, because that is what the bank is built out of. And uniform in
+arc length, because otherwise the glider surges and stalls between waypoints, a
+lurch this file has already been fixed for once. A harmonic series is the first
+two for free, and its derivatives are closed-form rather than divided
+differences. An interpolating spline would have passed exactly through the
+waypoints and put a discontinuity in that second derivative at every one of
+them — eleven places a loop where the wing snaps from one bank to another.
+
+Two things it took two attempts to get right. The corners are rounded by
+rolling the coefficients off with a *Gaussian* rather than by cutting them off
+at the last one: a rectangular window rings, and since curvature carries a
+factor of k² a ripple far too small to see in the flight path is a wobble you
+cannot miss in the horizon. And the arc-length parameterisation is a separate
+pass that does *not* re-smooth — evaluate the curve densely, resample it at even
+spacing along itself, refit, twelve times. Smoothing again on every pass is a
+heat flow, and a heat flow shrinks a closed curve: it took a 26 km tour down to
+7 km, which looked entirely plausible until somebody measured it. Done properly
+the ground speed varies by 2.3% over the whole loop.
+
+**Height goes with what is beside you, and the instinct was backwards.**
+Parallax is the only thing that says you are moving, and it goes as one over the
+distance to what you pass, so the obvious move is to fly as low as possible.
+That was tried at 130–200 m the whole way round and it is wrong twice over.
+First, an eye at 150 m over a bay 10 km wide puts every far shore inside two
+pixels of the horizon: the picture becomes a flat line with water under it and
+there is nothing to have parallax *against*. Second, and this is the one that
+is easy to miss, a 320x64 panel at this focal length has a **25 degree vertical
+field** — so anything closer than about four and a half times your height is
+below the bottom of the frame. Alcatraz was routed past at 200 m, and at 800 m
+abeam it was not subtle, it was *invisible*. So the Gate is flown at 145 m
+between deck and tower tops, the open crossings at 235–265 where you look down
+on the bay and Alcatraz, Angel Island and the Berkeley hills are separately
+visible instead of stacked on one line, Hawk Hill at 350 with 80 m of air over
+it, and the landmarks are passed at one to two kilometres rather than at three
+hundred metres.
+
+**A hang glider cannot tour the bay in three minutes.** The circuit is 28.9 km
+and the loop is 210 seconds, which is 138 m/s — 496 km/h, about eleven times
+what a wing actually does. A real one at 13 m/s would need thirty-seven
+minutes. That is a deliberate trade and it is the right one: the alternative is
+either a tour nobody watches to the end, or a demo that circles one thermal and
+reads as rotation rather than travel, which is what this was before. Flying
+lower makes a given speed read faster, so a good part of the apparent motion is
+bought with height rather than with speed; and `--loop` is one flag away if you
+want it slower.
+
+**The wing is off by default, and that is a change of mind.** In a coordinated
+turn the pilot and the wing keep the same relationship and it is the world that
+tilts, so the two spars can be a static overlay costing one composite while the
+horizon rolls behind them — a cheap way to frame the shot, and `--wing` still
+does it. But they were drawn for a demo that circled one point. The tour changes
+heading far more often, and against a picture whose whole subject is the
+landscape going past, two fixed diagonals across the sky stop reading as
+structure overhead and start reading as scaffolding over the view. The frame is
+better without them.
+
+The bank is independent of that, and is scaled well down from
+true: at this speed the turns really are banked most of the way over, and on a
+panel five times wider than it is tall the horizon rises about five pixels per
+degree of roll and leaves through the corner before you reach ten.
+
+**The bank was a square wave once, and the flight path was the reason.** The
+bank comes from the curvature of the path, and the path used to carry a wobble
+at three times the circuit rate; curvature comes out of the second derivative,
+where a harmonic at k times the fundamental picks up a factor of k², so at nine
+times the weight the wobble contributed more curvature than the circle it
+decorated. The signal arriving at the roll clamp was forty to sixty times the
+clamp, 99% of the loop sat pinned hard over at one limit or the other, and the
+horizon flipped between them in a couple of frames. It was not a display
+problem. The glider was genuinely lurching, and no smoothing applied after the
+clamp could have helped.
+
+The gain onto the roll was measured rather than guessed, at the value that puts
+the 95th percentile of the turn rate on the limiter's knee, and the limiter is
+`limit · tanh(x/limit)` rather than a clamp, because a clamp has a corner in it
+and a corner in the roll is the horizon stopping dead. On the tour the same
+gain gives a roll running −5.6° to +2.6°, changing at a median of 0.19°/s and
+never faster than 1.3°/s, with the soft limiter engaged for 6% of the loop —
+against 0.13 to 0.71°/s on the old thermal circuit, which is the price of
+actually turning corners instead of circling, and still nothing like a snap.
+A real wing has roll inertia and takes about a second to roll in, so the bank is
+read off the curve a second behind where the glider is. Doing that with an
+integrator would have put state in `render()`, which has to stay a pure function
+of `t` or the demo cannot be seeked; evaluating the same closed curve at
+`t − lag` is the same thing analytically, shifts every harmonic by its own share
+of the delay, and stays exactly periodic.
+
+Two things that only showed up by looking at frames. The sky ramp is indexed in
+*thirds* of a row rather than whole ones — with whole rows, the sheared horizon
+steps the index by one somewhere along the width and draws a vertical seam
+straight down a gradient this smooth. And the haze colour is deliberately
+darker and greyer than the sky above it: matched to the sky, which is the honest
+thing for thick haze, the skyline stops existing and the whole picture collapses
+into one diagonal gradient.
+
+The far plane is 17 km rather than 13, which is what it takes to have Mount
+Tamalpais on the horizon at all — from the Sausalito leg it is 13.4 km off, and
+at 784 m it is the highest thing in the model. That costs about 0.04 ms a frame,
+because the depth schedule is geometric and stretching it only makes the steps
+slightly coarser rather than adding any. On this desktop the whole frame is
+0.51 ms mean and 0.69 ms at the 95th percentile at `--steps 96`.
+
+**The Pi 3 is the only number that matters, and betelgeuse is running at half
+its clock.** `vcgencmd get_throttled` reports `0x50005` — under-voltage, not
+heat — and the ARM clock sits at 600 MHz against a rated 1200 whatever the
+governor believes. Everything below is at 600 MHz, on the system numpy 1.19.5,
+as CPU time over a whole 210-second loop. Restoring the power supply roughly
+halves all of it.
+
+| | p50 | p95 | fits, at 40% headroom |
+|---|---|---|---|
+| first version of this file | 63 ms | 78 ms | 7 fps |
+| after the first optimisation pass, `--steps 96` | 47 ms | 61 ms | 9 fps |
+| after the second, `--steps 96` | 45 ms | 56 ms | 10 fps |
+| **the default now** (`--steps 64`) | **39 ms** | **51 ms** | **11 fps** |
+| `--coarse` | 30 ms | 42 ms | 14 fps |
+
+Three things the desktop hid, and one that the first pass got wrong.
+
+`--steps` is **not** the cost knob it looks like — 96 to 32 saves only a
+quarter of the frame, because half the work is per output *pixel* and does not
+care how many depth samples there were. It is now 64 by default, which is the
+setting where the difference from 96 is a slight coarsening of the nearest
+hillsides and nothing else; 48 and below is visibly blocky in the foreground
+and is not worth having.
+
+**The 95th percentile is one shot.** Not the average frame at all: for the ten
+seconds either side of the Gate transit the bridge is the whole width and most
+of the height of the panel, and it was costing 25 ms of a 65 ms frame while
+the rest of the loop paid 5. Almost all of that was the compositor's fault
+rather than the bridge's. `np.putmask` cannot write through a non-contiguous
+array — it silently copies, puts, and copies back — so painting four parts
+into a sub-rectangle of the frame was eight copies of that rectangle, and the
+box is now gathered into a contiguous scratch once. And the mask that decides
+which rows each part covers was asking `row >= top` of *floats*, which on this
+machine is four times what the same question costs of shorts; a row is inside
+a part exactly when it is at or below `ceil(top)`, so that is what it asks.
+
+**The dtype is the lever, and int16 is a real one.** A float32 pass is 21 ns an
+element here and an int32 pass is 5, so it pays to cast early rather than
+late; and the two running scans — the painter's-order minimum down the depth
+axis and the prefix sum over the histogram — cannot be vectorised down the
+axis they run along, which makes them the frame's longest serial stretches and
+the most sensitive to width. `np.minimum.accumulate` over the depth grid is
+1.37 ms in float32, 1.88 in int32 and **0.64 in int16**. Everything that is a
+screen row, a bin number or a step index is a short now, and the ceiling, the
+clamp and the narrowing all happen *before* the scan rather than after, which
+is free to do because every one of them is monotonic and so commutes with a
+running minimum.
+
+**`--coarse` marches the landscape at half width and doubles it back**, which
+is nearly two thirds of the frame halved and is what gets the demo to 15 fps.
+The bridges, Sutro Tower, the birds, the sun and the palette are still drawn at
+full width afterwards, so what coarsens is the terrain and nothing that has an
+edge you were looking at: side by side the shoreline and the hillsides step in
+twos and the water's glitter is chunkier, and the Golden Gate is pixel for
+pixel the same. It is off by default because it is a visible change and the
+default should be the honest picture.
+
+**And the numpy the wall runs on is worth as much as the inner loop.** 1.19.5
+is what Raspberry Pi OS ships and it is from 2020. Measured beside it in a
+throwaway `pip install --target` — the system numpy untouched, because
+`ftsched` runs against it — the *unmodified* file was 17% quicker under 2.0.2
+(52→43 ms median, 65→53 at the 95th) and only 6% quicker under 1.26.4, so it
+is 2.x's rebuilt ufunc loops doing it rather than the cheaper
+`__array_function__` dispatch that 1.26 also has. Against the file as it is
+now, which has less dispatch left to save, 2.0.2 is 6 to 8%: 35 ms median and
+45 at the 95th by default, and 26 and 37 with `--coarse`, which is 16 fps. It
+is a free win for every demo in the rotation and not only this one — and the
+only reason it has not been taken here is that changing the numpy the wall
+runs against is not a decision to make as a side effect of tuning one demo.
+2.0.2 is the last release that supports the Pi's Python 3.9.
+
+```console
+$ python3 voxel.py --light dusk --fog 1.4
+$ python3 voxel.py --loop 420 --altitude -60    # half speed, and lower
+$ python3 voxel.py --bank 1.6 --roll-lag 0      # steeper, and no roll inertia
+$ python3 voxel.py --coarse                     # half-width landscape, 15 fps
+$ python3 voxel.py --no-wing --no-tower --birds 0 --steps 96
+$ python3 scripts/make-voxel-dem.py     # re-bake the terrain (needs Pillow)
 ```
 
 ## demoscene.py

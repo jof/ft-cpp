@@ -33,7 +33,7 @@
 #include "led-flaschen-taschen.h"
 #include "servers.h"
 
-#ifdef __linux__
+#ifdef HAVE_MDNS
 #include "service-discovery.h"
 #endif
 
@@ -110,7 +110,7 @@ static int usage(const char *progname) {
             "\t--layer-timeout <sec>: Layer timeout: clearing after non-activity (Default: 15)\n"
             "\t--control-socket <path>: Accept display-wide commands (brightness,\n"
             "\t                      blank, wipe) on this unix socket. Off by default.\n"
-#ifdef __linux__
+#ifdef HAVE_MDNS
             "\t--mdns <enabled|disabled> : Enable/disable mDNS service discovery (Default: disabled)\n"
             "\t--mdns-name <name>  : Display name for mDNS announcement (Default: \"FlaschenTaschen\")\n"
             "\t--mdns-url <url>    : HTTP URL for display (optional)\n"
@@ -129,10 +129,12 @@ int main(int argc, char *argv[]) {
     int height = 35;
     int layer_timeout = 15;
     std::string control_socket("");
+#ifdef HAVE_MDNS
     bool mdns_enabled = false;
     std::string mdns_name("FlaschenTaschen");
     std::string mdns_url("");
     std::string mdns_ui("");
+#endif
 #if FT_BACKEND != 2
     bool as_daemon = false;
 #endif
@@ -160,7 +162,7 @@ int main(int argc, char *argv[]) {
         OPT_LAYER_TIMEOUT = 1002,
         OPT_HD_TERMINAL = 1003,
         OPT_CONTROL_SOCKET = 1004,
-#ifdef __linux__
+#ifdef HAVE_MDNS
         OPT_MDNS_ENABLED = 1010,
         OPT_MDNS_NAME = 1011,
         OPT_MDNS_URL = 1012,
@@ -178,7 +180,7 @@ int main(int argc, char *argv[]) {
 #if FT_BACKEND == 2
         { "hd-terminal",        no_argument,       NULL,  OPT_HD_TERMINAL },
 #endif
-#ifdef __linux__
+#ifdef HAVE_MDNS
         { "mdns",               required_argument, NULL,  OPT_MDNS_ENABLED },
         { "mdns-name",          required_argument, NULL,  OPT_MDNS_NAME },
         { "mdns-url",           required_argument, NULL,  OPT_MDNS_URL },
@@ -212,7 +214,7 @@ int main(int argc, char *argv[]) {
             hd_terminal = true;
             break;
 #endif
-#ifdef __linux__
+#ifdef HAVE_MDNS
         case OPT_MDNS_ENABLED:
             mdns_enabled = (strcmp(optarg, "enabled") == 0);
             break;
@@ -245,19 +247,20 @@ int main(int argc, char *argv[]) {
 #define MAKE_COLUMN(port) new CrateColumnFlaschenTaschen(CreateWS2801Strip(spi, port, kLedsPerCol))
 
     // Looking from the back of the display: leftmost column first.
+    // Updated 3/30/24 by Jade to match the numbering scheme we used during
+    // Reboot 2024 troubleshooting (1-9 left to right, viewed from the screen,
+    // so 9-1 left to right viewed from the back)
+    display->AddColumn(MAKE_COLUMN(MultiSPI::SPI_P9));
     display->AddColumn(MAKE_COLUMN(MultiSPI::SPI_P8));
     display->AddColumn(MAKE_COLUMN(MultiSPI::SPI_P7));
     display->AddColumn(MAKE_COLUMN(MultiSPI::SPI_P6));
     display->AddColumn(MAKE_COLUMN(MultiSPI::SPI_P5));
-
-    // Center column. Connected to front part
-    display->AddColumn(MAKE_COLUMN(MultiSPI::SPI_P13));
-
-    // Rest: continue on the back part
     display->AddColumn(MAKE_COLUMN(MultiSPI::SPI_P4));
     display->AddColumn(MAKE_COLUMN(MultiSPI::SPI_P3));
     display->AddColumn(MAKE_COLUMN(MultiSPI::SPI_P2));
-    display->AddColumn(MAKE_COLUMN(MultiSPI::SPI_P1));
+    // P1 isn't working on our Pi/hat (not sure why yet) so we're using
+    // P10 instead :shrug:
+    display->AddColumn(MAKE_COLUMN(MultiSPI::SPI_P10));
 #undef MAKE_COLUMN
 #elif FT_BACKEND == 1
     ServerFlaschenTaschen *display
@@ -284,7 +287,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-#ifdef __linux__
+#ifdef HAVE_MDNS
     ServiceDiscoveryThread* discovery_thread = NULL;
 #endif
 
@@ -324,7 +327,7 @@ int main(int argc, char *argv[]) {
             control_server_run_thread(&layered_display, display, &mutex);
         }
 
-#ifdef __linux__
+#ifdef HAVE_MDNS
         // Create service discovery thread if enabled (after hardware is initialized
         // so we have the correct width/height from the display)
         if (mdns_enabled) {
@@ -372,7 +375,7 @@ int main(int argc, char *argv[]) {
         // Stop presenting before the layer GC thread and the display go away.
         display->StopDisplayThread();
 
-#ifdef __linux__
+#ifdef HAVE_MDNS
         // Shutdown service discovery thread gracefully
         if (discovery_thread != NULL) {
             discovery_thread->Shutdown();
