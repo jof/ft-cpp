@@ -85,7 +85,18 @@ WARMUP = {
     # past that into the settled chart, which is what the panel looks like for
     # the rest of its slot.
     "caiso": 4.0,
+    # ansi spends its first five seconds dialling: two short lines of terminal
+    # text and then a deliberately empty screen while the call goes through. 12
+    # is a little way into the welcome screen painting itself on, which is both
+    # what the demo is for and the only part of it that moves.
+    "ansi": 12.0,
+    # wardial wants the exchange map part filled and a few results in the log
+    # rather than one dialling line under an empty grid.
+    "wardial": 14.0,
     # Deliberately absent, and each for its own reason rather than by oversight:
+    #   gibson, toasters -- both are moving at full speed from frame zero, and
+    #                 both are exactly periodic, so a warmup would only rotate
+    #                 the phase of a loop that has no beginning to miss.
     #   adsb, sats, quake, ships -- these four take their clock from
     #                 time.monotonic(), not from the `t` handed to render(), so
     #                 that aircraft dead-reckon and satellites propagate in real

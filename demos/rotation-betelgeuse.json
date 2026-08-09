@@ -136,6 +136,17 @@
     },
     {
       "kind": "py",
+      "name": "ansi",
+      "module": "ansi",
+      "seconds": 42.0,
+      "fps": 30,
+      "ms": 0.5,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "knit",
       "module": "knit",
       "seconds": 45.0,
@@ -342,6 +353,17 @@
     },
     {
       "kind": "py",
+      "name": "wardial",
+      "module": "wardial",
+      "seconds": 45.0,
+      "fps": 20,
+      "ms": 21.4,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "sf-tree-bounce",
       "module": "pixelart",
       "seconds": 30,
@@ -409,6 +431,17 @@
       "seconds": 60.0,
       "fps": 30,
       "ms": 7.1,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "gibson",
+      "module": "gibson",
+      "seconds": 30.0,
+      "fps": 20,
+      "ms": 36.1,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -530,6 +563,17 @@
       "seconds": 45.0,
       "fps": 20,
       "ms": 37.9,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "toasters",
+      "module": "toasters",
+      "seconds": 32.0,
+      "fps": 30,
+      "ms": 4.1,
       "enabled": true,
       "solo": false,
       "options": {}
