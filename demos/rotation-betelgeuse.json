@@ -94,6 +94,17 @@
     },
     {
       "kind": "py",
+      "name": "propagation",
+      "module": "propagation",
+      "seconds": 30.0,
+      "fps": 10,
+      "ms": 0.3,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "pacman",
       "module": "pixelart",
       "seconds": 30,
@@ -265,6 +276,17 @@
     },
     {
       "kind": "py",
+      "name": "wireworld",
+      "module": "wireworld",
+      "seconds": 45.0,
+      "fps": 28,
+      "ms": 4.0,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "nyancat",
       "module": "nyancat",
       "seconds": 45.0,
@@ -376,6 +398,17 @@
     },
     {
       "kind": "py",
+      "name": "twister",
+      "module": "twister",
+      "seconds": 45.0,
+      "fps": 60,
+      "ms": 2.9,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "fsn",
       "module": "fsn",
       "seconds": 45.0,
@@ -409,6 +442,17 @@
       "seconds": 45.0,
       "fps": 50,
       "ms": 12.7,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "scope",
+      "module": "scope",
+      "seconds": 70.0,
+      "fps": 30,
+      "ms": 7.8,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -490,6 +534,17 @@
       "seconds": 45.0,
       "fps": 40,
       "ms": 15.6,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "tide",
+      "module": "tide",
+      "seconds": 45.0,
+      "fps": 24,
+      "ms": 8.3,
       "enabled": true,
       "solo": false,
       "options": {}
