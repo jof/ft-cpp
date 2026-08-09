@@ -12,14 +12,15 @@ that a NOAA endpoint is having a bad afternoon.
 
 So the network lives here, in a process of its own, on a timer. It writes one
 JSON file per product into a cache directory -- and, for the products whose
-payload is pixels rather than numbers, one binary sidecar beside it, which on
-the wall is written to tmpfs instead of the SD card; see BLOB_DIR.
-`load()` reads that directory
-and **never touches the network** -- it does not import a HTTP library, and it
-returns rather than raises when a file is missing, malformed or ancient.
+payload is pixels rather than numbers, one binary sidecar beside it, which is
+written to tmpfs instead of a flash card where there is one; see BLOB_DIR.
+`load()` reads that directory and **never touches the network** -- it does not
+import a HTTP library, and it returns rather than raises when a file is
+missing, malformed or ancient.
 
   $ python3 ftdata.py --list
   $ python3 ftdata.py --once                 # one pass, then exit
+  $ python3 ftdata.py --once --due --fast    # only what is quick and overdue
   $ python3 ftdata.py --loop 900             # every fifteen minutes
 
 Every record carries `fetched_at`, and `load()` hands back the age alongside
@@ -52,17 +53,17 @@ CACHE_DIR = os.environ.get(
 # rewritten every pass -- 336 MB a day onto the SD card the Pi boots from, by a
 # wide margin the heaviest writer on the machine -- and none of it is worth
 # surviving a reboot, because imagery more than half an hour old is stale by
-# its own TTL. So the pixels go to tmpfs and the metadata stays on disk. On
-# betelgeuse that is /run/ftdata, made by `RuntimeDirectory=ftdata` in
-# ftdata.service; /run is a 182 MB tmpfs with 181 MB free and the machine has
-# 670 MB of RAM to spare, so a window costs about two per cent of one and half
-# a per cent of the other. What it costs at boot is one honest no-data card
-# until ftdata.timer's OnBootSec=2min fires.
+# its own TTL. So the pixels go to tmpfs and the metadata stays on disk. The
+# default is /run/ftdata, which on a Pi running the fetcher under systemd is a
+# line of unit file (`RuntimeDirectory=ftdata`) and nothing else: /run there is
+# a ~180 MB tmpfs and a window costs about two per cent of it. What that costs
+# at boot is one honest no-data card until the first fetch lands.
 #
-# A workstation has no /run/ftdata and cannot make one, so this falls back to
-# the cache directory and a plain checkout keeps working with no setup at all.
-# FT_DATA_BLOBS overrides both, for a scratch cache or a machine that puts its
-# tmpfs somewhere else.
+# Nothing here requires any of that. A checkout that has no /run/ftdata and
+# cannot make one falls back to the cache directory, so running the fetcher by
+# hand works with no setup at all -- it just writes the pixels to disk with the
+# records. FT_DATA_BLOBS overrides both, for a scratch cache or a machine that
+# puts its tmpfs somewhere else.
 BLOB_DIR = os.environ.get("FT_DATA_BLOBS", "/run/ftdata")
 
 # Backstops on the sidecar directory; see sweep_blobs(). Generous on purpose --
@@ -71,16 +72,41 @@ BLOB_DIR = os.environ.get("FT_DATA_BLOBS", "/run/ftdata")
 BLOB_MAX_AGE = float(os.environ.get("FT_DATA_BLOBS_MAX_AGE", "86400"))
 BLOB_MAX_BYTES = int(os.environ.get("FT_DATA_BLOBS_MAX", str(64 << 20)))
 
+# Where the registry splits for the two timers: `--fast` takes the products
+# whose interval is at or under this, ftdata.timer's ordinary pass takes the
+# rest. Five minutes rather than sixty seconds so a product can ask for a
+# two-minute cadence without needing a third timer to give it one.
+FAST_INTERVAL = float(os.environ.get("FT_DATA_FAST_INTERVAL", "300"))
+
 # Products are registered by name. `ttl` is how long a record stays worth
 # believing -- not how often it is fetched, which is the timer's business. A
 # tide prediction is good for a day; a K index is stale within the hour.
 PRODUCTS = {}
 
 
-def product(name, ttl, description):
-    """Register a fetch function. It returns the payload; we add the envelope."""
+def product(name, ttl, description, interval=None, volatile=False):
+    """Register a fetch function. It returns the payload; we add the envelope.
+
+    `interval` is the shortest time worth re-fetching in, and it exists because
+    the original assumption here -- that one timer cadence suits everything --
+    stopped being true the moment a product moved faster than the wall could
+    say. A tide prediction is the same file all afternoon; an aircraft crosses
+    the Bay in four minutes. So the timer no longer decides: it wakes often and
+    asks each product whether it is due, which puts a product's cadence next to
+    its TTL where the reasoning about it already is, and means adding a fast
+    product does not drag the slow ones along with it. None means "every pass",
+    which is what everything did before this existed.
+
+    `volatile` moves the *record* to tmpfs, and it is what makes a one-minute
+    product safe on a machine that boots off an SD card. The blob split already
+    does this for pixels; a record refetched every minute is the same problem in
+    miniature -- 1440 writes a day of something worthless two minutes later and
+    not worth having back after a reboot. What it costs is one honest no-data
+    card for the first tick after boot, which these demos already draw.
+    """
     def wrap(fn):
-        PRODUCTS[name] = {"fn": fn, "ttl": ttl, "description": description}
+        PRODUCTS[name] = {"fn": fn, "ttl": ttl, "description": description,
+                          "interval": interval, "volatile": bool(volatile)}
         return fn
     return wrap
 
@@ -91,6 +117,40 @@ def product(name, ttl, description):
 
 def path_for(name, cache_dir=None):
     return os.path.join(cache_dir or CACHE_DIR, name + ".json")
+
+
+def is_volatile(name):
+    return bool(PRODUCTS.get(name, {}).get("volatile"))
+
+
+def record_dirs(name, cache_dir=None):
+    """Where a record might be. Durable products: the cache, and only that.
+
+    A volatile record lives in the same tmpfs the sidecars use, so the search
+    order is tmpfs first and the cache second -- second rather than not at all,
+    because a machine that has just been upgraded still has yesterday's record
+    on disk under the old rules, and a workstation with no /run/ftdata never
+    stopped writing there. Preferring tmpfs is what makes the stale on-disk
+    copy harmless: it is only ever read when the fresh one is absent, which is
+    exactly the boot-shaped hole `volatile` accepts by design.
+    """
+    if not is_volatile(name):
+        return [cache_dir or CACHE_DIR]
+    return blob_dirs(cache_dir)
+
+
+def record_path(name, cache_dir=None):
+    """The record that `load()` would actually read, or None if there is none.
+
+    For anything that wants the file rather than its contents -- the MOTD stats
+    it instead of parsing it -- so that a caller does not have to know which of
+    the two directories a given product writes to.
+    """
+    for d in record_dirs(name, cache_dir):
+        path = os.path.join(d, name + ".json")
+        if os.path.exists(path):
+            return path
+    return None
 
 
 def blob_dirs(cache_dir=None):
@@ -125,8 +185,16 @@ def load(name, cache_dir=None):
     do about age; see `describe_age()`.
     """
     try:
-        with open(path_for(name, cache_dir)) as fh:
-            rec = json.load(fh)
+        rec = None
+        for d in record_dirs(name, cache_dir):
+            try:
+                with open(os.path.join(d, name + ".json")) as fh:
+                    rec = json.load(fh)
+                break
+            except FileNotFoundError:
+                continue
+        if rec is None:
+            return None
         return rec["payload"], max(0.0, time.time() - float(rec["fetched_at"]))
     except Exception:
         # Missing, half-written, corrupt, or from a future version. All of
@@ -181,6 +249,29 @@ def is_fresh(name, age):
     return ttl is None or age <= ttl
 
 
+def interval_for(name):
+    return PRODUCTS.get(name, {}).get("interval")
+
+
+def is_due(name, cache_dir=None):
+    """Should this product be fetched on this pass?
+
+    Nothing without an interval ever says no, so a fetcher run with --due over
+    the old registry behaves exactly as it did. Nor does a product with no
+    record: an absent file is the one case where waiting cannot help.
+    """
+    interval = interval_for(name)
+    if not interval:
+        return True
+    got = load(name, cache_dir)
+    if got is None:
+        return True
+    # A hair under, because the timer's own wakeup jitter would otherwise make
+    # a 60 s product miss every other tick: at 59.6 s of age against a 60 s
+    # interval it would defer, and the next look is a whole minute later.
+    return got[1] >= interval * 0.9
+
+
 def describe_age(age):
     """A short human phrase for an age in seconds: '4m', '2h', '3d'."""
     if age < 90:
@@ -197,16 +288,22 @@ def describe_age(age):
 # --------------------------------------------------------------------------
 
 def _store(name, payload, source, cache_dir):
-    os.makedirs(cache_dir, exist_ok=True)
+    # A volatile record goes wherever the sidecars go, which is tmpfs on the
+    # wall and the cache directory anywhere else. Same helper as the blobs use,
+    # so the two cannot end up disagreeing about where tmpfs is.
+    out_dir = blob_write_dir(cache_dir) if is_volatile(name) else cache_dir
+    os.makedirs(out_dir, exist_ok=True)
     rec = {"name": name, "fetched_at": time.time(), "source": source,
            "ttl": PRODUCTS[name]["ttl"], "payload": payload}
     # Write-then-rename: a demo reading the cache while the fetcher writes it
-    # must never see half a file. rename(2) within a directory is atomic.
-    fd, tmp = tempfile.mkstemp(dir=cache_dir, prefix="." + name, suffix=".tmp")
+    # must never see half a file. rename(2) within a directory is atomic --
+    # which is also why the temporary file has to be made in the directory it
+    # will land in, rather than in the cache for everything.
+    fd, tmp = tempfile.mkstemp(dir=out_dir, prefix="." + name, suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as fh:
             json.dump(rec, fh)
-        os.replace(tmp, path_for(name, cache_dir))
+        os.replace(tmp, os.path.join(out_dir, name + ".json"))
     except Exception:
         try:
             os.unlink(tmp)
@@ -402,14 +499,30 @@ def fetch(name, cache_dir=None):
     return True
 
 
-def fetch_all(cache_dir=None, only=None):
-    ok = 0
+def fetch_all(cache_dir=None, only=None, due_only=False, max_interval=None):
+    """Fetch products into the cache; return (fetched, considered).
+
+    Two counts rather than one because with --due most passes fetch nothing and
+    that is the healthy case, not a failure -- "0/1" in the journal every minute
+    would read like something is broken. `max_interval` selects the fast half of
+    the registry for the fast timer, by the product's own declared cadence
+    rather than by a list of names in a unit file that would go stale the first
+    time somebody added a product.
+    """
+    ok = considered = 0
     for name in sorted(PRODUCTS):
         if only and name not in only:
             continue
+        if max_interval is not None:
+            interval = interval_for(name)
+            if not interval or interval > max_interval:
+                continue
+        considered += 1
+        if due_only and not is_due(name, cache_dir):
+            continue
         if fetch(name, cache_dir):
             ok += 1
-    return ok
+    return ok, considered
 
 
 # --------------------------------------------------------------------------
@@ -1192,9 +1305,9 @@ def _wind_bay():
 # Hyper-local weather for the wall's own address. wx.py draws these.
 #
 # Three products, from three services, because no single keyless service knows
-# what a panel on 18th Street needs to say. That is not a shortcoming to be
-# papered over -- it is the fact the demo is built around, and it is why each
-# product records *what kind of number it is* as well as its value:
+# what a panel at one street address needs to say. That is not a shortcoming
+# to be papered over -- it is the fact the demo is built around, and it is why
+# each product records *what kind of number it is* as well as its value:
 #
 #   wx-obs-<station>   a real observation, from a real instrument, 2.8 km away
 #   wx-model-<site>    a numerical forecast evaluated at the exact address
@@ -1232,7 +1345,10 @@ def _wind_bay():
 # of the data, and the part that matters is the data's, not the socket's.
 # --------------------------------------------------------------------------
 
-WX_LAT, WX_LON = 37.7627, -122.3966     # 1736 18th Street, San Francisco
+# Defaults, in the same spirit as tide.py's: somewhere real, so a checkout
+# draws a real panel, and overridable so it can be somewhere else. Set
+# FT_WX_SITES and FT_WX_STATIONS for your own address and nearest station.
+WX_LAT, WX_LON = 37.7627, -122.3966     # the Mission, San Francisco
 WX_STATION = "SFOC1"                    # San Francisco Downtown, 2.8 km away
 
 # met.no and NWS both want to know who is calling and how to reach them. This
@@ -1564,6 +1680,1159 @@ for _lat, _lon in _wx_sites:
     register_wx_site(_lat, _lon)
 
 
+# --------------------------------------------------------------------------
+# Aircraft over the Bay. adsb.py draws these.
+#
+# **Which feed, and why not the obvious ones.** Three keyless aggregators
+# publish the same shape of JSON, all descended from readsb's `aircraft.json`,
+# and they were all tried against this exact query before one was picked:
+#
+#   api.adsb.lol/v2/point/...        200 OK, `{"ac": [], "total": 0}`. It
+#                                    answers, it answers quickly, and it answers
+#                                    with nothing. An empty list is not an
+#                                    error, so a demo built on this would have
+#                                    drawn an honest, permanently empty sky.
+#   opendata.adsb.fi/api/v2/...      works; 63 aircraft, 240 ms.
+#   api.airplanes.live/v2/point/...  works; 65 aircraft, 250 ms.
+#
+# The last one is what is used, and adsb.fi is the drop-in second source if it
+# ever stops -- the response shapes differ only in that adsb.fi calls the list
+# `aircraft` and airplanes.live calls it `ac`. Neither wants a key. Both ask for
+# civility rather than credentials: airplanes.live documents roughly one request
+# a second, and this asks once a minute.
+#
+# **Ground traffic is dropped, and counted.** Half of what comes back is parked
+# or taxiing -- 36 of 70 on a Sunday morning -- reported as the *string*
+# "ground" in `alt_baro` rather than a number. None of it can be dead-reckoned,
+# because a pushback tug does not hold a groundspeed and a track, and a heap of
+# static dots on the SFO apron is the brightest thing on the panel for the worst
+# possible reason. So the record keeps the airborne ones and stores the ground
+# count as a number, which is the honest version of throwing them away: the
+# panel can say "34 airborne, 36 on the ground" and mean it.
+#
+# **The payload is columnar**, one list per field rather than one dict per
+# aircraft, and that is worth about 40% of the bytes at this size -- 120
+# aircraft do not need the string "alt" repeated 120 times. It also happens to
+# be exactly what the demo wants, since every one of these columns becomes a
+# numpy array in build() and nothing has to be transposed on a 600 MHz Pi.
+#
+# **Every aircraft carries its own position age.** `seen_pos` is how long ago
+# that aircraft's position was last heard, and it is not the same as the age of
+# the fetch: a jet over the Gate updates twice a second and something in the
+# hills behind Livermore may not have been heard for half a minute. The demo
+# dead-reckons from `t - pa` per aircraft rather than from one timestamp for the
+# whole record, which costs one float a plane and is the difference between a
+# picture that is a minute old and one that is a minute old *and knows it*.
+#
+# One minute is the interval and five is the TTL, and the gap between them is
+# deliberate: at 500 knots a minute of extrapolation is 8 nm, which the dead
+# reckoning covers, and five minutes is 40 nm, which nothing covers. Past the
+# TTL the demo stops drawing aircraft rather than drawing fiction. The record is
+# `volatile` because it is rewritten 1440 times a day and is worthless two
+# minutes later; none of that belongs on the flash card the Pi boots from.
+# --------------------------------------------------------------------------
+
+ADSB_URL = "https://api.airplanes.live/v2/point/%.4f/%.4f/%d"
+
+# The wall's own address, in the Mission. Everything on the panel is measured
+# from here, so this is the one number to change for another installation.
+ADSB_LAT, ADSB_LON = 37.7627, -122.3966
+
+# Nautical miles. Comfortably outside adsb.py's map crop, which reaches about
+# 32 nm at its far corner, so the panel is never showing the edge of the query
+# rather than the edge of the sky.
+ADSB_RADIUS_NM = 50
+
+# The nearest this many are kept. Two hundred-odd arrive at a busy hour, a
+# 320x64 panel is a mess above about fifty, and the ones that get cut are by
+# construction the furthest away and the least likely to be on the map at all.
+ADSB_MAX = 120
+
+ADSB_TTL = 300
+ADSB_INTERVAL = 60
+
+# A truthful User-Agent, with an address that reaches whoever is fetching.
+# Deliberately not ftdata.get()'s generic one: this is a volunteer-run feed
+# being asked for something 1440 times a day, and it is entitled to know who is
+# asking. Set FT_CONTACT if that is not the person below.
+ADSB_UA = ("flaschen-taschen-adsb/1 (+https://github.com/hzeller/flaschen-taschen; %s)"
+           % os.environ.get("FT_CONTACT", "jof@thejof.com"))
+
+
+def _adsb_num(x):
+    """A finite number, or None. Rejects the string 'ground' and every null."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return None
+    return float(x) if x == x and abs(x) != float("inf") else None
+
+
+@product("adsb-bay", ttl=ADSB_TTL, interval=ADSB_INTERVAL, volatile=True,
+         description="airborne ADS-B within %d nm of the wall, from "
+                     "airplanes.live" % ADSB_RADIUS_NM)
+def _adsb_bay():
+    """The airborne traffic around the wall, trimmed to what a panel can draw.
+
+    Rounding is chosen against what a pixel is worth rather than against what
+    looks tidy. One panel column is about 300 m, so four decimal places of
+    latitude (11 m) is already three hundred times finer than anything that can
+    be seen, and whole degrees of track put a 500 kt aircraft 0.7 km off after
+    five whole minutes of extrapolation -- which is a fifth of the error the
+    minute-old fix itself carries. Everything is stored as int where an int can
+    say it, because JSON writes `12725` in five bytes and `12725.0` in seven.
+
+    An aircraft with no track is dropped rather than drawn stationary. Every
+    airborne aircraft in a day of samples had one; the ones that do not are
+    TIS-B and MLAT shadows whose position is a guess in the first place, and a
+    mark that sits still on a map where everything else is moving reads as a
+    bug rather than as an aircraft.
+    """
+    import urllib.request
+    url = ADSB_URL % (ADSB_LAT, ADSB_LON, ADSB_RADIUS_NM)
+    req = urllib.request.Request(url, headers={"User-Agent": ADSB_UA})
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        doc = json.loads(resp.read())
+
+    seen = doc.get("ac")
+    if not isinstance(seen, list):
+        # adsb.fi calls the same list `aircraft`. Accepting both costs a line
+        # and makes swapping the source a one-line change to ADSB_URL.
+        seen = doc.get("aircraft")
+    if not isinstance(seen, list):
+        raise ValueError("no aircraft list in the response from %s" % url)
+
+    # readsb reports `now` in milliseconds since the epoch. Falling back to the
+    # local clock rather than failing: the positions are still good, and a demo
+    # that dead-reckons from a clock a second out is not measurably wrong.
+    served = _adsb_num(doc.get("now"))
+    t = served / 1000.0 if served and served > 1e11 else time.time()
+
+    ground = 0
+    rows = []
+    for a in seen:
+        if a.get("alt_baro") == "ground":
+            ground += 1
+            continue
+        lat, lon = _adsb_num(a.get("lat")), _adsb_num(a.get("lon"))
+        alt, gs = _adsb_num(a.get("alt_baro")), _adsb_num(a.get("gs"))
+        trk = _adsb_num(a.get("track"))
+        if None in (lat, lon, alt, gs, trk):
+            continue
+        # The callsign is what a person reads; the registration is the fallback
+        # for the ones flying without one, and the ICAO address is the fallback
+        # for that. Something is always printable, and none of it is invented.
+        call = str(a.get("flight") or "").strip() or str(a.get("r") or "").strip()
+        rows.append((_adsb_num(a.get("dst")) or 0.0, {
+            "hex": str(a.get("hex") or "")[:6],
+            "call": call[:8] or None,
+            "type": (str(a.get("t")).strip()[:4] if a.get("t") else None),
+            "cat": (str(a.get("category")).strip()[:2] if a.get("category") else None),
+            "lat": round(lat, 4), "lon": round(lon, 4),
+            "alt": int(round(alt)), "gs": int(round(gs)),
+            "trk": int(round(trk)) % 360,
+            "dst": round(_adsb_num(a.get("dst")) or 0.0, 1),
+            "pa": round(max(0.0, _adsb_num(a.get("seen_pos")) or 0.0), 1),
+        }))
+
+    rows.sort(key=lambda r: r[0])
+    kept = [r[1] for r in rows[:ADSB_MAX]]
+    cols = ("hex", "call", "type", "cat", "lat", "lon", "alt", "gs", "trk",
+            "dst", "pa")
+    payload = {
+        "origin": [ADSB_LAT, ADSB_LON], "radius_nm": ADSB_RADIUS_NM,
+        "t": t, "n": len(kept), "n_air": len(rows), "n_ground": ground,
+        "n_seen": len(seen), "capped": len(rows) > len(kept),
+        "units": {"alt": "ft baro", "gs": "kn", "trk": "deg true",
+                  "dst": "nm", "pa": "s since position last heard"},
+        "source": "airplanes.live",
+    }
+    payload.update({c: [r[c] for r in kept] for c in cols})
+    return payload, url
+
+
+# --------------------------------------------------------------------------
+# What California is running on. caiso.py draws this.
+#
+# CAISO's "Today's Outlook" page is backed by three keyless CSVs that are
+# rewritten every five minutes, and they are the whole product: no key, no
+# registration, no terms beyond ordinary politeness. The alternative is
+# EIA-930, which is the same picture an hour later and **needs an API key**,
+# and OASIS, which needs a client certificate and speaks zipped XML. So this
+# is the source, and it is fetched at a tenth of the rate it changes.
+#
+# **The paths have moved and will move again.** Every script older than about
+# a year fetches `/outlook/SP/fuelsource.csv`; that 404s now. What answers
+# today is `/outlook/current/<name>.csv`, with `/outlook/history/<YYYYMMDD>/`
+# alongside it for finished days. Both were checked by hand before this was
+# written, and CAISO_BASE is one string so the next move is one line.
+#
+# Three files rather than one because they are three different measurements
+# and only the first is a mix:
+#
+#   fuelsource.csv  thirteen fuels in MW, 5-minute, midnight to now
+#   demand.csv      day-ahead and hour-ahead forecasts for the *whole* day,
+#                   plus actual demand up to now and nulls after it
+#   co2.csv         emissions by source in metric tons an hour, to now
+#
+# The forecast columns are why demand.csv is worth a request of its own: they
+# are the only thing in any of this that knows what the evening looks like, so
+# the panel has something honest to draw to the right of the now-line instead
+# of dead space.
+#
+# **The Time column is CAISO's own local wall clock**, "HH:MM" with no date and
+# no offset, which is the Pacific zone whatever the machine fetching it thinks
+# it is in. So the timestamps are resolved here, once, against
+# America/Los_Angeles explicitly rather than against `localtime` -- a fetcher
+# run from a laptop in another zone would otherwise write a record whose
+# midnight is somebody else's midnight, and the panel would draw the whole day
+# shifted with nothing to say it had. Epoch seconds from there on, like the
+# tides. The two DST days are handled by resolving each row separately instead
+# of assuming 288 rows times 300 seconds spans a day: in March one of those
+# days is 276 rows long and in November one is 300, and a uniform grid laid
+# over either puts the evening peak an hour out.
+#
+# Everything is stored as published, ungrouped: thirteen fuels, not five bands.
+# How to group them so that sixty-four rows of LED can be read from across a
+# room is a *drawing* decision and it belongs in the demo, where it can be
+# argued with, rather than baked irreversibly into the cache.
+# --------------------------------------------------------------------------
+
+CAISO_BASE = os.environ.get("FT_CAISO_BASE", "https://www.caiso.com/outlook")
+CAISO_TZ = "America/Los_Angeles"
+
+# An hour. The numbers themselves arrive every five minutes, so a record this
+# old has missed eleven of them and the leading edge of the curve is visibly
+# behind the clock -- which is exactly when the panel should start saying so.
+# The rest of the day's curve is still perfectly true, so this is a warning
+# threshold and not a delete: caiso.py keeps drawing and flags it.
+CAISO_TTL = 3600
+
+# Ten minutes, against a five-minute source. Half the available resolution,
+# deliberately: nobody reads a 24-hour area chart closely enough to see one
+# missing sample, and this is a public server with no key on it.
+CAISO_INTERVAL = 600
+
+
+def _caiso_csv(name):
+    """One outlook CSV as (header, rows of strings). Raises if it is not one."""
+    url = "%s/current/%s.csv" % (CAISO_BASE, name)
+    text = get(url).decode("utf-8", "replace")
+    import csv
+    import io
+    rows = list(csv.reader(io.StringIO(text)))
+    if len(rows) < 2 or not rows[0] or rows[0][0].strip().lower() != "time":
+        # A 404 from this host is a styled HTML page with a 200-shaped body in
+        # front of it, so "did it parse as CSV" is not the question; "is the
+        # first column called Time" is.
+        raise ValueError("%s is not a Today's Outlook CSV" % url)
+    return [h.strip() for h in rows[0]], [r for r in rows[1:] if r], url
+
+
+def _caiso_key(header):
+    """'Small hydro' -> 'small_hydro'. The published name, mechanically."""
+    return "".join(c if c.isalnum() else "_" for c in header.strip().lower())
+
+
+def _caiso_epochs(datestr, stamps):
+    """['00:00', ...] on a given Pacific date -> epoch seconds.
+
+    Row by row rather than t0 + i*step, because two days a year are not 24
+    hours long and a uniform grid over either of them is an hour wrong by the
+    evening -- which is the half of the day this panel is about. A stamp that
+    does not advance means the file has walked into the next day, which is what
+    demand.csv's trailing 00:00 is.
+    """
+    import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(CAISO_TZ)
+    except Exception:                                        # noqa: BLE001
+        tz = None
+    day = datetime.date.fromisoformat(datestr)
+    out, prev, extra = [], None, 0
+    for s in stamps:
+        hh, mm = int(s[:2]), int(s[3:5])
+        minute = hh * 60 + mm
+        if prev is not None and minute <= prev:
+            extra += 1
+        prev = minute
+        when = datetime.datetime.combine(
+            day + datetime.timedelta(days=extra), datetime.time(hh, mm))
+        # No tzdata on the machine is a real possibility on a minimal image, and
+        # the fallback is right where it matters: the wall is in the same zone
+        # as the ISO. It is wrong elsewhere, which is why it is not the default.
+        out.append((when.replace(tzinfo=tz) if tz else when).timestamp())
+    return out
+
+
+def _caiso_today():
+    """Today's date in CAISO's zone, as the CSVs mean it."""
+    import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.datetime.now(ZoneInfo(CAISO_TZ)).date().isoformat()
+    except Exception:                                        # noqa: BLE001
+        return datetime.date.today().isoformat()
+
+
+def _caiso_num(s):
+    """A cell as a float, or None. Blank means 'not yet', never zero.
+
+    The distinction is the whole reason this is not `float(s or 0)`: demand.csv
+    carries the rest of the day as empty cells, and a zero there would draw a
+    grid that had switched itself off at teatime.
+    """
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _caiso_table(name, datestr):
+    """(t, {column_key: [values]}, order, url) for one outlook CSV.
+
+    Trailing rows in which every column is blank are dropped -- the mix and
+    emissions files are written for the whole day and filled in as it happens,
+    so the tail is not missing data, it is data that has not happened yet.
+    """
+    header, rows, url = _caiso_csv(name)
+    keys = [_caiso_key(h) for h in header[1:]]
+    cols = {k: [] for k in keys}
+    stamps = []
+    for r in rows:
+        vals = [_caiso_num(v) for v in r[1:len(header)]]
+        vals += [None] * (len(keys) - len(vals))
+        stamps.append(r[0].strip())
+        for k, v in zip(keys, vals):
+            cols[k].append(v)
+    while stamps and all(cols[k][-1] is None for k in keys):
+        stamps.pop()
+        for k in keys:
+            cols[k].pop()
+    if not stamps:
+        raise ValueError("%s has no populated rows yet" % url)
+    return _caiso_epochs(datestr, stamps), cols, keys, url
+
+
+def _caiso_round(values, places=0):
+    """Store MW as integers. A tenth of a megawatt is not a thing anyone sees."""
+    if places:
+        return [None if v is None else round(v, places) for v in values]
+    return [None if v is None else int(round(v)) for v in values]
+
+
+@product("caiso-mix", ttl=CAISO_TTL, interval=CAISO_INTERVAL,
+         description="CAISO fuel mix, demand and CO2 for today, 5-minute")
+def _caiso_mix():
+    """Today's California grid: what generated it, how much of it, and its CO2.
+
+    Three requests and about 30 kB of record by the end of a day, which is the
+    largest thing in this cache that is not pixels. It is worth it and it is
+    deliberately not `volatile`: the payload is the day *so far*, so a record
+    that survives a reboot is the difference between coming back up with the
+    whole morning's duck curve and coming back up with a blank chart and one
+    sample on it.
+
+    Only the fuel mix is required. Demand and emissions are fetched separately
+    and each is allowed to fail on its own, because a panel that can say what
+    the state is burning is still worth having when the forecast endpoint is
+    having an afternoon -- and losing all three because one of them moved is
+    exactly the failure this file exists to avoid.
+    """
+    date = _caiso_today()
+    t, fuels, order, url = _caiso_table("fuelsource", date)
+    for k in order:
+        fuels[k] = _caiso_round(fuels[k])
+
+    payload = {
+        "date": date, "tz": CAISO_TZ,
+        "t": t, "n": len(t),
+        "span": [t[0], t[-1]],
+        # Midnight to midnight in CAISO's zone: the axis the day is drawn on,
+        # and not derivable from `t` once the record is only half a day long.
+        "day": [_caiso_epochs(date, ["00:00"])[0],
+                _caiso_epochs(date, ["00:00", "00:00"])[1]],
+        "fuels": fuels, "fuel_order": order,
+        "units": {"generation": "MW", "demand": "MW",
+                  "co2": "metric tons per hour"},
+        "demand": None, "co2": None,
+    }
+
+    try:
+        dt, dem, dorder, _ = _caiso_table("demand", date)
+        payload["demand"] = {"t": dt, "n": len(dt), "order": dorder,
+                             "series": {k: _caiso_round(dem[k]) for k in dorder}}
+    except Exception as e:                                   # noqa: BLE001
+        print("ftdata: caiso-mix demand unavailable: %r" % e, file=sys.stderr)
+
+    try:
+        ct, co2, corder, _ = _caiso_table("co2", date)
+        payload["co2"] = {"t": ct, "n": len(ct), "order": corder,
+                          "series": {k: _caiso_round(co2[k]) for k in corder}}
+    except Exception as e:                                   # noqa: BLE001
+        print("ftdata: caiso-mix co2 unavailable: %r" % e, file=sys.stderr)
+
+    return payload, url
+
+
+# --------------------------------------------------------------------------
+# The ground under the building. quake.py draws this.
+#
+# **One feed, two scales, and a third request that is not a feed.** USGS
+# publishes a fixed set of summary GeoJSON files, regenerated every minute and
+# served off a CDN, and `all_week.geojson` alone answers both halves of what the
+# panel wants: everything the ANSS network located anywhere on Earth in the last
+# seven days, which contains both every M0.4 under Berkeley and every M4.5+ from
+# Tonga. Taking one file rather than composing `all_day` with `2.5_week` and
+# `4.5_week` avoids the whole class of bug where two feeds disagree about the
+# same event -- USGS revises magnitudes for hours after an origin, and two files
+# fetched a second apart can hold two versions of one earthquake. It is 1.4 MB,
+# which at a ten-minute cadence is 2.4 kB/s averaged, and the record we keep
+# from it is about forty times smaller.
+#
+# What is stored is trimmed to what quake.py draws:
+#
+#   local    every event within 300 km of the wall, no magnitude floor at all,
+#            with distance and bearing precomputed here so the demo never does
+#            trigonometry per frame
+#   world    the M4.5+ of the week as (time, magnitude) pairs only -- that is a
+#            sparkline and nothing else -- plus the single largest in full
+#   baseline the last M4.0+ within 100 km, whenever it was
+#
+# **The baseline is the one thing the feeds cannot answer**, and the panel's
+# headline number depends on it. A local M4 happens a few times a year, so on
+# almost every day of the year the answer lies outside every summary window that
+# exists -- `significant_month` is global and a Bay Area M4.2 does not qualify.
+# So that one number comes from the FDSN event service instead, which is the
+# same catalogue and equally keyless: one radius query, `limit=1`, ordered by
+# time, about 1 kB and under a second. It is fetched inside its own try/except
+# because a failure there must not cost us the week's events too; when it fails
+# the payload carries `baseline: null` and quake.py prints `--` rather than a
+# number it does not have.
+#
+# **Quarry blasts are dropped.** The feed's `type` field distinguishes
+# `earthquake` from `quarry blast`, `explosion` and `ice quake`, and the East Bay
+# quarries put several a week into a 300 km radius. A demo about the ground
+# moving on its own should not count somebody's morning shot, so non-earthquakes
+# are filtered and the count of what was dropped is kept, because a filter you
+# cannot see is a filter you cannot check.
+# --------------------------------------------------------------------------
+
+QUAKE_FEED = ("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/"
+              "all_week.geojson")
+QUAKE_FDSN = "https://earthquake.usgs.gov/fdsnws/event/1/query"
+
+# The wall's own address, the same one wx.py uses: Sequoia Fabrica, 1736 18th
+# Street. Every distance and bearing in the payload is from here.
+QUAKE_LAT, QUAKE_LON = 37.7627, -122.3966
+
+QUAKE_LOCAL_KM = 300.0          # "near here", generously drawn
+QUAKE_WORLD_MAG = 4.5           # the planet's week, the conventional threshold
+QUAKE_BASELINE_KM = 100.0       # "close enough that the room felt it"
+QUAKE_BASELINE_MAG = 4.0
+
+# An hour. The catalogue is revised continuously -- magnitudes move, events are
+# deleted -- but nothing in this picture curdles quickly, and the honest failure
+# is a panel that says it is looking at hour-old data rather than one that goes
+# blank. Past the TTL quake.py flags it; past three times it stops drawing.
+QUAKE_TTL = 3600
+
+
+def _quake_km_bearing(lat, lon):
+    """Great-circle distance in km and compass bearing from the wall."""
+    import math
+    la0, lo0 = math.radians(QUAKE_LAT), math.radians(QUAKE_LON)
+    la1, lo1 = math.radians(float(lat)), math.radians(float(lon))
+    dlo = lo1 - lo0
+    # Haversine rather than the equirectangular approximation the demo could
+    # get away with: this radius reaches Cape Mendocino and the southern San
+    # Joaquin, and the flat-earth error at 300 km is a couple of kilometres --
+    # small, but this is the number the panel prints next to a place name.
+    h = (math.sin((la1 - la0) / 2) ** 2
+         + math.cos(la0) * math.cos(la1) * math.sin(dlo / 2) ** 2)
+    km = 2 * 6371.0088 * math.asin(min(1.0, math.sqrt(h)))
+    y = math.sin(dlo) * math.cos(la1)
+    x = math.cos(la0) * math.sin(la1) - math.sin(la0) * math.cos(la1) * math.cos(dlo)
+    return km, math.degrees(math.atan2(y, x)) % 360.0
+
+
+def _quake_event(feature, want_place=True):
+    """One GeoJSON feature reduced to the fields quake.py actually draws."""
+    p = feature.get("properties") or {}
+    lon, lat, dep = (list(feature.get("geometry", {}).get("coordinates") or [])
+                     + [None, None, None])[:3]
+    mag = p.get("mag")
+    if mag is None or lat is None or lon is None:
+        return None
+    km, bearing = _quake_km_bearing(lat, lon)
+    out = {"id": feature.get("id"), "t": float(p["time"]) / 1000.0,
+           "mag": round(float(mag), 2), "magtype": p.get("magType"),
+           "lat": round(float(lat), 4), "lon": round(float(lon), 4),
+           "dep": None if dep is None else round(float(dep), 1),
+           "km": round(km, 1), "bearing": round(bearing)}
+    if want_place:
+        # The feed's place strings run to "16km SSE of Cobb, California" and
+        # occasionally much longer. The panel has room for about twenty
+        # characters, and the leading distance is one we recomputed ourselves.
+        out["place"] = str(p.get("place") or "")[:48]
+    return out
+
+
+def _quake_baseline():
+    """The last M4+ within 100 km, from FDSN. None if the service says no."""
+    from urllib.parse import urlencode
+    url = QUAKE_FDSN + "?" + urlencode({
+        "format": "geojson", "latitude": "%.4f" % QUAKE_LAT,
+        "longitude": "%.4f" % QUAKE_LON,
+        "maxradiuskm": "%g" % QUAKE_BASELINE_KM,
+        "minmagnitude": "%g" % QUAKE_BASELINE_MAG,
+        # 1900 rather than an open start: ANSS has nothing instrumental before
+        # then anyway, and a bounded query is the polite kind to send.
+        "starttime": "1900-01-01", "orderby": "time", "limit": "1",
+    })
+    doc = get_json(url, timeout=30)
+    feats = doc.get("features") or []
+    if not feats:
+        return None
+    ev = _quake_event(feats[0])
+    if ev is not None:
+        ev["radius_km"] = QUAKE_BASELINE_KM
+        ev["min_mag"] = QUAKE_BASELINE_MAG
+    return ev
+
+
+@product("quake-usgs", ttl=QUAKE_TTL, interval=600,
+         description="USGS ANSS: everything within 300 km, the world's M4.5+")
+def _quake_usgs():
+    """A week of earthquakes, trimmed to two scales and one long baseline."""
+    doc = get_json(QUAKE_FEED, timeout=60)
+    feats = doc.get("features")
+    if not isinstance(feats, list) or not feats:
+        raise ValueError("no features in the USGS week feed")
+
+    local, world, dropped = [], [], 0
+    biggest = None
+    for f in feats:
+        p = f.get("properties") or {}
+        mag = p.get("mag")
+        if mag is None:
+            continue
+        geom = (f.get("geometry") or {}).get("coordinates") or []
+        if len(geom) < 2 or geom[0] is None or geom[1] is None:
+            continue
+        if p.get("type") not in (None, "earthquake"):
+            dropped += 1
+            continue
+        km, _ = _quake_km_bearing(geom[1], geom[0])
+        if km <= QUAKE_LOCAL_KM:
+            ev = _quake_event(f)
+            if ev is not None:
+                local.append(ev)
+        if float(mag) >= QUAKE_WORLD_MAG:
+            world.append([round(float(p["time"]) / 1000.0, 1),
+                          round(float(mag), 2)])
+            if biggest is None or float(mag) > biggest["mag"]:
+                biggest = _quake_event(f)
+
+    # Newest first. The demo wants "the latest" far more often than it wants a
+    # scan, and sorting once here is free.
+    local.sort(key=lambda e: e["t"], reverse=True)
+    world.sort()
+
+    try:
+        baseline = _quake_baseline()
+    except Exception as e:                                   # noqa: BLE001
+        # Losing the headline scalar must not lose the map with it.
+        print("ftdata: quake-usgs baseline query failed: %r" % e,
+              file=sys.stderr)
+        baseline = None
+
+    gen = doc.get("metadata", {}).get("generated")
+    return {
+        "site": [QUAKE_LAT, QUAKE_LON],
+        "generated": None if gen is None else float(gen) / 1000.0,
+        "feed": "all_week.geojson",
+        "span_h": 168.0,
+        "local": {"radius_km": QUAKE_LOCAL_KM, "n": len(local),
+                  "non_earthquakes_dropped": dropped, "events": local},
+        "world": {"min_mag": QUAKE_WORLD_MAG, "n": len(world),
+                  "biggest": biggest, "events": world},
+        "baseline": baseline,
+    }, QUAKE_FEED
+
+
+# --------------------------------------------------------------------------
+# Orbital elements, from CelesTrak's GP service. sats.py propagates these.
+#
+# This is the slowest-moving product in the file and the fastest-moving demo,
+# which is the whole point of it. Everything else here fetches a *number that
+# changes* -- a tide height, a K index, a wind field -- and the panel is only as
+# alive as the fetcher. These are elements: they describe an orbit rather than a
+# position, they are revised about once a day, and the demo turns them into a
+# position by knowing what time it is. So `sats.py` moves continuously, forever,
+# on a cache record that is three days old and still perfectly good.
+#
+# Hence ttl=3 days and interval=86400. Fetching this every quarter hour would be
+# 96 requests a day at CelesTrak to receive the same file 95 times; the service
+# is free, keyless and asks politely for exactly this restraint. Not volatile:
+# a record worth three days is emphatically worth surviving a reboot, and one
+# write a day is nothing on any flash card.
+#
+# **Three group queries, not fifteen object queries.** `gp.php?CATNR=25544`
+# works and would fetch precisely what is wanted, but fifteen of them is fifteen
+# requests for 8 kB of data that three requests already contain. GROUP=stations
+# is 9 kB, GROUP=amateur 40 kB and GROUP=weather 30 kB; the union is parsed,
+# fifteen objects are picked out of it by NORAD number and the other 180 are
+# dropped. What is stored is 2 kB.
+#
+# **GROUP=noaa no longer exists.** The obvious pick for a ham-adjacent wall is
+# NOAA 15/18/19, the APT birds a $20 dongle can hear -- and CelesTrak answers
+# `GROUP=noaa not found` now, with those three gone from GROUP=weather too,
+# because NOAA ended POES operations in 2025 and the group went with them. The
+# polar weather birds here are their successors: NOAA-20 and NOAA-21 (JPSS,
+# HRD not APT), MetOp-B and Meteor-M2 3, which is the one still transmitting
+# LRPT that anybody in the shop could actually receive.
+#
+# **The payload is the seven mean elements and nothing else**, because that is
+# what the propagator in sats.py consumes. BSTAR is dropped: it is the SGP4 drag
+# term, sats.py does not implement SGP4, and storing a number the demo cannot
+# honour would invite somebody to assume it does. MEAN_MOTION_DOT is kept and is
+# used -- it is the TLE's n-dot/2 in rev/day^2, and the quadratic term it feeds
+# into the mean anomaly is the one piece of drag a Kepler propagator can carry.
+#
+# Times are epoch seconds, as everywhere else here. The EPOCH field is an ISO
+# stamp in UTC with no offset on it and microseconds that matter -- a second of
+# epoch error is 7 km along track for the ISS -- so it is parsed rather than
+# truncated.
+# --------------------------------------------------------------------------
+
+CELESTRAK_GP = "https://celestrak.org/NORAD/elements/gp.php"
+
+# The groups worth one request each, and what a satellite drawn from each is
+# called on the panel. The kind rides into the payload because the demo colours
+# by it: stations white, amateur green, weather amber.
+SAT_GROUPS = (("stations", "station"), ("amateur", "amateur"),
+              ("weather", "weather"))
+
+# The roster. NORAD number, the short label the panel has room for, and a note
+# on why it earns one of fifteen places on a 320 px map. Deliberately modest:
+# the amateur group alone is 97 objects and forty Russian cubesats in one
+# sun-synchronous plane draw as a single smear.
+SAT_ROSTER = (
+    (25544, "ISS",     "the one everybody looks for; 51.6 deg, 90 min"),
+    (48274, "CSS",     "Tiangong, the other crewed station, 41.5 deg"),
+    (7530,  "AO-7",    "launched 1974 and still worked today, the oldest"),
+    (22825, "AO-27",   "FM, still up after thirty years"),
+    (24278, "FO-29",   "JAS-2, linear transponder, a classic"),
+    (27607, "SO-50",   "the FM bird most first contacts are made on"),
+    (39444, "AO-73",   "FUNcube-1, linear plus a telemetry beacon"),
+    (40967, "AO-85",   "Fox-1A, 64.8 deg so it fills in the mid latitudes"),
+    (44909, "RS-44",   "linear, high and slow, long passes"),
+    (53109, "IO-117",  "GreenCube: a digipeater at 5900 km, MEO not LEO"),
+    (43700, "QO-100",  "Es'hail-2: geostationary, so it never moves at all"),
+    (43013, "NOAA-20", "JPSS-1, sun-synchronous polar"),
+    (54234, "NOAA-21", "JPSS-2, the same plane half an orbit apart"),
+    (38771, "METOP-B", "EUMETSAT polar, the European half of the pair"),
+    (57166, "METEOR",  "Meteor-M2 3, still sending LRPT you can receive"),
+)
+
+SATS_TTL = 3 * 86400
+SATS_INTERVAL = 86400
+
+
+def _gp_epoch(s):
+    """'2026-08-08T22:57:12.255840' in UTC -> epoch seconds.
+
+    The fractional part is kept. It looks like noise next to a three-day TTL,
+    but epoch is the origin the whole propagation hangs off: a second of error
+    puts the ISS 7.7 km along its track, which is two pixels on this map and
+    rather more than the propagator's own accuracy budget.
+    """
+    import calendar
+    head, _, frac = str(s).partition(".")
+    base = float(calendar.timegm(time.strptime(head, "%Y-%m-%dT%H:%M:%S")))
+    return base + (float("0." + frac) if frac.isdigit() else 0.0)
+
+
+def _gp_url(group):
+    from urllib.parse import urlencode
+    return CELESTRAK_GP + "?" + urlencode({"GROUP": group, "FORMAT": "json"})
+
+
+@product("sats", ttl=SATS_TTL, interval=SATS_INTERVAL,
+         description="CelesTrak GP elements for %d satellites" % len(SAT_ROSTER))
+def _sats():
+    """Mean elements for the roster, out of three CelesTrak group queries.
+
+    A group that fails is skipped rather than fatal: the amateur file being
+    unreachable should cost the panel its amateur birds for a day, not the ISS.
+    The product only fails outright if nothing at all was found, since an empty
+    roster would leave sats.py drawing an empty map with no explanation.
+    """
+    wanted = dict((cat, (label, note)) for cat, label, note in SAT_ROSTER)
+    found = {}
+    kinds = {}
+    sources = []
+    errors = []
+    for group, kind in SAT_GROUPS:
+        url = _gp_url(group)
+        try:
+            rows = get_json(url, timeout=30)
+        except Exception as e:                                # noqa: BLE001
+            errors.append("%s: %r" % (group, e))
+            continue
+        sources.append(url)
+        for rec in rows if isinstance(rows, list) else [rows]:
+            cat = rec.get("NORAD_CAT_ID")
+            # Keep the first group a satellite turns up in: the ISS is in both
+            # stations and amateur, and it is a station with a ham radio on it
+            # rather than an amateur satellite, which is also how it is coloured.
+            if cat in wanted and cat not in found:
+                found[cat] = rec
+                kinds[cat] = kind
+
+    if not found:
+        raise ValueError("no roster satellites in any CelesTrak group (%s)"
+                         % "; ".join(errors) if errors else "empty response")
+
+    sats = []
+    for cat, label, _note in SAT_ROSTER:
+        rec = found.get(cat)
+        if rec is None:
+            continue
+        sats.append({
+            "id": int(cat), "label": label, "kind": kinds[cat],
+            "name": str(rec.get("OBJECT_NAME") or label),
+            "epoch": _gp_epoch(rec["EPOCH"]),
+            # rev/day, and rev/day^2 for the TLE's n-dot/2 field.
+            "n": float(rec["MEAN_MOTION"]),
+            "ndot2": float(rec.get("MEAN_MOTION_DOT") or 0.0),
+            "e": float(rec["ECCENTRICITY"]),
+            # Degrees, as the GP set gives them; sats.py converts once.
+            "i": float(rec["INCLINATION"]),
+            "raan": float(rec["RA_OF_ASC_NODE"]),
+            "argp": float(rec["ARG_OF_PERICENTER"]),
+            "ma": float(rec["MEAN_ANOMALY"]),
+        })
+
+    epochs = [s["epoch"] for s in sats]
+    return {
+        "sats": sats, "count": len(sats), "wanted": len(SAT_ROSTER),
+        "missing": [label for cat, label, _ in SAT_ROSTER if cat not in found],
+        # The oldest element set in the record, which is the age that actually
+        # bounds the propagation -- not the age of the fetch, which only says
+        # when we last asked. A group that 404s for a week leaves fresh-looking
+        # records full of week-old elements, and this is how the panel notices.
+        "epoch_oldest": min(epochs), "epoch_newest": max(epochs),
+        "errors": errors,
+        "units": {"n": "rev/day", "ndot2": "rev/day^2", "angles": "deg",
+                  "epoch": "epoch seconds UTC"},
+    }, sources[0] if sources else CELESTRAK_GP
+
+
+# --------------------------------------------------------------------------
+# Ship movements at the Port of San Francisco, from the Port's own cruise
+# terminal schedule. ships.py draws them against the Golden Gate tide.
+#
+# **Why a schedule and not AIS.** The obvious source for "what is moving in the
+# Bay" is AIS, and every AIS feed within reach of this project wants a key:
+# aisstream.io, MarineTraffic and VesselFinder all register you first, and
+# AISHub's price is a receiver of your own feeding the pool. The Marine
+# Exchange of the San Francisco Bay Region does publish exactly the report this
+# demo would want -- due to arrive, due to depart, vessels in port, updated
+# around the clock -- and sells it to members; sfmx.org has the sample PDFs up
+# and the live ones behind the membership. So there is no keyless live-position
+# feed for this bay, and a wall in a workshop is not going to invent one.
+#
+# What *is* public, free and authoritative is the Port's own cruise terminal
+# schedule: a PDF calendar of every cruise call at Piers 27 and 35 for the year,
+# with the vessel, the berth, the line, the ETA and ETD to the minute and the
+# port either side. Cruise ships are the largest vessels that come through the
+# Gate on a published timetable, which makes them the ones this panel can say
+# something true about.
+#
+# **A caveat that belongs in the record and not just in the demo.** These are
+# *berth* times at Pier 27 or 35, not Golden Gate transit times. A ship
+# alongside at 07:00 passed under the bridge the better part of an hour
+# earlier. Nothing here converts between the two, because the conversion
+# depends on the pilot, the ship and the day, and a made-up offset drawn to the
+# minute would look exactly as authoritative as the published number beside it.
+#
+# **Scraping, defensively.** The current PDF's URL carries the revision date, so
+# it changes every few weeks and cannot be hardcoded; the fetch reads the
+# Port's cruise page and takes the links off it. The PDF itself is parsed here
+# rather than by a library, because there is no PDF module in this project's
+# dependencies and adding one to a Pi for eleven columns of a table is a poor
+# trade. The parse is positional: inflate the content streams, recover the
+# (x, y) of every text run, group runs into rows by y, and assign each cell to
+# the nearest column of the *header row it found in the document*. That last
+# part is what makes it survive a layout edit -- the columns are read from the
+# page, not from a table of offsets in this file. When it does eventually break
+# it raises, and `fetch()` leaves the previous record alone.
+# --------------------------------------------------------------------------
+
+# Both are standard library and neither opens anything, so they sit at module
+# level with the regexes that need them rather than being imported per call --
+# unlike urllib above, which is deferred to keep `load()` provably offline.
+import re                                                    # noqa: E402
+import zlib                                                  # noqa: E402
+
+SFPORT_CRUISE_PAGE = "https://www.sfport.com/maritime/cruise"
+
+# A week. The payload is a year-long calendar, so like the tide predictions it
+# keeps telling the truth long after it was fetched -- what expires is not the
+# data but our confidence that we are looking at the current revision. The Port
+# reissues the sheet every few weeks, so a week of failed fetches is where
+# "probably still right" stops being good enough to draw without a warning.
+SFPORT_CRUISE_TTL = 604800
+
+# Six hours. There is nothing to gain from asking more often: the file changes
+# a handful of times a quarter, and it is a quarter megabyte a time. Four
+# passes a day still puts a revision on the wall the same day it is published,
+# and keeps this off the fifteen-minute timer where it would be pure waste.
+SFPORT_CRUISE_INTERVAL = 21600
+
+# How much of the calendar to keep. A whole year of calls is only about twenty
+# kilobytes of JSON, but there is no reason to carry last January around, and
+# the demo never looks further ahead than the tide predictions reach anyway.
+SFPORT_KEEP_PAST = 7 * 86400
+SFPORT_KEEP_AHEAD = 200 * 86400
+
+_PDF_OBJ = re.compile(rb"(\d+)\s+\d+\s+obj\b(.*?)\bendobj", re.S)
+_PDF_STREAM = re.compile(rb"stream\r?\n(.*?)\r?\nendstream", re.S)
+_PDF_CONTENTS = re.compile(rb"/Contents\s*(?:(\d+)\s+\d+\s+R|\[([^\]]*)\])")
+_PDF_REF = re.compile(rb"(\d+)\s+\d+\s+R")
+
+# The text operators, and the three ways the current point moves between them.
+# Tm sets it outright, Td/TD shift it, T* drops a line; this document uses only
+# the first, but a reissue made by a different tool will use the others and
+# tracking all three costs one regex alternation.
+_PDF_TOKEN = re.compile(
+    rb"(?P<tm>(?:[-+0-9.]+\s+){6})Tm"
+    rb"|(?P<td>(?:[-+0-9.]+\s+){2})T[dD]"
+    rb"|(?P<star>T\*)"
+    rb"|(?P<arr>\[(?:[^\[\]\\]|\\.)*\])\s*TJ"
+    rb"|(?P<lit>\((?:[^()\\]|\\.)*\))\s*Tj"
+    rb"|(?P<bt>BT)")
+
+_PDF_ESCAPE = {b"n": b"\n", b"r": b"\r", b"t": b"\t", b"b": b"\b",
+               b"f": b"\f", b"(": b"(", b")": b")", b"\\": b"\\"}
+
+
+def _pdf_unescape(b):
+    out = bytearray()
+    i = 0
+    while i < len(b):
+        if b[i:i + 1] != b"\\":
+            out += b[i:i + 1]
+            i += 1
+            continue
+        nxt = b[i + 1:i + 2]
+        if nxt in _PDF_ESCAPE:
+            out += _PDF_ESCAPE[nxt]
+            i += 2
+        elif nxt.isdigit():
+            j = i + 1
+            while j < len(b) and j < i + 4 and b[j:j + 1].isdigit():
+                j += 1
+            out += bytes([int(b[i + 1:j], 8) & 0xFF])
+            i = j
+        else:
+            i += 2
+    return out
+
+
+def _pdf_show(operand):
+    """The visible characters of a Tj operand or a TJ array.
+
+    A TJ array is strings interleaved with kerning numbers -- `[(Ru)11(by)]` --
+    and the numbers are what make a word arrive in four pieces. Concatenating
+    the literals and dropping the kerning is exactly right for reading a table:
+    the pieces of one word are always in one array.
+    """
+    out = bytearray()
+    depth = start = 0
+    i = 0
+    while i < len(operand):
+        c = operand[i:i + 1]
+        if c == b"\\" and depth:
+            i += 2
+            continue
+        if c == b"(":
+            if depth == 0:
+                start = i + 1
+            depth += 1
+        elif c == b")":
+            depth -= 1
+            if depth == 0:
+                out += _pdf_unescape(operand[start:i])
+        i += 1
+    return out.decode("latin-1")
+
+
+def _pdf_pages(raw):
+    """Decoded content bytes, one entry per page of the document.
+
+    Per *page* and not per stream, which matters more than it sounds: a page's
+    content is often split across several streams, and one table row can land
+    either side of the split. Grouping text by stream tears those rows in half
+    -- the first half of this parser did exactly that and quietly lost a column
+    off five calls -- so the page tree is walked and each page's streams are
+    concatenated before anything looks at coordinates.
+    """
+    objs = {}
+    for m in _PDF_OBJ.finditer(raw):
+        objs[int(m.group(1))] = m.group(2)
+
+    def inflate(body):
+        m = _PDF_STREAM.search(body)
+        if not m:
+            return None
+        try:
+            return zlib.decompress(m.group(1))
+        except zlib.error:
+            return m.group(1)                # an uncompressed content stream
+
+    out = []
+    for num in sorted(objs):
+        head = objs[num].split(b"stream", 1)[0]
+        if not re.search(rb"/Type\s*/Page\b", head):
+            continue
+        m = _PDF_CONTENTS.search(head)
+        if not m:
+            continue
+        refs = ([int(m.group(1))] if m.group(1)
+                else [int(r) for r in _PDF_REF.findall(m.group(2))])
+        chunks = [c for c in (inflate(objs[r]) for r in refs if r in objs) if c]
+        if chunks:
+            out.append(b"\n".join(chunks))
+    if not out:
+        raise ValueError("no page content streams in PDF")
+    return out
+
+
+def _pdf_rows(raw, tol=3.0):
+    """[(page, y, [(x, text), ...])] with the cells of each row left to right.
+
+    `tol` is in PDF units against a row pitch of about 19, so it is loose
+    enough for the half-point baseline wobble a word processor leaves behind
+    and nowhere near loose enough to merge two rows.
+    """
+    rows = []
+    for page, content in enumerate(_pdf_pages(raw)):
+        x = y = 0.0
+        here = []
+        for m in _PDF_TOKEN.finditer(content):
+            if m.group("tm"):
+                n = m.group("tm").split()
+                x, y = float(n[4]), float(n[5])
+            elif m.group("td"):
+                n = m.group("td").split()
+                x += float(n[0])
+                y += float(n[1])
+            elif m.group("star"):
+                y -= 11.0
+            elif m.group("bt"):
+                x = y = 0.0
+            else:
+                s = _pdf_show(m.group("arr") or m.group("lit")).strip()
+                if s:
+                    for row in here:
+                        if abs(row[0] - y) <= tol:
+                            row[1].append((x, s))
+                            break
+                    else:
+                        here.append((y, [(x, s)]))
+        here.sort(key=lambda r: -r[0])       # PDF y grows upwards; reading order
+        for y_, cells in here:
+            cells.sort()
+            rows.append((page, y_, cells))
+    return rows
+
+
+# The columns worth having. "ETA Day"/"ETD Day" are the weekday spelled out,
+# which the date already says, and "No."/"Port Agent" are the Port's own
+# bookkeeping.
+_SFPORT_COLUMNS = ("Vessel", "ETA Date", "Arrival Time", "Last Port",
+                   "ETD Date", "Departure Time", "Next Port", "Berth",
+                   "Cruise Line", "Type")
+
+_SFPORT_MONTHS = {m: i + 1 for i, m in enumerate(
+    ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+     "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"))}
+
+_SFPORT_DATE = re.compile(r"([A-Za-z]{3})-(\d{1,2})-(\d{4})")
+_SFPORT_TIME = re.compile(r"(\d{1,2}):(\d{2})\s*([AP])", re.I)
+_SFPORT_REVISED = re.compile(r"updated\s*:?\s*(\d{1,2})/(\d{1,2})/(\d{2,4})", re.I)
+_SFPORT_LINK = re.compile(
+    rb'href="([^"]*cruise[_%20\-]*schedule[^"]*\.pdf)"', re.I)
+
+
+def _sfport_epoch(date_s, time_s):
+    """A published date and clock time -> epoch seconds, or None.
+
+    The sheet is written in San Francisco for ships arriving in San Francisco,
+    so the times on it are Pacific wall clock with no offset attached -- which
+    is fine until the fetcher runs somewhere else, and a container or a cloud
+    box is UTC by default. So the zone is named rather than assumed. If the
+    system has no tz database to name it with, local time is the fallback,
+    which is right on the Pi this ships to and wrong by hours nowhere that
+    matters; either way it is one conversion, here, and everything downstream
+    is epoch seconds like the rest of this file.
+    """
+    md = _SFPORT_DATE.search(date_s or "")
+    if not md:
+        return None
+    mon = _SFPORT_MONTHS.get(md.group(1).upper())
+    if not mon:
+        return None
+    day, year = int(md.group(2)), int(md.group(3))
+    hour = minute = 0
+    mt = _SFPORT_TIME.search(time_s or "")
+    if mt:
+        hour = int(mt.group(1)) % 12
+        minute = int(mt.group(2))
+        if mt.group(3).upper() == "P":
+            hour += 12
+    try:
+        import datetime
+        from zoneinfo import ZoneInfo
+        dt = datetime.datetime(year, mon, day, hour, minute,
+                               tzinfo=ZoneInfo("America/Los_Angeles"))
+        return float(dt.timestamp())
+    except Exception:                                        # noqa: BLE001
+        return float(time.mktime((year, mon, day, hour, minute, 0, 0, 0, -1)))
+
+
+def _sfport_parse(raw):
+    """(calls, revised_epoch) out of one cruise schedule PDF."""
+    rows = _pdf_rows(raw)
+
+    # The header row, wherever it is. This sheet runs the table across two
+    # pages and only prints the header on one of them, and which one is not the
+    # first: found by content, then applied to every row in the document.
+    cols = None
+    revised = None
+    for _page, _y, cells in rows:
+        names = [s for _, s in cells]
+        if cols is None and all(h in names for h in _SFPORT_COLUMNS[:3]):
+            cols = {s: x for x, s in cells if s in _SFPORT_COLUMNS}
+        for _x, s in cells:
+            m = _SFPORT_REVISED.search(s)
+            if m and revised is None:
+                mo, dy, yr = (int(g) for g in m.groups())
+                revised = _sfport_epoch("%s-%d-%d" % (
+                    list(_SFPORT_MONTHS)[mo - 1] if 1 <= mo <= 12 else "",
+                    dy, yr + 2000 if yr < 100 else yr), "")
+    if not cols or len(cols) < 6:
+        raise ValueError("cruise schedule header row not found")
+
+    calls = []
+    for _page, _y, cells in rows:
+        if any(s in ("Vessel", "ETA Date") for _, s in cells):
+            continue
+        rec = {}
+        for x, s in cells:
+            near = min(cols, key=lambda h: abs(x - cols[h]))
+            # Half a column's width. Anything further from every header than
+            # that is not a cell of this table -- a footnote, a legend, the
+            # page furniture -- and guessing a home for it would put junk in
+            # the payload.
+            if abs(x - cols[near]) < 90.0:
+                rec.setdefault(near, []).append(s)
+
+        def cell(h):
+            return " ".join(rec.get(h, [])).strip()
+
+        eta = _sfport_epoch(cell("ETA Date"), cell("Arrival Time"))
+        etd = _sfport_epoch(cell("ETD Date"), cell("Departure Time"))
+        # The sheet interleaves "Pier 27 Event" rows -- a concert, a private
+        # hire -- among the calls. They have dates and nothing else, and they
+        # are not ships, so the test is a berth and a clock time rather than a
+        # blacklist of words that would go stale the first time somebody typed
+        # a different one.
+        if not cell("Berth") or not (cell("Arrival Time") or cell("Departure Time")):
+            continue
+        if eta is None and etd is None:
+            continue
+        calls.append({"vessel": cell("Vessel").upper(),
+                      "line": cell("Cruise Line").upper(),
+                      "berth": cell("Berth").upper(),
+                      "type": cell("Type").upper(),
+                      "eta": eta, "etd": etd,
+                      "from": cell("Last Port").upper(),
+                      "to": cell("Next Port").upper()})
+    if not calls:
+        raise ValueError("cruise schedule parsed to no calls")
+    return calls, revised
+
+
+@product("sfport-cruise", ttl=SFPORT_CRUISE_TTL,
+         interval=SFPORT_CRUISE_INTERVAL,
+         description="Port of SF cruise terminal schedule (scheduled calls)")
+def _sfport_cruise():
+    """Every scheduled call at Piers 27 and 35, out of the Port's own PDFs.
+
+    Two files rather than one, because the Port publishes a sheet per calendar
+    year and the interesting window in December is on next year's. Whichever of
+    them fails to parse is skipped rather than fatal -- the 2027 sheet being
+    reissued in a shape this cannot read is no reason to lose 2026 -- but all
+    of them failing raises, which is what keeps the last good record in place.
+    """
+    page = get(SFPORT_CRUISE_PAGE, timeout=20)
+    from urllib.parse import urljoin
+    seen, urls = set(), []
+    for href in _SFPORT_LINK.findall(page):
+        url = urljoin(SFPORT_CRUISE_PAGE, href.decode("latin-1"))
+        base = url.rsplit("/", 1)[-1]
+        year = base[:4]
+        if not year.isdigit() or int(year) < time.gmtime().tm_year:
+            continue
+        if year in seen:                     # the newest revision of each year
+            continue
+        seen.add(year)
+        urls.append((year, url))
+    if not urls:
+        raise ValueError("no cruise schedule PDFs linked from %s"
+                         % SFPORT_CRUISE_PAGE)
+
+    now = time.time()
+    calls, revised, used, failures = [], None, [], []
+    for _year, url in sorted(urls)[:2]:
+        try:
+            got, rev = _sfport_parse(get(url, timeout=45))
+        except Exception as e:                               # noqa: BLE001
+            failures.append("%s: %r" % (url, e))
+            continue
+        used.append(url)
+        calls.extend(got)
+        if rev is not None:
+            revised = rev if revised is None else max(revised, rev)
+    if not used:
+        raise ValueError("no cruise schedule parsed; " + "; ".join(failures))
+
+    def when(c):
+        return c["eta"] if c["eta"] is not None else c["etd"]
+
+    keep = [c for c in calls
+            if -SFPORT_KEEP_PAST <= (when(c) - now) <= SFPORT_KEEP_AHEAD]
+    keep.sort(key=when)
+    # Both sheets can carry the same call in the week either side of new year.
+    uniq, prev = [], set()
+    for c in keep:
+        key = (c["vessel"], c["eta"], c["etd"])
+        if key not in prev:
+            prev.add(key)
+            uniq.append(c)
+
+    return {"port": "SAN FRANCISCO", "berths": "PIERS 27 AND 35",
+            "revised": revised, "calls": uniq,
+            "note": "berth times as published, not Golden Gate transit times",
+            "sources": used}, used[0]
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="fetch outside data into a cache the demos read",
@@ -1574,26 +2843,36 @@ def main():
                     help="seconds between passes (0 = use --once)")
     ap.add_argument("--only", default="", help="comma-separated product names")
     ap.add_argument("--list", action="store_true", help="show products and exit")
+    ap.add_argument("--due", action="store_true",
+                    help="skip products fetched within their own interval")
+    ap.add_argument("--fast", action="store_true",
+                    help="only products with an interval of --fast-under or less")
+    ap.add_argument("--fast-under", type=float, default=FAST_INTERVAL,
+                    help="what --fast means, in seconds")
     args = ap.parse_args()
 
     if args.list:
         for name in sorted(PRODUCTS):
             got = load(name, args.cache_dir)
             age = "absent" if got is None else describe_age(got[1]) + " old"
-            print("  %-22s ttl %-7s %-9s %s"
-                  % (name, "%ds" % PRODUCTS[name]["ttl"], age,
-                     PRODUCTS[name]["description"]))
+            every = interval_for(name)
+            print("  %-22s ttl %-7s every %-7s %-9s %s%s"
+                  % (name, "%ds" % PRODUCTS[name]["ttl"],
+                     describe_age(every) if every else "pass", age,
+                     PRODUCTS[name]["description"],
+                     " [tmpfs]" if is_volatile(name) else ""))
         return
 
     only = set(x for x in args.only.split(",") if x)
+    max_interval = args.fast_under if args.fast else None
     if not args.loop:
-        n = fetch_all(args.cache_dir, only)
-        print("ftdata: %d/%d products refreshed" % (n, len(only or PRODUCTS)))
+        n, seen = fetch_all(args.cache_dir, only, args.due, max_interval)
+        print("ftdata: %d/%d products refreshed" % (n, seen))
         return
     while True:
         started = time.time()
-        n = fetch_all(args.cache_dir, only)
-        print("ftdata: %d/%d refreshed" % (n, len(only or PRODUCTS)), flush=True)
+        n, seen = fetch_all(args.cache_dir, only, args.due, max_interval)
+        print("ftdata: %d/%d refreshed" % (n, seen), flush=True)
         time.sleep(max(5.0, args.loop - (time.time() - started)))
 
 

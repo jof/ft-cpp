@@ -42,290 +42,6 @@ $ python3 megademo.py --playlist "fire:20,tunnel:15:wipe,water:12+drops=4"
 $ python3 megademo.py --no-banner --segment 25 --transition 3
 ```
 
-## ftsched
-
-![the control panel](screenshots/ftsched-ui.png)
-
-The installation's rotation, as a daemon rather than a shell script, with a
-control panel you can open from a phone in the room.
-
-```console
-$ python3 ftsched.py --host 127.0.0.1 --listen 0.0.0.0:8081
-```
-
-The rotation used to be a `bash` loop launching `python3 demo.py --duration
-45` per segment, which cost a fresh interpreter and a fresh `import numpy`
-every 45 seconds — about 1.4 s of black wall each time on a Pi 3, so roughly
-3% of the show was the rotation booting. It also made every segment change a
-hard cut, because two effects cannot be alive at once across a process
-boundary, and there was nothing to ask what was playing or to skip it.
-
-`ftsched` keeps the modules imported, builds ahead on a worker thread the same
-way `megademo` does, blends between segments, and serves a JSON API and the
-page above. Three threads: render, build, http. The HTTP side only reads a
-snapshot the render loop publishes once a second, and pushes commands onto a
-queue drained at the top of the next frame, so a slow client cannot stall the
-wall.
-
-**Steering.** Tap a card to jump straight to it, the switch to drop an effect
-from the rotation. A jump is implemented as the current segment ending early,
-so it rides the ordinary transition rather than cutting. What is switched off
-persists across restarts via `--state-file`; the running order itself does
-not, since that belongs in the rotation file, where it gets reviewed.
-
-**Settings.** The gear on a card opens an editor for that effect's own
-options — the splitflap board's messages, the number of fireflies, which
-palette `life` burns through.
-
-![the settings editor](screenshots/ftsched-editor.png)
-
-Nothing in the panel knows what a firefly is. Every demo already declares its
-options in `add_arguments()` with a type, a default, its choices and a line of
-help, so [`ftsched_opts.py`](ftsched_opts.py) reads that description back off
-the parser and `/api/schema` serves it; the page generates the form. Adding an
-option to a demo puts a control in the editor and there is nothing to keep in
-step — which is the only version of this that is still true in a year. It does
-mean walking `ArgumentParser._actions`, which is private, but there is no
-public introspection API and the alternative is parsing `--help`.
-
-Two shapes need fixing up on the way through: a flag *pair* like scroller's
-`--plasma` / `--no-plasma` is two actions writing one dest and collapses to
-one switch, and an option taking more than one value is left out rather than
-shown as a control that cannot round-trip it. Values are checked against the
-schema at the API — an unknown option or a value outside the declared choices
-comes back as a 400 with a sentence in it, rather than as a build that raises
-forty-five seconds later and switches the effect off.
-
-A change applies the next time that effect is *built*, since rebuilding
-underneath the one on screen would drop the wall for as long as the build
-takes. The exception is the effect on air, which is played again from the top
-so the change actually shows: retyping the splitflap board while looking at it
-has to do something, or the control reads as broken for the rest of the slot.
-Note that the `ms` figure on the card was measured with the settings the
-rotation shipped with — turn `--flies` up far enough and the pairing arithmetic
-below is no longer describing what is on the wall.
-
-Edits live in the `--state-file` alongside what is switched off, and for the
-same reason: what somebody retyped from their phone in the shop has not been
-through review, so it is kept apart from the rotation file and can only touch
-entries that file already lists. Only what differs is stored, so a later edit
-to the rotation is not silently overridden by a state file nobody remembers
-writing, and *Restore defaults* means the settings the entry was installed
-with rather than the demo's bare argparse defaults, which nobody chose. The
-file is rewritten within the second rather than at shutdown — this machine
-usually goes down by being unplugged.
-
-**Frame rate is per segment**, as it was when each demo ran as its own
-process: `boing` costs 3.5 ms and runs at 60, `water` costs 57.0 and runs at 12.
-Holding the whole show to one rate would make the cheap effects choppier than
-they are today for no gain. Each rate leaves roughly 40% headroom over the
-measured cost. The demo is *built* at the rate it will be driven at, because
-several of them scale motion per frame off `args.fps`.
-
-**Cost.** Each card shows that effect's measured p95 on the Pi — CPU time per
-frame, over the whole of that entry's own slot, with the options the entry
-ships with, on numpy 2.0.2 and the ARM at the 600 MHz the under-voltage
-throttle pins it to. Measure a demo with different settings and the figure no
-longer describes it. These matter
-in pairs, not singly: a transition renders *both* neighbours into one frame,
-so a pair can cost more than either one's own rate allows — `floor` into
-`printer` is 50.6 ms against the 50 ms frame the pair is held to. The
-transition is therefore paced to what the pair actually costs and steps back
-up afterwards; two seconds at a lower rate during a crossfade does not read,
-whereas frames arriving late do. `pair_check()` reports the ones that get
-paced down a long way, since that usually means the running order could be
-better. Anything that cannot fit a frame even alone — meaning it does not fit
-the 50 ms of a 20 fps frame, the slowest rate the show will blend at — is
-marked `solo` and gets a cut on either side instead: `slime` at 123.7 ms,
-`fireflies` at 69.3, and, since the numpy 2 measurements, `water` at 57.0.
-
-**Building costs the current segment some frame rate.** The builder is a
-thread, and Python threads share the GIL, so while an expensive `build()` runs
-the effect on screen dips — `nyancat` measured 60.0/60 fps in steady state and
-32/60 during the few seconds `printer` was building behind it. That is the
-trade being made on purpose: the shell rotation this replaces went *entirely
-black* for 1.4 s at every segment change, and a brief rate dip in the middle
-of a 45 s slot is a much better failure than a stall at the transition. Moving
-builds to a subprocess would remove it, at the cost of shipping the built
-tables back across a pipe.
-
-**Previews.** The clips in `previews/` are 16 frames at 8 fps, committed rather
-than generated at runtime: baking three dozen of them costs every demo's
-`build()` and would steal the CPU the render loop needs. Rebuild after
-changing a demo:
-
-```console
-$ python3 scripts/make-previews.py --force knit sunset
-```
-
-A still cannot show what most of these are — `splitflap` is *entirely* motion,
-and `slime` looks like noise until it moves. (Two are stills anyway:
-`pacman-ghosts` does not move, and `daliclock` does not change within a two
-second window.)
-
-They are **animated WebP**, losslessly encoded, having been GIFs. GIF was
-costing about a third more for pixels that were also worse: its compression is
-weak enough that the palette had to be cut to 128 colours to keep the files
-reasonable, which is real damage on a wall whose whole business is gradients.
-Lossless WebP compresses a paletted image so much better that 256 colours in
-WebP still come out smaller than 128 in GIF — measured over this rotation, 32%
-smaller and strictly closer to what the demo rendered, with `fire`, `slime`,
-`metaballs`, `nyancat` and `pacman` landing exact. Lossy WebP was measured too
-and is the wrong tool: 320×64 of dithered noise and hard pixel edges is the
-worst case for a DCT, and at a quality matching GIF's error it saved nothing.
-
-**Segments** are `py` (a demoscene module, rendered in-process) or `exec` (an
-external command that draws on the wall itself, for the C++ tools). The
-scheduler stops sending for an `exec` slot and supervises the child, killing
-it if it outruns its time. Transitions cannot cross a process boundary, so
-those always cut.
-
-```console
-$ python3 ftsched.py --dump-rotation > rotation.json   # then edit, and:
-$ python3 ftsched.py --rotation rotation.json
-```
-
-An `exec` entry names the layers it draws on (`clears`), which are blanked
-when its slot ends — the C++ tools set a layer with a timeout of their own, so
-a pacman would otherwise sit on top of the next effect for the rest of it. Our
-own layer is blanked when the child starts, or the frozen last frame of the
-outgoing effect shows through wherever the child's layer is black. `wait`
-says whether the child exiting ends the slot: true for the ones that run for
-their whole `-t`, false for `send-text`, which sets a layer and returns at
-once.
-
-[`rotation-betelgeuse.json`](rotation-betelgeuse.json) is the Sequoia Fabrica
-installation's running order: 51 entries, 39 minutes, and **all of them
-native**. The segments that predate the numpy demos were ported rather than
-shelled out to — the pixel art into [`pixelart.py`](#pixelart), the C
-binaries into [`life.py`](#life) and [`maze.py`](#maze), the `send-text` jokes
-into [`console.py`](#console) — so every one of them now blends into its
-neighbours, has a preview, and runs from a checkout on any machine instead of
-from absolute paths on one Pi. `exec` remains as the escape hatch it was
-built to be; nothing in this rotation needs it.
-
-Site-specific text lives in that file rather than in `ftsched.py`: the marquee
-and the split-flap messages. The running order itself is generated to satisfy
-the pairing rule above and currently has **zero** transitions paced down; note
-that a `solo` neighbour cuts, so the edges either side of `water`, `slime` and
-`fireflies` are free and an expensive effect can sit there.
-
-One caveat on reading that report: `pair_check()` drops the `solo` entries
-before it walks the list, which pairs the two entries *either side* of a solo
-one with each other. Those two never actually blend — `transition_for()`
-returns a cut when either neighbour is solo — so a warning spanning a solo
-entry is describing a transition that does not happen, and the free edges the
-paragraph above relies on are invisible to it.
-
-The order is genuinely load-bearing, and it is easy to break by accident:
-removing one cheap segment leaves the two expensive ones that were either side
-of it adjacent, which is how dropping `full-moon` put `goldengate` next to
-`fire` and paced that transition down to 21 fps from 30. The floor is now set
-by `printer`, which at 37.9 ms is the most expensive thing still blending, so
-its two edges run at 75% however the rest is arranged; the order is chosen to
-bring everything else up to at least that. `water` used to hold that job and
-has since gone `solo`, which is why the tightest pairs moved.
-
-An entry's `module` may differ from its `name` — the six pixel-art segments
-are one module with six sets of options — and previews are keyed by name.
-
-The API is a handful of verbs — `jump`, `toggle`, `next`, `pause`/`resume`,
-`restart`, `configure` — POSTed as JSON to `/api/command`, with `/api/state`
-returning everything the page renders and `/api/schema` what each demo can be
-told to do:
-
-```console
-$ curl -s localhost:8081/api/state | jq '.now, .health'
-$ curl -sX POST localhost:8081/api/command -d '{"op":"jump","index":12}'
-$ curl -s localhost:8081/api/schema | jq '.modules.fireflies[].label'
-$ curl -sX POST localhost:8081/api/command -d \
-    '{"op":"configure","name":"splitflap","options":{"colour":"amber"}}'
-```
-
-`configure` carries the whole set of options for that entry rather than a
-patch, so an editor that has been open a while cannot half-apply against a
-rotation that has moved under it; `"options": null` puts the entry back to
-what the rotation file says.
-
-There is no authentication: it is a wall in a makerspace, and the worst anyone
-on the shop wifi can do is change what is on it. Bind it to the LAN or to a
-Tailscale address, not to the internet.
-
-Deployment is [`ftsched.service`](ftsched.service), which `Conflicts=` with
-the old `ft_demos.service` so the two can never both drive layer 0.
-
-<img src="screenshots/ftsched-ui-mobile.png" width="300" alt="the same panel on a phone">
-<img src="screenshots/ftsched-editor-mobile.png" width="300" alt="the settings editor on a phone">
-
-On a phone the editor is a sheet up from the bottom, where a thumb is, rather
-than a dialog floating in the middle of the screen. It is a `<dialog>`, so the
-backdrop, the focus trap, Esc and making everything behind it inert come from
-the browser instead of from three hundred lines here.
-
-## The front door
-
-![the about page](screenshots/ftindex.png)
-
-`ftsched` serves its panel on 8081, which is fine for a checkout and wrong for
-an installation: a port number is something you have to be *told*, and someone
-standing in front of the wall with a phone types the hostname and nothing else.
-So **nginx** owns the root — see
-[`deploy/nginx-betelgeuse.conf`](../deploy/nginx-betelgeuse.conf). It proxies
-`ftsched` at `/`, routes `/api/display` to [`ftctl`](#ftctl), serves the
-previews off disk, and keeps one page of its own at `/about` covering what the
-wall is and how to push your own pixels at it, which the panel has no business
-explaining.
-
-Everything therefore lives in **one origin on one port**. That is not only
-tidier: it is what lets the panel be served over TLS at all without the page
-having to know which of its links need a different scheme and port, and it
-means the same URLs work on the shop wifi and over the tailnet. An earlier
-version of this fronted the two separately and had to rewrite links based on
-`X-Forwarded-Proto`; proxying deleted that problem rather than solving it.
-
-```console
-$ tailscale serve --bg --https=443 http://127.0.0.1:80
-```
-
-One line, because there is nothing left that needs a second rule. `tailscale
-serve` terminates TLS with a real `ts.net` certificate, renews it, and exposes
-it to the tailnet only — three things this would otherwise have to get right by
-itself.
-
-This used to be `ftindex.py`, a Python front door of our own, and the reasons it
-existed are worth keeping even though it is gone:
-
-- **A separate process from `ftsched`.** The scheduler drives the wall on a
-  frame deadline; the front door is the thing most likely to be hit by a room
-  full of curious people, and it must be restartable without touching the
-  render loop.
-- **Previews served from disk, not proxied.** They are the overwhelming
-  majority of the bytes — a cold page load is three dozen files and a couple of
-  megabytes, against a 5 kB poll once a second — and putting that burst through
-  `ftsched` would run it through the GIL the render loop is waiting on.
-- **A page rather than a connection refused** when the scheduler is down. The
-  `error_page` rule keeps the original 502 rather than turning bad news into a
-  200.
-
-nginx satisfies all three and is better at the static bytes that dominate the
-traffic, which is the whole argument for the swap: the GIL problem that
-justified a hand-written proxy stops being a problem when the process is not
-Python. `ftindex.py`'s own flags gave the game away — `--ft-port`, `--width`
-and `--height` only ever templated the about page; it never talked to the wall.
-
-`/about` keeps working the same way, with its two live parts — the hostname and
-the now-playing line — filled in by the browser instead of server-side.
-
-`ftsched` listens on `127.0.0.1:8081` and `ftctl` on `127.0.0.1:8082`, so the
-front door is the only way in and neither is also answering on a port nobody
-was told about. That does mean there is no second way to drive the wall if nginx
-is the broken thing; the fallback is an ssh tunnel, which is a fair trade for
-not having more unauthenticated listeners on the shop wifi.
-
-```console
-$ ssh -N -L 8081:127.0.0.1:8081 pi@betelgeuse
-```
-
 ## The effects
 
 ### fire
@@ -896,100 +612,6 @@ sign.
 ```console
 $ python3 splitflap.py --messages "SEQUOIA FABRICA|OPEN HOUSE {TIME};MAKE THINGS|ASK ANYONE" --hold 12
 ```
-
-### pixelart
-
-![pixelart](screenshots/pixelart.png)
-
-The sprite sheets in [`pixelart/`](pixelart) — a sequoia, space invaders,
-pacman and his ghosts, an eight-frame sewing machine — which have been on the
-Sequoia Fabrica wall for years, played until now by an external C binary
-reading JSON files of hex strings.
-
-Sprites are either joined side by side into one strip and moved as a unit
-(four invaders in a row, seven sequoias marching past) or played in place as
-frames of an animation (the sewing machine, pacman's chomp), and placed
-centred, bouncing or scrolling. `--art` takes ranges, so `sew1..8` and
-`sf-tree*7` mean what they look like.
-
-`--poses` is both at once: it names alternative sheets of the same slots, so a
-strip can hold four different sprites and still animate, all of them changing
-pose together. That is how an arcade cabinet did it, and it is the difference
-between a row of invaders and a printed banner of invaders. The second pose is
-baked from the first by
-[`scripts/make-invader-poses.py`](scripts/make-invader-poses.py), which moves
-the limbs rather than redrawing them — the bodies stay byte-identical, so
-nothing in the outline flickers when the pose changes.
-
-A scroll needs `--travel` pointed whichever way the artwork faces, or pacman
-chomps his way backwards across the wall.
-
-Half the set is greyscale line art and half is full colour, so `--render auto`
-checks for chroma: the ghosts are drawn as they are, and the tree and the
-invaders are painted from a palette. The palette is laid **across** the strip
-rather than mapped from brightness — brightness to hue turns every antialiased
-edge into a different colour and the shape into confetti, which is exactly what
-the first attempt at this looked like.
-
-```console
-$ python3 pixelart.py --art sf-tree --mode center
-$ python3 pixelart.py --art pacman-32x32-1..6 --sequence-ms 50 \
-      --mode scroll --travel right
-$ python3 pixelart.py --art space-invaders-1..4 --poses ,b --sequence-ms 500 \
-      --mode bounce
-```
-
-### life
-
-![life](screenshots/life.png)
-
-Conway, one cell per pixel, which at 320x64 is 20,480 cells — enough for
-gliders to travel and for still lifes to settle out all over the board.
-
-The rule is four lines of numpy. Everything else is about making a black and
-white automaton worth looking at on an LED wall: cells are coloured by how
-long they have been alive, so a fresh birth is bright and a block that has sat
-there a minute has faded to an ember, and dead cells leave a decaying trail so
-a glider draws its own wake. Life always dies down, so when the population
-stops changing — allowing for period-2 oscillators, which change forever
-without going anywhere — a fresh patch is seeded somewhere and the board gets
-reinvaded rather than reset.
-
-Neighbour counting is eight slices of one padded scratch board. `np.roll`
-would build sixteen full-size temporaries per generation, which on a Pi is
-most of the cost of the rule.
-
-### maze
-
-![maze](screenshots/maze.png)
-
-A maze carved, flooded and solved, on a loop. The old C version drew a
-finished maze and left it there, but a finished maze is a texture; the making
-of it is the part worth watching. A depth-first walk knocks down walls with
-the head glowing at the frontier, visibly backtracking when it paints itself
-into a corner; then a breadth-first flood pours down every dead end at once;
-then the route lights up end to end and holds.
-
-The carve order and the route are baked into grids rather than kept as lists,
-so each frame is one comparison against a rising playhead instead of a Python
-loop over a few thousand cells.
-
-### console
-
-![console](screenshots/console.png)
-
-Code typing itself out, with a cursor and syntax colouring — the three Arduino
-one-liners that used to appear as static text for five seconds each.
-
-The typing is deliberately uneven: a constant interval reads as a machine
-printing, while a little jitter and a longer beat after a semicolon reads as
-someone at a keyboard. Every character's arrival time is worked out up front,
-which is what lets `render()` stay a pure function of `t` — the demo can be
-started at any moment, seeked, or run at any frame rate and look the same. The
-cursor blinks only while idle; blinking through the typing looks like a fault.
-
-Lines are just an argument, so this is the one demo anyone in the space can
-add to without touching code.
 
 ### scroller
 
@@ -1814,6 +1436,258 @@ $ python3 voxel.py --no-wing --no-tower --birds 0 --steps 96
 $ python3 scripts/make-voxel-dem.py     # re-bake the terrain (needs Pillow)
 ```
 
+### twister
+
+![twister](screenshots/twister.png)
+
+The Amiga twister: a bar whose cross section rotates as you travel along it, so
+a slice taken anywhere is the same square as the last one, turned a little
+further. The 1990 version ran vertically because a 320x256 screen is taller
+than it is wide, and a bar down the middle of it is what fits.
+
+**Turning it through ninety degrees is the whole reason it is here.** The
+twist is a thing you read *along* the object, and this panel has exactly one
+axis long enough to read anything along: laid horizontally there are 320 pixels
+of length to spend on eight or ten waists, 64 rows are more than enough for a
+bar half that thick, and the ribbon runs off both edges so nothing is left
+over. Stood upright the same effect gets 64 px of length, room for about one
+turn, and two thirds of the wall stays black.
+
+Per column the cross section is at phase `k·x + ω·t`; its `n` corners project
+to `y` offsets of `r·cos(θ + i·2π/n)`, so a column is the handful of vertical
+spans stacked between consecutive corners, one per face. A face is towards you
+when the sine of its normal angle is positive, and its brightness is that same
+`|sin|` — which is *also*, exactly, how tall it projects. That coupling is what
+makes it read as one solid object being twisted rather than as coloured
+stripes: the bright face is always the wide one, and a face has dimmed to
+nothing by the time it turns edge on and vanishes. Worth checking numerically
+rather than by eye, because a twister whose faces never quite go edge on still
+looks plausible: at a fixed column through one rotation the two visible faces
+trade an 8-row span at brightness 80 for a 33-row span at 232 and back, four
+times, and the silhouette breathes between 50 rows and 36 — which is
+`√2/2` of it, as a square seen corner-on should be.
+
+**What makes it cheap is that all of that depends on the row and the phase and
+on nothing else.** So the whole demo is one baked table — 1024 phase steps by
+the panel's rows, in RGB — and a frame is an add over 320 elements and a single
+`np.take` through it. Two numpy calls, and no arithmetic over the frame's
+20,480 pixels at all. **0.04 ms a frame on a desktop, which puts it next to
+`cycle`, and p50 2.4 / p95 2.9 ms on the wall's Pi 3** — measured there, on the
+600 MHz throttled clock, with `--breathe` on. That is 60 fps with the whole
+budget still in hand, which is the job: the rotation is short of cheap segments
+and the scheduler wants one to put beside an expensive one.
+
+Two slow modulations keep it from being merely a texture scrolling sideways,
+and they were chosen for costing nothing. `--sway` drifts the ribbon up and
+down the panel, which is a *row offset into the table*; the table is baked at
+four sub-pixel positions of the ribbon as well, since 3 px of sway over 17 s
+stepping a whole row at a time is a visible tick every few seconds. `--breathe`
+varies the twist rate about the middle of the panel, so the ribbon winds up
+tight and slackens off again — 8 waists across the panel at rest, 10 at one end
+of the breath and 6 at the other — and that one does cost three more numpy
+calls, over 320 elements. Their periods are deliberately unrelated to the
+rotation period and to each other, so the loop is long.
+
+Face spans are antialiased against the row grid rather than filled to the
+nearest pixel: the silhouette moves slowly, and a hard edge on something slow
+crawls. That is a bake-time cost, not a frame-time one. The palette has to be
+*cyclic* for the same reason `cycle`'s does — colour is indexed by the phase,
+and the phase wraps once a rotation — so the ramps that run dark to bright are
+mirrored to close the loop, and their black end is dropped first, since a face
+carrying near-black is a dead length of ribbon that no amount of lighting
+brings back.
+
+`build()` takes about 0.8 s on the Pi, nearly all of it rasterising the four
+sub-pixel tables; `--sway 0` bakes one table and takes 0.2 s.
+
+```console
+$ python3 twister.py --faces 3 --turns 1.5 --palette magma
+$ python3 twister.py --palette ice --specular 0.6   # one hue shows the shading plainest
+$ python3 twister.py --speed -0.35 --sway 0 --breathe 0    # the plain 1990 version
+$ python3 twister.py --faces 8 --radius 0.45        # nearly a cylinder
+```
+
+### scope
+
+![scope](screenshots/scope.png)
+
+A bench oscilloscope: the 10x8 graticule, a trace sweeping across in a second
+and fading behind itself, a trigger that mostly holds, and every half minute
+the timebase drops out and it flips to X-Y for Lissajous figures. 320x64 is
+very nearly a scope screen with its graticule stretched out, which is the
+whole reason this works on the wall.
+
+**The detail that sells it is that the beam moves at constant speed along the
+trace, so a pixel's brightness is inversely proportional to how fast the spot
+crossed it.** Peaks and flat tops glow; steep edges go thin and dim. It costs
+nothing, because it is not a shading pass at all: the path is cut into
+equal-*time* segments each carrying the same charge, and each segment's charge
+is split between the pixels it crosses and accumulated with `bincount`. Three
+sub-samples a pixel land on top of each other at a crest and spread over ten
+rows at a fast zero crossing. Measured on the AM carrier at columns of
+identical phosphor age, a crest reaches 213 of 255 and a crossing 114 — the
+histogram *is* the physics, and nothing anywhere computes dy/dx. A trace of
+even brightness is what this looks like when it silently is not working.
+
+Persistence is one float32 buffer decayed as a half-life in *seconds*
+(`--persist`, default 0.42), so the tail is the same length in wall time at 8
+fps as at 30 — the rule `laser.py` follows and for the same reason. At the
+default the trace has faded to about a fifth by the time the beam has crossed,
+which is what makes a sweep read as a sweep rather than as a plotted curve.
+The buffer is carried in palette-index units rather than 0..1 and mapped
+through a P31 green, P3 amber or P11 storage-blue ramp; the graticule is a
+baked static layer composited in that same index space, so it costs one uint8
+maximum a frame and never changes.
+
+Signals are baked once as 16k-sample tables, each rolled so that column zero
+is a rising crossing of the trigger level. That roll *is* the trigger, and it
+is why a repetitive waveform stands dead still with no state kept anywhere.
+Not everything locks. The decaying exponential creeps right about ten pixels a
+second, the way a bench scope does when the trigger is a hair off, and the
+previous sweep is still fading a few pixels behind it; noise has nothing to
+lock onto and jumps somewhere new every sweep. Dwells are quantised to whole
+sweeps, so the waveform never changes half way across a trace.
+
+X-Y is the moment worth pacing around, so it comes round twice in the 70 s
+cycle and takes a different quarter of the ratio list each time. X runs at a
+wider volts/division than Y, which is a real setting and the only way a
+Lissajous figure uses a panel five times wider than it is tall. Each ratio is
+detuned by a few hundredths so the figure precesses instead of standing still,
+and the detuning has to *shrink* as the ratio gets busier: a 5:4 precessing as
+fast as a 1:1 sweeps its whole envelope inside one phosphor half-life and
+fills the panel with solid green. Every mode change is preceded by one dead
+sweep with the beam off — cutting straight from a trace to a Lissajous with
+both still lit reads as a fault rather than as a knob being turned.
+
+The furniture is deliberately thin: s/div and V/div in the same baked 3x5
+pixel font the readouts elsewhere use, along the strip between the last
+division line and the border, plus a three pixel trigger-level arrowhead on
+the left edge. Both are drawn only where the trace provably cannot reach them,
+so below 60 rows they disappear rather than printing type through the signal.
+A mode caption and a trigger-state legend were both tried and cut: 64 rows do
+not have the room, and the left-hand readout already says `X-Y` when it is in
+X-Y.
+
+It runs in about 5.8 ms a frame on the wall's Pi 3, which is under-voltage
+throttled to 600 MHz. Almost all of what is left is the palette gather, and
+that is done as one packed 32-bit word a pixel into an RGBA frame whose first
+three channels are handed back — half the cost of a row gather out of a
+(256, 3) palette on that machine. The other half of the saving is that
+sampling three points a pixel makes nearly every segment shorter than a row,
+so the machinery for walking a vertical edge only runs on the frames that
+contain one.
+
+```console
+$ python3 scope.py --phosphor amber --timebase 0.05
+$ python3 scope.py --phosphor blue --persist 1.6        # long-persistence tube
+$ python3 scope.py --signals square,burst --dwell 12
+$ python3 scope.py --xy-dwell 40 --dwell 3              # mostly Lissajous
+$ python3 scope.py --no-readout --beam 0.7              # just the trace
+```
+
+### wireworld
+
+![wireworld](screenshots/wireworld.png)
+
+The Wireworld cellular automaton, running a circuit that actually computes.
+Four states — empty, conductor, electron head, electron tail — and one rule
+that matters: **a conductor becomes a head if exactly one or two of its eight
+neighbours are heads.** Head becomes tail, tail becomes conductor, empty stays
+empty.
+
+**"One or two" is what makes it wire rather than fire.** A head always has its
+tail immediately behind it, so the cell it came from is a tail and cannot fire
+again — the pulse cannot run backwards, and a signal has a direction. Ahead of
+it the next cell sees exactly one head and lights. And a cell with three heads
+around it — a junction being driven from several sides at once — does nothing
+at all, which sounds like an edge case and is in fact the entire logic family
+below. Life's rule floods; this one propagates.
+
+**What is on the panel.** Two clocks, at the left and bottom-left: a closed
+loop of N conductor cells carries a single electron round forever and taps off
+a pulse every N generations, so the loop's circumference *is* the period. One
+loop is 24 cells, the other 36; they coincide every 72, and 72 generations is
+the whole board's cycle. Clock A's pulses run east along the top bus, clock B's
+along the bottom, and three gates in the middle read them:
+
+- **OR** is a merge — the two inputs arrive at one cell, which fires on either.
+- **AND-NOT** (`A and not B`) is the same nine cells with the control input
+  forked into three that all touch the centre. A control pulse then puts three
+  heads around the centre and it stays dark, while a signal pulse alone is one
+  head and gets through. Two extra cells between OR and AND-NOT; that is the
+  whole difference.
+- **AND** is `A and not (A and not B)`, so it is the AND-NOT gate fed back into
+  another one: the second gate's output rail runs east across the panel and
+  climbs into the third gate as its control line.
+
+So the three rails carry three rhythms you can read against each other. Over
+one 72-generation cycle clock A fires three times and clock B twice, landing
+together exactly once. The OR fires on all four of those events, the AND-NOT on
+the two that clock A has to itself, and the AND on the single coincidence. That
+is the truth table, drawn as timing.
+
+**Diodes, and why there are exactly two.** The standard one-way junction: a gap
+in the wire bridged by two pairs of prongs. Forwards, the near side lights the
+first pair, the first pair lights the second, and the far side sees two heads
+and fires. Backwards, the far side lights both pairs at once and they put three
+heads around the near side — one too many — and it stops dead. Only the merge
+needs them, and it needs them badly: when either input fires the centre cell,
+the centre's head is a neighbour of the *other* input's last cell, which fires
+and runs away backwards up the wire. Left to itself it meets the next real
+pulse coming the other way and the two annihilate, which silently deletes a
+quarter of the circuit's events while leaving a picture that still looks
+perfectly busy. Both diodes therefore sit hard against the gate, because the
+reverse pulse has to be dead before the forward one arrives and here they are
+only ten generations apart. `scripts/wireworld-check.py` removes them and
+asserts that the OR gate's rate drops.
+
+**Cells are 2x2 pixels.** The circuit is a hand-laid 160x32, which at `--cell
+2` fills a 320x64 wall exactly. `--cell 1` was rendered and looked at rather
+than reasoned about: the same circuit then occupies the middle quarter of the
+panel inside a black border, and single-pixel wire with single-pixel electrons
+on it is a texture rather than a diagram from more than a couple of metres
+away. Two is the default for that reason; a panel of another shape gets the
+circuit centred, and cropped if it will not fit.
+
+**The step rate is per second, not per frame** (`--rate`, default 14), so the
+circuit runs at the same speed whatever `--fps` it is driven at. That makes the
+automaton's state a function of elapsed time, which for a cellular automaton
+usually means giving up on `render()` being a pure function of `t`. Here it
+does not have to be: the board repeats every 72 generations, so `build()`
+settles the transient and stores the whole cycle as 72 grids — 370 kB — and
+`render()` indexes into it. A restart, a seek, or a different frame rate all
+land on the same picture. Electrons get a few generations of afterglow behind
+them (`--glow`), because a one-cell-per-generation head is otherwise a blink
+rather than a movement and the direction of travel is what you want to read.
+
+Measured on betelgeuse (Pi 3, undervolt-throttled to 600 MHz): **0.05 ms p50 /
+0.08 ms p95 on a frame that lands on the same generation as the last one** —
+it returns the same buffer untouched — and **3.6 ms p50 / 4.0 ms p95 on a frame
+that steps**, which at 30 fps and 14 generations a second is a little under
+half of them. `build()` costs 0.65 s once. Storing the cycle as finished RGB
+frames instead would make even the stepping frames free, at 4.4 MB and at the
+cost of pinning the palette and the panel size into the precompute; 4 ms
+against a 20 ms budget did not justify it.
+
+**A mis-laid Wireworld circuit still animates convincingly while computing
+nothing**, which is a nastier failure than usual, so
+`scripts/wireworld-check.py` drives every piece and reads the answer off rather
+than trusting a look at it: the rule for all four states against all nine
+neighbour counts, three loop lengths against their periods, the diode passing
+one pulse forwards and none backwards and leaving nothing behind either way,
+both gates over their whole truth table, and then the assembled circuit for its
+firing rates, its 72-generation period, and the two ways this dies quietly —
+every electron consumed, leaving a static picture that is still a valid frame,
+or the 1-or-2 rule wrong and conductor lighting everywhere.
+
+```console
+$ python3 wireworld.py --host 127.0.0.1
+$ python3 wireworld.py --rate 6 --palette ice      # slow enough to follow
+$ python3 wireworld.py --cell 1 --glow 0.7
+$ python3 wireworld.py --palette magma --rate 24   # hard to keep up with
+$ python3 scripts/wireworld-check.py               # the assertions
+```
+
 ### propagation
 
 ![propagation](screenshots/propagation.png)
@@ -1917,162 +1791,6 @@ $ python3 propagation.py --no-xray-strip         # more rows for the columns
 $ python3 propagation.py --blink-hz 0            # hold the flags, for a photo
 $ FT_DATA_CACHE=/tmp/nothing python3 propagation.py   # the no-data card
 ```
-
-### wx
-
-![wx](screenshots/wx.png)
-
-The weather outside *this building* — 1736 18th Street — and an honest account
-of where each number came from. Somebody walks past, looks for two seconds, and
-decides whether to roll the door up. What they must not be able to do is
-mistake a computed number for a measured one, and that turns out to be the
-whole design problem, because almost none of this can be measured near here.
-
-**Why it is a composite.** There is exactly one real instrument anywhere near
-the space. Unioning the station lists across a 7×7 block of NWS gridpoints
-around the address turns up 52 stations and precisely one inside San Francisco:
-**SFOC1, "San Francisco Downtown", 2.8 km away**. The next nearest is Oakland
-Museum at 12.3 km, across the Bay and in a different climate; KSFO is 16 km
-south and in another one again. And SFOC1 reports temperature, dewpoint and
-humidity and **nothing else** — no wind, no pressure. Not "sometimes": the
-fields are in the JSON, `null`, every hour, with a `Z` quality flag. Every
-dedicated personal-weather-station network that would have filled the gap now
-needs a key — Weather Underground PWS 401s, PurpleAir 403s, Synoptic 401s,
-AirNow 401s — which is exactly why this is a composite of three services rather
-than one tidy feed.
-
-So: temperature, dewpoint and humidity are **observed**, 2.8 km away. Wind,
-pressure and cloud are **modelled** at the exact address by met.no. Air quality
-is **modelled** by CAMS through Open-Meteo, for a grid cell a few kilometres
-wide. Blending those into one authoritative-looking readout would be worse than
-not building the panel, so the distinction is carried four ways at once,
-because any one of them fails on somebody:
-
-1. **Position.** Measured things live left of the first hairline; modelled
-   things live right of it. Nothing crosses.
-2. **A word.** Each zone is headed OBSERVED or MODELLED, with the instrument
-   and *how far away it is*, or the model and whose it is.
-3. **Colour.** Observed values are near-white, modelled values blue — two
-   hues, not two brightnesses, since brightness is already spoken for by the
-   aging state and would be destroyed exactly when provenance matters most.
-4. **A mark on every number.** A modelled value is printed `~5.4`, the way one
-   writes an approximation by hand. Crop the panel, photograph it, read it
-   colour-blind: the tilde is still there.
-
-The zone title, the hue and the mark are all *derived from the product's own
-provenance* rather than from where the zone happens to sit, so pointing the
-panel at the wrong kind of product makes it say so rather than quietly relabel
-the data.
-
-**Both temperatures are on the wall on purpose**, observed at the station and
-modelled here, with the difference printed beside the modelled one. When they
-disagree that is not an error to be hidden, it is the sea breeze — the gradient
-across a couple of kilometres of this city, which is the most interesting thing
-this panel knows. The wind is the model's alone and gets the arrow and the big
-type, since nobody within 12 km measures it; the arrow flies *downwind* and the
-label says FROM, because arrow conventions split the room and neither half is
-wrong. If the compass point will not fit it is dropped rather than truncated:
-shortening "FROM WSW" to "FROM W" does not abbreviate a label, it moves the
-wind two points and says so with a straight face.
-
-**The AQI is the number people actually cross the room for.** In this city, in
-fire season, it decides whether the roll-up door opens. So it gets a block of
-the EPA's own colour scale — ≤50 green, 51–100 yellow, 101–150 orange, 151–200
-red, 201–300 purple, 301+ maroon — with the category word beneath it, and the
-ink on the block flips from black to white when the block goes dark enough to
-need it. Those six colours are not adjusted for the panel: everybody here has
-spent a fire season learning to read exactly them, and a nicer green would only
-be a slower one to recognise. And it still says `~55`, because a chemistry model
-over the Mission is not a sensor on the roof. A bright confident block is the
-easiest thing on the wall to mistake for a measurement, which is precisely why
-the mark matters most there.
-
-**The data comes off a disk cache, not a socket.** `build()` calls
-`ftdata.load()`, which reads one JSON file and nothing else, for the reason in
-[`ftdata.py`](ftdata.py)'s docstring: the scheduler builds the next segment on a
-worker thread sharing the GIL with the render loop, so a `build()` that blocks
-on a socket stops the wall for everybody. **The fetcher has to be running:**
-
-```console
-$ python3 ftdata.py --once                  # one pass, to see it work
-$ python3 ftdata.py --loop 900 &            # its own process, every 15 min
-$ python3 ftdata.py --list                  # what is cached, and how old
-$ python3 wx.py --host 127.0.0.1
-$ python3 wx.py --station KSFO --lat 37.6188 --lon -122.3750 --site "SFO"
-$ python3 wx.py --blink-hz 0                # hold the flags, for a photo
-$ FT_DATA_CACHE=/tmp/nothing python3 wx.py  # the no-data card
-```
-
-It adds three products, all trimmed in the fetcher rather than in the demo,
-because the cache lives on a Pi on shop wifi: `wx-obs-<station>` is 450 bytes of
-NWS observation (ttl 5400 s), `wx-model-<lat>_<lon>` is 540 bytes — one instant
-out of 44 kB of hourly forecast, since a 64-row panel has no room for a forecast
-strip — and `wx-air-<lat>_<lon>` is 500 bytes of CAMS (both ttl 7200 s). Nothing
-assumes a field is present: every NWS value goes through a converter that
-returns absent unless there is a number *and* the unit code is the one being
-converted from, because windSpeed arrives as km/h from most stations and m/s
-from a few, and applying one conversion to the other turns a 5 m/s breeze into
-an 18 m/s gale.
-
-**met.no's terms are honoured in the fetcher, and they are not decorative.**
-The User-Agent identifies the project and carries a contact address (`FT_CONTACT`
-overrides it); the response's `Expires` and `Last-Modified` are stored in the
-payload; a fetch inside the Expires window makes **no request at all**, and one
-outside it is conditional on `If-Modified-Since` and takes the 304 — which
-api.met.no does return. A `--loop 900` fetcher therefore touches met.no about
-twice an hour, which is roughly how often the model changes. One consequence
-needs saying: a skipped or revalidated fetch rewrites the record with a new
-`fetched_at` and unchanged contents. So every payload carries `t`, the epoch the
-numbers *describe*, and the panel ages them by that instead. Age is part of the
-data, and the part that matters is the data's, not the socket's.
-
-**Staleness is propagation.py's three stages, in propagation.py's vocabulary**,
-since the two panels share a rotation and a second vocabulary would be a second
-thing to learn. Fresh: full brightness. Past TTL: half brightness, amber ages,
-AGING. Past three TTLs: the numbers are withdrawn — `--`, never a plausible
-zero — the zone says OBSERVATION TOO OLD or MODEL RUN TOO OLD, and a red flag
-blinks. A product nobody has ever fetched is MISSING rather than STALE; calling
-an empty cache stale would imply there is something behind it. An entirely
-empty cache is a NO DATA card naming the fetcher, the command and the cache
-path. **The provenance survives every one of those states** — a stale zone
-keeps its header, its hue and every tilde. It has nothing to say and says so in
-the right voice.
-
-**Two upgrades are already on the table, and they slot in as products.** The
-panel does not know where a number came from; it knows what its *product* is
-called, and `--obs-product`, `--model-product` and `--aqi-product` each name
-one. A product whose name matches a prefix in `OBSERVED_PREFIXES` is drawn as
-observed — no tilde, near-white, OBSERVED in the header — and anything else is
-treated as modelled, because the failure that matters is claiming a measurement
-nobody made.
-
-* **PurpleAir**, if a key is obtained: add a `register_purpleair()` alongside
-  the other products in `ftdata.py` writing `wx-pa-<sensor>` with `us_aqi`,
-  `pm2_5`, `t` and a `label` such as `PURPLEAIR 0.4KM`, then run
-  `wx.py --aqi-product wx-pa-<sensor>`. The tile relabels itself, turns mint,
-  and the tilde comes off the big number, because a sensor a few hundred metres
-  away *is* an observation.
-* **A roof sensor over MQTT**: the site already runs a broker and
-  [`ftctl_mqtt.py`](ftctl_mqtt.py) already speaks to it. A subscriber that
-  writes `wx-local.json` into the same cache directory — same envelope,
-  `fetched_at` and a payload carrying `t`, `temp_c`, `dewpoint_c`, `rh_pct`,
-  optionally `wind_ms`/`wind_dir`, and `label: "ROOF"` — turns the observed
-  half from 2.8 km away into the building's own roof with
-  `wx.py --obs-product wx-local`. The wind line stops saying NO WIND AT THIS
-  STATION and starts printing a measured wind, unmarked, on its own.
-
-Both were tested with hand-written cache records before either service existed;
-neither needs a line of this panel changed.
-
-It is all baked. The layout, the type, the compass arrow and the AQI block are
-rasterised once in `build()`; `render()` copies that frame and repaints two
-small rectangles — the state flag and a heartbeat, which is there because a
-frozen render loop and a calm evening look identical on a panel made of static
-type. On the wall's Pi 3, throttled to 600 MHz, that is **0.11 ms p50 and 0.18
-ms p95** against a 6 ms budget, with `build()` costing 26 ms once on the worker
-thread — a quarter of what propagation's costs on the same machine. There are
-exactly two distinct frames over a full cycle, which is why the standalone
-default is 10 fps: the other twenty a second would be identical datagrams.
 
 ### tide
 
@@ -2330,27 +2048,29 @@ margin the heaviest writer on the machine — everything else in the cache is a
 few hundred bytes to a few kilobytes of JSON. SD cards die of writes. So the
 record and its sidecar go to different filesystems: the JSON stays in
 `~/.cache/ftdata` on the card, where it is cheap and worth keeping across a
-reboot, and the sidecar goes to `/run/ftdata`, which is tmpfs —
-`RuntimeDirectory=ftdata` plus `RuntimeDirectoryPreserve=yes` in
-`ftdata.service`, the second because systemd deletes a runtime directory when a
-`Type=oneshot` exits and that would mean refetching the window every quarter
-hour. Measured over two consecutive passes against a populated cache on
-betelgeuse: **1,636 bytes to the card per pass, down from 3,365,556** — 157 kB a
-day against 323 MB, a two-thousandfold cut, and the 3.4 MB that moves is now 2%
-of a 182 MB tmpfs on a machine with 670 MB of RAM free. The fetcher's whole run
-peaks at 53 MiB including those pages, against its `MemoryMax=192M`.
+reboot, and the sidecar goes to `FT_DATA_BLOBS`, which defaults to
+`/run/ftdata` and is tmpfs on Linux. Arranging for that directory to exist and
+be writable is the one deployment detail — a line of unit file if the fetcher
+is run under systemd, a `mkdir` if it is not — and it is optional, because a
+sidecar that cannot be written there is written beside the records instead.
+Measured over two consecutive passes against a populated cache on betelgeuse:
+**1,636 bytes to the card per pass, down from 3,365,556** — 157 kB a day
+against 323 MB, a two-thousandfold cut, and the 3.4 MB that moves is now 2% of
+a 182 MB tmpfs on a machine with 670 MB of RAM free. The fetcher's whole run
+peaks at 53 MiB including those pages.
 
 Splitting the frames into seventy-two files would have cut the writes too, and
 this is better: the pixels are pure cache with a half-hour TTL, so the right
 answer is not to write them more cleverly but not to write them to a card at
 all. What it costs is the window across a reboot — one honest `NO IMAGERY` card
-until `ftdata.timer`'s `OnBootSec=2min` fires — and the records, which are the
-part worth keeping, still survive. Nothing had to change in `ftsched.service`:
-`ProtectSystem=strict` leaves `/run` readable, so the demo reads the sidecar
-under its sandbox exactly as before (verified on the Pi: it loads the array and
-gets `EROFS` if it tries to write there). A checkout on a workstation has no
-`/run/ftdata` and cannot make one, so sidecars fall back to sitting beside the
-records with no setup at all, and `FT_DATA_BLOBS` overrides both.
+until the first fetch after it lands — and the records, which are the part
+worth keeping, still survive. It costs the demo nothing either way: a sandbox
+that leaves `/run` readable is enough, since the demo only ever reads the
+sidecar (verified on the Pi: it loads the array and gets `EROFS` if it tries to
+write there). And a checkout that has no `/run/ftdata` and cannot make one puts
+sidecars beside the records with no setup at all, so `python3 ftdata.py --once`
+followed by `python3 goes.py` works out of the box; `FT_DATA_BLOBS` overrides
+both.
 
 **The fetch is incremental, and it never asks for a directory listing.** The
 record lists the frame timestamps it already holds; a pass keeps the ones still
@@ -2599,256 +2319,904 @@ $ python3 scripts/test-winds.py                    # the checks, against the cac
 grid if you are feeling less polite; anything finer than about 3 km spacing
 buys nothing but duplicate cells.
 
-### twister
+### wx
 
-![twister](screenshots/twister.png)
+![wx](screenshots/wx.png)
 
-The Amiga twister: a bar whose cross section rotates as you travel along it, so
-a slice taken anywhere is the same square as the last one, turned a little
-further. The 1990 version ran vertically because a 320x256 screen is taller
-than it is wide, and a bar down the middle of it is what fits.
+The weather outside *one building* — a street address, not a city — and an
+honest account of where each number came from. The default address is in the
+Mission in San Francisco, in the same spirit as `tide`'s default station, and
+`FT_WX_SITES` and `FT_WX_STATIONS` move it. Somebody walks past, looks for two
+seconds, and
+decides whether to roll the door up. What they must not be able to do is
+mistake a computed number for a measured one, and that turns out to be the
+whole design problem, because almost none of this can be measured near here.
 
-**Turning it through ninety degrees is the whole reason it is here.** The
-twist is a thing you read *along* the object, and this panel has exactly one
-axis long enough to read anything along: laid horizontally there are 320 pixels
-of length to spend on eight or ten waists, 64 rows are more than enough for a
-bar half that thick, and the ribbon runs off both edges so nothing is left
-over. Stood upright the same effect gets 64 px of length, room for about one
-turn, and two thirds of the wall stays black.
+**Why it is a composite.** There is exactly one real instrument anywhere near
+the space. Unioning the station lists across a 7×7 block of NWS gridpoints
+around the address turns up 52 stations and precisely one inside San Francisco:
+**SFOC1, "San Francisco Downtown", 2.8 km away**. The next nearest is Oakland
+Museum at 12.3 km, across the Bay and in a different climate; KSFO is 16 km
+south and in another one again. And SFOC1 reports temperature, dewpoint and
+humidity and **nothing else** — no wind, no pressure. Not "sometimes": the
+fields are in the JSON, `null`, every hour, with a `Z` quality flag. Every
+dedicated personal-weather-station network that would have filled the gap now
+needs a key — Weather Underground PWS 401s, PurpleAir 403s, Synoptic 401s,
+AirNow 401s — which is exactly why this is a composite of three services rather
+than one tidy feed.
 
-Per column the cross section is at phase `k·x + ω·t`; its `n` corners project
-to `y` offsets of `r·cos(θ + i·2π/n)`, so a column is the handful of vertical
-spans stacked between consecutive corners, one per face. A face is towards you
-when the sine of its normal angle is positive, and its brightness is that same
-`|sin|` — which is *also*, exactly, how tall it projects. That coupling is what
-makes it read as one solid object being twisted rather than as coloured
-stripes: the bright face is always the wide one, and a face has dimmed to
-nothing by the time it turns edge on and vanishes. Worth checking numerically
-rather than by eye, because a twister whose faces never quite go edge on still
-looks plausible: at a fixed column through one rotation the two visible faces
-trade an 8-row span at brightness 80 for a 33-row span at 232 and back, four
-times, and the silhouette breathes between 50 rows and 36 — which is
-`√2/2` of it, as a square seen corner-on should be.
+So: temperature, dewpoint and humidity are **observed**, 2.8 km away. Wind,
+pressure and cloud are **modelled** at the exact address by met.no. Air quality
+is **modelled** by CAMS through Open-Meteo, for a grid cell a few kilometres
+wide. Blending those into one authoritative-looking readout would be worse than
+not building the panel, so the distinction is carried four ways at once,
+because any one of them fails on somebody:
 
-**What makes it cheap is that all of that depends on the row and the phase and
-on nothing else.** So the whole demo is one baked table — 1024 phase steps by
-the panel's rows, in RGB — and a frame is an add over 320 elements and a single
-`np.take` through it. Two numpy calls, and no arithmetic over the frame's
-20,480 pixels at all. **0.04 ms a frame on a desktop, which puts it next to
-`cycle`, and p50 2.4 / p95 2.9 ms on the wall's Pi 3** — measured there, on the
-600 MHz throttled clock, with `--breathe` on. That is 60 fps with the whole
-budget still in hand, which is the job: the rotation is short of cheap segments
-and the scheduler wants one to put beside an expensive one.
+1. **Position.** Measured things live left of the first hairline; modelled
+   things live right of it. Nothing crosses.
+2. **A word.** Each zone is headed OBSERVED or MODELLED, with the instrument
+   and *how far away it is*, or the model and whose it is.
+3. **Colour.** Observed values are near-white, modelled values blue — two
+   hues, not two brightnesses, since brightness is already spoken for by the
+   aging state and would be destroyed exactly when provenance matters most.
+4. **A mark on every number.** A modelled value is printed `~5.4`, the way one
+   writes an approximation by hand. Crop the panel, photograph it, read it
+   colour-blind: the tilde is still there.
 
-Two slow modulations keep it from being merely a texture scrolling sideways,
-and they were chosen for costing nothing. `--sway` drifts the ribbon up and
-down the panel, which is a *row offset into the table*; the table is baked at
-four sub-pixel positions of the ribbon as well, since 3 px of sway over 17 s
-stepping a whole row at a time is a visible tick every few seconds. `--breathe`
-varies the twist rate about the middle of the panel, so the ribbon winds up
-tight and slackens off again — 8 waists across the panel at rest, 10 at one end
-of the breath and 6 at the other — and that one does cost three more numpy
-calls, over 320 elements. Their periods are deliberately unrelated to the
-rotation period and to each other, so the loop is long.
+The zone title, the hue and the mark are all *derived from the product's own
+provenance* rather than from where the zone happens to sit, so pointing the
+panel at the wrong kind of product makes it say so rather than quietly relabel
+the data.
 
-Face spans are antialiased against the row grid rather than filled to the
-nearest pixel: the silhouette moves slowly, and a hard edge on something slow
-crawls. That is a bake-time cost, not a frame-time one. The palette has to be
-*cyclic* for the same reason `cycle`'s does — colour is indexed by the phase,
-and the phase wraps once a rotation — so the ramps that run dark to bright are
-mirrored to close the loop, and their black end is dropped first, since a face
-carrying near-black is a dead length of ribbon that no amount of lighting
-brings back.
+**Both temperatures are on the wall on purpose**, observed at the station and
+modelled here, with the difference printed beside the modelled one. When they
+disagree that is not an error to be hidden, it is the sea breeze — the gradient
+across a couple of kilometres of this city, which is the most interesting thing
+this panel knows. The wind is the model's alone and gets the arrow and the big
+type, since nobody within 12 km measures it; the arrow flies *downwind* and the
+label says FROM, because arrow conventions split the room and neither half is
+wrong. If the compass point will not fit it is dropped rather than truncated:
+shortening "FROM WSW" to "FROM W" does not abbreviate a label, it moves the
+wind two points and says so with a straight face.
 
-`build()` takes about 0.8 s on the Pi, nearly all of it rasterising the four
-sub-pixel tables; `--sway 0` bakes one table and takes 0.2 s.
+**The AQI is the number people actually cross the room for.** In this city, in
+fire season, it decides whether the roll-up door opens. So it gets a block of
+the EPA's own colour scale — ≤50 green, 51–100 yellow, 101–150 orange, 151–200
+red, 201–300 purple, 301+ maroon — with the category word beneath it, and the
+ink on the block flips from black to white when the block goes dark enough to
+need it. Those six colours are not adjusted for the panel: everybody here has
+spent a fire season learning to read exactly them, and a nicer green would only
+be a slower one to recognise. And it still says `~55`, because a chemistry model
+over the Mission is not a sensor on the roof. A bright confident block is the
+easiest thing on the wall to mistake for a measurement, which is precisely why
+the mark matters most there.
+
+**The data comes off a disk cache, not a socket.** `build()` calls
+`ftdata.load()`, which reads one JSON file and nothing else, for the reason in
+[`ftdata.py`](ftdata.py)'s docstring: the scheduler builds the next segment on a
+worker thread sharing the GIL with the render loop, so a `build()` that blocks
+on a socket stops the wall for everybody. **The fetcher has to be running:**
 
 ```console
-$ python3 twister.py --faces 3 --turns 1.5 --palette magma
-$ python3 twister.py --palette ice --specular 0.6   # one hue shows the shading plainest
-$ python3 twister.py --speed -0.35 --sway 0 --breathe 0    # the plain 1990 version
-$ python3 twister.py --faces 8 --radius 0.45        # nearly a cylinder
+$ python3 ftdata.py --once                  # one pass, to see it work
+$ python3 ftdata.py --loop 900 &            # its own process, every 15 min
+$ python3 ftdata.py --list                  # what is cached, and how old
+$ python3 wx.py --host 127.0.0.1
+$ python3 wx.py --station KSFO --lat 37.6188 --lon -122.3750 --site "SFO"
+$ python3 wx.py --blink-hz 0                # hold the flags, for a photo
+$ FT_DATA_CACHE=/tmp/nothing python3 wx.py  # the no-data card
 ```
 
-### scope
+It adds three products, all trimmed in the fetcher rather than in the demo,
+because the cache lives on a Pi on shop wifi: `wx-obs-<station>` is 450 bytes of
+NWS observation (ttl 5400 s), `wx-model-<lat>_<lon>` is 540 bytes — one instant
+out of 44 kB of hourly forecast, since a 64-row panel has no room for a forecast
+strip — and `wx-air-<lat>_<lon>` is 500 bytes of CAMS (both ttl 7200 s). Nothing
+assumes a field is present: every NWS value goes through a converter that
+returns absent unless there is a number *and* the unit code is the one being
+converted from, because windSpeed arrives as km/h from most stations and m/s
+from a few, and applying one conversion to the other turns a 5 m/s breeze into
+an 18 m/s gale.
 
-![scope](screenshots/scope.png)
+**met.no's terms are honoured in the fetcher, and they are not decorative.**
+The User-Agent identifies the project and carries a contact address (`FT_CONTACT`
+overrides it); the response's `Expires` and `Last-Modified` are stored in the
+payload; a fetch inside the Expires window makes **no request at all**, and one
+outside it is conditional on `If-Modified-Since` and takes the 304 — which
+api.met.no does return. A `--loop 900` fetcher therefore touches met.no about
+twice an hour, which is roughly how often the model changes. One consequence
+needs saying: a skipped or revalidated fetch rewrites the record with a new
+`fetched_at` and unchanged contents. So every payload carries `t`, the epoch the
+numbers *describe*, and the panel ages them by that instead. Age is part of the
+data, and the part that matters is the data's, not the socket's.
 
-A bench oscilloscope: the 10x8 graticule, a trace sweeping across in a second
-and fading behind itself, a trigger that mostly holds, and every half minute
-the timebase drops out and it flips to X-Y for Lissajous figures. 320x64 is
-very nearly a scope screen with its graticule stretched out, which is the
-whole reason this works on the wall.
+**Staleness is propagation.py's three stages, in propagation.py's vocabulary**,
+since anything showing both panels shows them to the same person and a second
+vocabulary would be a second thing to learn. Fresh: full brightness. Past TTL: half brightness, amber ages,
+AGING. Past three TTLs: the numbers are withdrawn — `--`, never a plausible
+zero — the zone says OBSERVATION TOO OLD or MODEL RUN TOO OLD, and a red flag
+blinks. A product nobody has ever fetched is MISSING rather than STALE; calling
+an empty cache stale would imply there is something behind it. An entirely
+empty cache is a NO DATA card naming the fetcher, the command and the cache
+path. **The provenance survives every one of those states** — a stale zone
+keeps its header, its hue and every tilde. It has nothing to say and says so in
+the right voice.
 
-**The detail that sells it is that the beam moves at constant speed along the
-trace, so a pixel's brightness is inversely proportional to how fast the spot
-crossed it.** Peaks and flat tops glow; steep edges go thin and dim. It costs
-nothing, because it is not a shading pass at all: the path is cut into
-equal-*time* segments each carrying the same charge, and each segment's charge
-is split between the pixels it crosses and accumulated with `bincount`. Three
-sub-samples a pixel land on top of each other at a crest and spread over ten
-rows at a fast zero crossing. Measured on the AM carrier at columns of
-identical phosphor age, a crest reaches 213 of 255 and a crossing 114 — the
-histogram *is* the physics, and nothing anywhere computes dy/dx. A trace of
-even brightness is what this looks like when it silently is not working.
+**Two upgrades are already on the table, and they slot in as products.** The
+panel does not know where a number came from; it knows what its *product* is
+called, and `--obs-product`, `--model-product` and `--aqi-product` each name
+one. A product whose name matches a prefix in `OBSERVED_PREFIXES` is drawn as
+observed — no tilde, near-white, OBSERVED in the header — and anything else is
+treated as modelled, because the failure that matters is claiming a measurement
+nobody made.
 
-Persistence is one float32 buffer decayed as a half-life in *seconds*
-(`--persist`, default 0.42), so the tail is the same length in wall time at 8
-fps as at 30 — the rule `laser.py` follows and for the same reason. At the
-default the trace has faded to about a fifth by the time the beam has crossed,
-which is what makes a sweep read as a sweep rather than as a plotted curve.
-The buffer is carried in palette-index units rather than 0..1 and mapped
-through a P31 green, P3 amber or P11 storage-blue ramp; the graticule is a
-baked static layer composited in that same index space, so it costs one uint8
-maximum a frame and never changes.
+* **PurpleAir**, if a key is obtained: add a `register_purpleair()` alongside
+  the other products in `ftdata.py` writing `wx-pa-<sensor>` with `us_aqi`,
+  `pm2_5`, `t` and a `label` such as `PURPLEAIR 0.4KM`, then run
+  `wx.py --aqi-product wx-pa-<sensor>`. The tile relabels itself, turns mint,
+  and the tilde comes off the big number, because a sensor a few hundred metres
+  away *is* an observation.
+* **A roof sensor over MQTT**: nothing about this needs a demo change either.
+  A subscriber that
+  writes `wx-local.json` into the same cache directory — same envelope,
+  `fetched_at` and a payload carrying `t`, `temp_c`, `dewpoint_c`, `rh_pct`,
+  optionally `wind_ms`/`wind_dir`, and `label: "ROOF"` — turns the observed
+  half from 2.8 km away into the building's own roof with
+  `wx.py --obs-product wx-local`. The wind line stops saying NO WIND AT THIS
+  STATION and starts printing a measured wind, unmarked, on its own.
 
-Signals are baked once as 16k-sample tables, each rolled so that column zero
-is a rising crossing of the trigger level. That roll *is* the trigger, and it
-is why a repetitive waveform stands dead still with no state kept anywhere.
-Not everything locks. The decaying exponential creeps right about ten pixels a
-second, the way a bench scope does when the trigger is a hair off, and the
-previous sweep is still fading a few pixels behind it; noise has nothing to
-lock onto and jumps somewhere new every sweep. Dwells are quantised to whole
-sweeps, so the waveform never changes half way across a trace.
+Both were tested with hand-written cache records before either service existed;
+neither needs a line of this panel changed.
 
-X-Y is the moment worth pacing around, so it comes round twice in the 70 s
-cycle and takes a different quarter of the ratio list each time. X runs at a
-wider volts/division than Y, which is a real setting and the only way a
-Lissajous figure uses a panel five times wider than it is tall. Each ratio is
-detuned by a few hundredths so the figure precesses instead of standing still,
-and the detuning has to *shrink* as the ratio gets busier: a 5:4 precessing as
-fast as a 1:1 sweeps its whole envelope inside one phosphor half-life and
-fills the panel with solid green. Every mode change is preceded by one dead
-sweep with the beam off — cutting straight from a trace to a Lissajous with
-both still lit reads as a fault rather than as a knob being turned.
+It is all baked. The layout, the type, the compass arrow and the AQI block are
+rasterised once in `build()`; `render()` copies that frame and repaints two
+small rectangles — the state flag and a heartbeat, which is there because a
+frozen render loop and a calm evening look identical on a panel made of static
+type. On the wall's Pi 3, throttled to 600 MHz, that is **0.11 ms p50 and 0.18
+ms p95** against a 6 ms budget, with `build()` costing 26 ms once on the worker
+thread — a quarter of what propagation's costs on the same machine. There are
+exactly two distinct frames over a full cycle, which is why the standalone
+default is 10 fps: the other twenty a second would be identical datagrams.
 
-The furniture is deliberately thin: s/div and V/div in the same baked 3x5
-pixel font the readouts elsewhere use, along the strip between the last
-division line and the border, plus a three pixel trigger-level arrowhead on
-the left edge. Both are drawn only where the trace provably cannot reach them,
-so below 60 rows they disappear rather than printing type through the signal.
-A mode caption and a trigger-state legend were both tried and cut: 64 rows do
-not have the room, and the left-hand readout already says `X-Y` when it is in
-X-Y.
+### adsb
 
-It runs in about 5.8 ms a frame on the wall's Pi 3, which is under-voltage
-throttled to 600 MHz. Almost all of what is left is the palette gather, and
-that is done as one packed 32-bit word a pixel into an RGBA frame whose first
-three channels are handed back — half the cost of a row gather out of a
-(256, 3) palette on that machine. The other half of the saving is that
-sampling three points a pixel makes nearly every segment shorter than a row,
-so the machinery for walking a vertical edge only runs on the frames that
-contain one.
+![adsb](screenshots/adsb.png)
+
+Aircraft over the Bay, live. Everything airborne within fifty nautical miles of
+the wall, drawn on a map of the Bay Area as a short comet — the head is where
+it is, the tail is where it came from, the length is how fast it is going and
+the colour is how high it is, warm on the deck through to cold and pale in the
+flight levels. Two of them are named: the one nearest the building, and the
+lowest, which at almost any hour of the day is somebody on short final into
+SFO. Along the bottom, the counts, the altitude ramp the colours come off, and
+how old the data is. The SFO approach and departure corridors are the show —
+the string of warm marks coming down the peninsula and the cooler ones climbing
+out north over the Bay.
+
+**Sixty-second-old data that does not look sixty seconds old.** The fetcher
+asks once a minute; sixty stationary dots that jumped every minute would look
+broken, and would also be a *worse* picture than the truth, because ADS-B
+carries a groundspeed and a track and those are enough to say where an aircraft
+is now. So `render()` dead-reckons — each aircraft advances along its own track
+at its own groundspeed, and the picture moves continuously between fetches.
+Two details make that honest rather than decorative. The clock each aircraft is
+advanced from is **its own**: `seen_pos` says how long ago that particular
+aircraft was last heard, and a jet over the Gate updates twice a second while
+something over the Diablo range may not have been heard for half a minute, so
+one timestamp for the whole record would draw the quiet ones behind where they
+are. And when a new record lands the correction does not snap; it is eased in
+over about a second with a smoothstep, so a fix that has moved a plane three
+pixels looks like a plane moving three pixels. Without that the panel visibly
+twitches once a minute and reads as a bug. A correction bigger than 24 px is
+not eased at all but taken instantly — that is not a correction, it is an
+aircraft that was lost and re-acquired somewhere else, and sliding it across
+the panel would draw a line through places it never was.
+
+**Dead reckoning is extrapolation, so it has a shelf life**, and that is what
+the TTL is for. At 500 knots a minute of extrapolation is 8 nm, roughly the
+error the fix already carries; five minutes is 40 nm, which is fiction. Past
+300 seconds the aircraft stop being drawn and the panel says `ADS-B DATA STALE`
+with the age on it. The age is measured from the *fixes*, against the demo's
+own clock, not from when the socket was read — the two differ under `--rate`,
+and it is the first one that says whether the picture is true. No cache at all
+gets `NO ADS-B DATA` and the command that fixes it; a good record with an empty
+sky says `NO AIRCRAFT AIRBORNE WITHIN 50 NM`, which is not an error and is
+drawn as a statement rather than as an alarm. In every one of those cases the
+map is still drawn underneath, because the coastline is not data and does not
+go stale — a blanked panel reads as a crash.
+
+**The feed is `api.airplanes.live`, and the obvious first choice does not
+work.** All three keyless aggregators publish the same readsb-descended JSON
+and all three were tried against this exact query: `api.adsb.lol` answers 200
+OK in a second with `{"ac": [], "total": 0}`, which is not an error and would
+have given a permanently, honestly empty sky; `opendata.adsb.fi` and
+`api.airplanes.live` both answer in about 250 ms with sixty-odd aircraft.
+airplanes.live is what ships, adsb.fi is a one-line swap, and the User-Agent
+carries a real contact address because this is a volunteer-run receiver network
+being asked for something 1440 times a day. **Half of what comes back is on the
+ground** — 47 of 76 on a Sunday morning, reported as the *string* `"ground"` in
+`alt_baro` — and none of it can be dead-reckoned, so the fetcher drops it and
+stores the count instead. The panel says "29 airborne, 47 on the ground" and
+means it.
+
+The product is `adsb-bay`: ttl 300 s, `interval=60`, `volatile=True`. It is
+rewritten 1440 times a day and is worthless two minutes later, so the record
+lives in tmpfs rather than on the flash card the Pi boots from; what that costs
+is one honest no-data card after a reboot. The payload is columnar — one list
+per field rather than one dict per aircraft, which is 40% of the bytes at this
+size and is also exactly the shape `build()` wants, since every column becomes
+a numpy array. Rounding is chosen against what a pixel is worth: one panel
+column is 300 m, so four decimals of latitude is already three hundred times
+finer than anything visible, and whole degrees of track put a 500 kt aircraft
+0.7 km out after five minutes, a fifth of the error the fix itself carries.
+Thirty-one aircraft come to 3.0 kB; the 120 cap is about 11 kB.
 
 ```console
-$ python3 scope.py --phosphor amber --timebase 0.05
-$ python3 scope.py --phosphor blue --persist 1.6        # long-persistence tube
-$ python3 scope.py --signals square,burst --dwell 12
-$ python3 scope.py --xy-dwell 40 --dwell 3              # mostly Lissajous
-$ python3 scope.py --no-readout --beam 0.7              # just the trace
+$ python3 ftdata.py --loop 60 --due --fast &     # this one wants a minute
 ```
 
-### wireworld
+**The crop is stretched three times, deliberately, and the marks know it.**
+37.47–37.93 N, 122.94–121.86 W is 95 km by 51 km, with SFO, Oakland, Hayward,
+San Carlos and Half Moon Bay on it, the Golden Gate at the top and the wall's
+own address in the middle. Across 320 columns and 57 rows that is a three-fold
+horizontal stretch — the same one `tide` applies to the Gate corridor, for the
+same reason: the Bay Area is roughly square and the panel is five times wider
+than it is tall. San Jose is off the bottom on purpose; reaching it costs
+another quarter of stretch for an airport whose traffic mostly never comes near
+this building. The stretch is applied to the **velocities** as well as to the
+positions, so a mark points along the direction it is really travelling across
+*this* map. It is not a compass rose and does not pretend to be one, and the
+tests read bearings back off the pixels by undoing the same metres per pixel.
 
-![wireworld](screenshots/wireworld.png)
+**It needed a second coastline, and that is the one interesting thing in the
+geography.** `voxel-dem.npz` — which `voxel` flies over and `tide` takes its
+sea mask from — stops at 37.635 N. **SFO is at 37.619**, a mile and a half
+south of its bottom edge, and its east edge is Berkeley when half the arrivals
+come over the Diablo range. A traffic panel whose map stops just short of the
+airport every one of its aircraft is going to or coming from is not worth
+drawing. So `scripts/make-adsb-coast.py` bakes `adsb-coast.npz` off the same
+USGS 3DEP service with the same threshold-and-connectivity trick: three times
+the area, an eighth of the resolution, no elevation at all, one bit a cell —
+1024×512 over 37.40–38.00 N, 123.00–121.80 W, at 103×130 m cells, **5 kB**
+against the voxel DEM's 206. Two files, each honest about what it is for, beat
+one file that is wrong for both. Inland reservoirs come out as land, which at
+300 m to the pixel is the right answer: Crystal Springs would be three pixels
+of water in the hills and would read as noise in the coastline.
 
-The Wireworld cellular automaton, running a circuit that actually computes.
-Four states — empty, conductor, electron head, electron tail — and one rule
-that matters: **a conductor becomes a head if exactly one or two of its eight
-neighbours are heads.** Head becomes tail, tail becomes conductor, empty stays
-empty.
+**The cost is all in `build()`, which is the point.** The coastline crop, the
+airports, the scale bar, the status strip, and — the part that matters — every
+aircraft's altitude colour, unit vector and comet length are computed once when
+a record lands. A frame is one full-frame copy, two array operations to advance
+every aircraft at once, and four scatters to draw them: **about thirty numpy
+calls whether there is one aircraft or a hundred and twenty**, which is the
+number that counts on a machine where a bare numpy call costs 55–80 µs
+regardless of array size. The comets are drawn the way `tide`'s drifters are,
+as flat-index scatters into the reshaped map, with a per-aircraft `(N, 3)`
+colour array so the altitude ramp costs a scatter rather than a loop. Marks
+that have flown off the crop are discarded by clipping the streak and comparing
+it against the unclipped copy — one call for every sample of every aircraft at
+once, instead of four comparisons each. On this desktop, 600 sequential frames:
+**p95 0.054 ms with 31 aircraft and 0.096 ms with the full 120**, `build()` 3 ms
+cold. At the 76–114× this project keeps measuring against the wall's throttled
+Pi 3 that is 7–11 ms, and the floor set by the call count alone — thirty calls
+at 80 µs — is 2.4 ms, so the two agree and neither is near the 50 ms a 20 fps
+segment gets. The standalone default is 20 fps rather than 30 because nothing
+here moves faster than three pixels a second.
 
-**"One or two" is what makes it wire rather than fire.** A head always has its
-tail immediately behind it, so the cell it came from is a tail and cannot fire
-again — the pulse cannot run backwards, and a signal has a direction. Ahead of
-it the next cell sees exactly one head and lights. And a cell with three heads
-around it — a junction being driven from several sides at once — does nothing
-at all, which sounds like an edge case and is in fact the entire logic family
-below. Life's rule floods; this one propagates.
-
-**What is on the panel.** Two clocks, at the left and bottom-left: a closed
-loop of N conductor cells carries a single electron round forever and taps off
-a pulse every N generations, so the loop's circumference *is* the period. One
-loop is 24 cells, the other 36; they coincide every 72, and 72 generations is
-the whole board's cycle. Clock A's pulses run east along the top bus, clock B's
-along the bottom, and three gates in the middle read them:
-
-- **OR** is a merge — the two inputs arrive at one cell, which fires on either.
-- **AND-NOT** (`A and not B`) is the same nine cells with the control input
-  forked into three that all touch the centre. A control pulse then puts three
-  heads around the centre and it stays dark, while a signal pulse alone is one
-  head and gets through. Two extra cells between OR and AND-NOT; that is the
-  whole difference.
-- **AND** is `A and not (A and not B)`, so it is the AND-NOT gate fed back into
-  another one: the second gate's output rail runs east across the panel and
-  climbs into the third gate as its control line.
-
-So the three rails carry three rhythms you can read against each other. Over
-one 72-generation cycle clock A fires three times and clock B twice, landing
-together exactly once. The OR fires on all four of those events, the AND-NOT on
-the two that clock A has to itself, and the AND on the single coincidence. That
-is the truth table, drawn as timing.
-
-**Diodes, and why there are exactly two.** The standard one-way junction: a gap
-in the wire bridged by two pairs of prongs. Forwards, the near side lights the
-first pair, the first pair lights the second, and the far side sees two heads
-and fires. Backwards, the far side lights both pairs at once and they put three
-heads around the near side — one too many — and it stops dead. Only the merge
-needs them, and it needs them badly: when either input fires the centre cell,
-the centre's head is a neighbour of the *other* input's last cell, which fires
-and runs away backwards up the wire. Left to itself it meets the next real
-pulse coming the other way and the two annihilate, which silently deletes a
-quarter of the circuit's events while leaving a picture that still looks
-perfectly busy. Both diodes therefore sit hard against the gate, because the
-reverse pulse has to be dead before the forward one arrives and here they are
-only ten generations apart. `scripts/wireworld-check.py` removes them and
-asserts that the OR gate's rate drops.
-
-**Cells are 2x2 pixels.** The circuit is a hand-laid 160x32, which at `--cell
-2` fills a 320x64 wall exactly. `--cell 1` was rendered and looked at rather
-than reasoned about: the same circuit then occupies the middle quarter of the
-panel inside a black border, and single-pixel wire with single-pixel electrons
-on it is a texture rather than a diagram from more than a couple of metres
-away. Two is the default for that reason; a panel of another shape gets the
-circuit centred, and cropped if it will not fit.
-
-**The step rate is per second, not per frame** (`--rate`, default 14), so the
-circuit runs at the same speed whatever `--fps` it is driven at. That makes the
-automaton's state a function of elapsed time, which for a cellular automaton
-usually means giving up on `render()` being a pure function of `t`. Here it
-does not have to be: the board repeats every 72 generations, so `build()`
-settles the transient and stores the whole cycle as 72 grids — 370 kB — and
-`render()` indexes into it. A restart, a seek, or a different frame rate all
-land on the same picture. Electrons get a few generations of afterglow behind
-them (`--glow`), because a one-cell-per-generation head is otherwise a blink
-rather than a movement and the direction of travel is what you want to read.
-
-Measured on betelgeuse (Pi 3, undervolt-throttled to 600 MHz): **0.05 ms p50 /
-0.08 ms p95 on a frame that lands on the same generation as the last one** —
-it returns the same buffer untouched — and **3.6 ms p50 / 4.0 ms p95 on a frame
-that steps**, which at 30 fps and 14 generations a second is a little under
-half of them. `build()` costs 0.65 s once. Storing the cycle as finished RGB
-frames instead would make even the stepping frames free, at 4.4 MB and at the
-cost of pinning the palette and the panel size into the precompute; 4 ms
-against a 20 ms budget did not justify it.
-
-**A mis-laid Wireworld circuit still animates convincingly while computing
-nothing**, which is a nastier failure than usual, so
-`scripts/wireworld-check.py` drives every piece and reads the answer off rather
-than trusting a look at it: the rule for all four states against all nine
-neighbour counts, three loop lengths against their periods, the diode passing
-one pulse forwards and none backwards and leaving nothing behind either way,
-both gates over their whole truth table, and then the assembled circuit for its
-firing rates, its 72-generation period, and the two ways this dies quietly —
-every electron consumed, leaving a static picture that is still a valid frame,
-or the 1-or-2 rule wrong and conductor lighting everywhere.
+**A traffic map has one failure mode that beats every other: marks moving the
+wrong way look completely plausible.** A track is a bearing clockwise from true
+north, the screen is rows-down and columns-right, and the map is stretched on
+one axis only; get any one of those wrong and you have a beautiful, confident
+panel full of aircraft flying backwards over a coastline that is still
+perfectly correct. So `scripts/test-adsb.py` asserts it off the rendered pixels
+— the mark's centroid over a window of open Pacific, thirty seconds apart,
+converted back to a bearing *and* a groundspeed — at six tracks, with a control
+that negates the velocities and must be rejected. It also checks the ease
+(biggest single-frame step under 2 px, landing within 2 px of the new fix,
+against a control with `--ease 0` that must jump), that eight aircraft outside
+the crop draw *exactly nothing* — asserted as pixel equality against the same
+frame without them, which is the only way to catch a clip that smears them onto
+the border — and that a stale record draws no aircraft, asserted the same way
+against an empty record rather than by looking for bright pixels, because the
+stale card's own type is the brightest thing on the panel. The demo is
+stateful, so every check renders a *sequence* from a fresh `build()` and drives
+the demo's clock itself; fresh, stale and absent each run in a separate
+interpreter, because `ftdata.CACHE_DIR` binds at import. 70 checks.
 
 ```console
-$ python3 wireworld.py --host 127.0.0.1
-$ python3 wireworld.py --rate 6 --palette ice      # slow enough to follow
-$ python3 wireworld.py --cell 1 --glow 0.7
-$ python3 wireworld.py --palette magma --rate 24   # hard to keep up with
-$ python3 scripts/wireworld-check.py               # the assertions
+$ python3 adsb.py                                  # needs the fetcher running
+$ python3 adsb.py --rate 20                        # twenty minutes a minute
+$ python3 adsb.py --extent 37.3,38.0,-123.0,-121.8 # a wider crop
+$ python3 adsb.py --labels 0 --trail 0             # bare heads, nobody named
+$ FT_DATA_CACHE=/tmp/empty python3 adsb.py         # the no-data card
+$ python3 scripts/test-adsb.py                     # the checks
+$ python3 scripts/make-adsb-coast.py               # re-bake the coastline
+```
+
+`ADSB_LAT`/`ADSB_LON` in `ftdata.py` and `HOME` in `adsb.py` are the wall's own
+address; `--extent` moves the map. The coastline will follow anywhere in the
+United States that 3DEP covers, but only after a re-bake — the committed mask
+is this bay, because this bay is what the wall is in.
+
+### caiso
+
+![caiso](screenshots/caiso.png)
+
+What California is running on, right now, and what it has run on all day. The
+wall is in a makerspace full of people drawing amps off this grid, and this is
+the panel that says where those amps came from. A stacked area across 320
+columns is midnight to midnight in the ISO's own zone at five-minute
+resolution, filled in as far as the data goes and empty after that; three
+numbers across the top say how much the state is drawing in gigawatts, what
+fraction of it is carbon-free, and what a kilowatt-hour of it costs in grams of
+CO2 at this minute. The shape it draws is the duck: solar comes up over the
+Central Valley around six, gets to a third of the state's supply by noon, and
+falls away in three hours at teatime while everybody gets home and turns things
+on. Something has to fill that hole, and watching what fills it is the whole
+point — on most evenings the answer is the orange band at the top.
+
+**The source, since the old paths are gone.** CAISO's "Today's Outlook" is
+backed by three keyless CSVs rewritten every five minutes. Every script older
+than about a year fetches `/outlook/SP/fuelsource.csv`; that 404s. What answers
+today is `/outlook/current/fuelsource.csv`, `.../demand.csv` and `.../co2.csv`,
+with `/outlook/history/<YYYYMMDD>/` alongside for finished days — all four
+checked by hand before this was written. No key, no registration. The
+alternative is EIA-930, which is the same picture an hour later and **does**
+need an API key, and OASIS, which needs a client certificate and speaks zipped
+XML. The `Time` column is a bare `HH:MM` on Pacific wall clock with no offset
+attached, so `ftdata.py` resolves it against `America/Los_Angeles` explicitly
+rather than against `localtime` — a fetcher run from a laptop in another zone
+would otherwise write a record whose midnight is somebody else's, and the panel
+would draw the whole day shifted with nothing to say it had. The two DST days
+are resolved row by row for the same reason: one of them is 276 rows long and
+one is 300, and a uniform 288×300 s grid puts the evening peak an hour out.
+
+**The real problem is legibility, and the answer is five bands and a lane.**
+CAISO publishes thirteen columns and six of them are smaller than one row of
+LED at this scale — geothermal is 1.4 rows, small hydro is half a row, biogas a
+third, coal and "other" have been flat zero all year. Drawn faithfully they are
+a strip of dither noise between two real bands, and each one costs a boundary
+the eye has to resolve. So they are grouped by the only two questions worth
+asking from across a room, *is it clean* and *does it move*:
+
+| band | what is in it | why |
+|---|---|---|
+| **NUC HYD GEO** | nuclear, geothermal, large and small hydro | carbon-free and near enough flat over a day, so it is the floor everything else stacks on |
+| **SOLAR** | solar | its own band, always: it is the story |
+| **WIND** | wind | its own band because it runs on a different clock — often strongest overnight — and a merged "renewables" band would hide exactly that |
+| **IMPORTS** | imports | deliberately a colourless slate, because nobody knows what it is: whatever the Northwest and the Southwest happened to be selling |
+| **BURNED** | natural gas, coal, biomass, biogas, other | everything on fire, warm against four cool bands, and on top because it is the swing |
+| **BATTERY** | batteries | a signed lane of its own under the chart, since it is the only quantity here that goes negative |
+
+Colour does the work before any number is read: four cool bands and one warm
+one, so "how much of this is combustion" is answered from the doorway. The
+battery lane is the part that has aged best — California now soaks up several
+gigawatts of midday solar and hands it back at the peak, and that shows up as
+two lobes either side of the afternoon, charging below the line in indigo and
+discharging above it in mint. It is scaled to its own extreme rather than the
+chart's, because six gigawatts against a thirty-five gigawatt axis is two rows
+and two rows cannot show a shape; that is exactly why it is a separate lane
+with its own rule through the middle and not a band in the stack.
+
+**Carbon-free** is solar + wind + geothermal + hydro + nuclear over everything
+supplying the state. Imports are in the denominator and never the numerator,
+which makes the figure a floor rather than a guess, and biomass and biogas are
+renewable but not carbon-free and are not counted either. Battery *discharge*
+is in the denominator too — the electricity in it came from somewhere, and that
+somewhere was hours ago. Carbon intensity is not modelled at all: CAISO
+publishes the emissions themselves in tons an hour by source, so grams per
+kilowatt-hour is a division. The two numbers move in opposite directions, which
+is a useful thing for two numbers on a wall to do.
+
+**The now-line is the edge of the data, not the wall clock**, and it carries
+its own time label — which doubles as the only calibration on the horizontal
+axis, since a legend and hour labels will not both fit under a 320 px chart. If
+the fetcher stopped an hour ago the line stops an hour short of where the clock
+says, the gap is visible, and the header says `STALE`. Ahead of it the panel is
+not dead: the day-ahead demand forecast is drawn dotted right across the day,
+because it is the only thing in any of this that knows what the evening looks
+like. Note that the top of the stack is *supply* and the forecast is *demand*,
+and on a sunny afternoon supply runs several gigawatts above it — the gap is
+what is going into the batteries, and it is the lane underneath that explains
+it.
+
+**It has to move.** A day chart is a still picture by nature and a still
+picture between two animated demos reads as a crashed one. Three things, none
+of them decorative: the day reveals left to right over a couple of seconds when
+the segment starts, which is the day replayed; a sheen sweeps across every six
+seconds; and the now-line breathes with a pulse running up it. The sheen was a
+multiply first, which is cheaper and looks right in the arithmetic — black
+stays black, lit pixels brighten — except that four of the five band colours
+are already saturated in a channel, so it clipped and was invisible over
+exactly the part of the panel it exists to animate. Lifting towards white
+instead moves a saturated orange as far as it moves a dim teal. The pulse is
+there because the sheen spends half a second off the right-hand edge between
+passes and the breath is an integer that rounds the same way several frames
+running: without it the panel holds one frame for four hundred milliseconds
+twice a minute, which the test catches and an eye would too.
+
+**Nothing here touches the network.** `build()` calls `ftdata.load()` and reads
+one JSON file; the product is `caiso-mix`, ttl 3600 s, refetched every 600 s
+against a five-minute source, and deliberately **not** `volatile` — the payload
+is the day *so far*, so a record that survives a reboot is the difference
+between coming back up with the whole morning's curve and coming back up with
+one sample on a blank chart. It is the largest non-pixel record in the cache at
+about 55 kB by midnight, which is 8 MB of SD card a day against `goes`' 336.
+
+**Age is part of the data, and one failure here is worse than the others.** A
+record past its hour still draws with `STALE` and its age in the corner: this
+morning's curve is still this morning's curve. A record of *yesterday* does
+not, and that is the one that matters — it parses, it has 288 rows, it is a
+lovely duck, and drawn under today's clock it puts the evening peak where the
+morning goes. So the payload's own midnight-to-midnight span is checked against
+now, and a record that fails it gets `NO GRID DATA` and `RECORD IS FROM
+2026-08-08` instead of a chart. Missing, corrupt and wrong-shaped records get
+the same card and the command that fixes it.
+
+**Asserted in pixels, not eyeballed**, because five coloured bands upside down
+are exactly as pretty as five the right way up. `scripts/test-caiso.py` builds a
+synthetic day whose answers cannot be argued with — a known solar bell, a known
+evening gas peak, a battery charging at noon and discharging at seven — and
+then reads the panel back: the bands must run firm, solar, wind, imports,
+burned from the bottom; there must be no solar band at two in the morning; the
+burned band must be thicker at eight than at one; the stack height must be the
+total generation to within a row; every published column must land in exactly
+one band; and the battery lane must draw below the line at noon and above it at
+seven and nothing at all between the lobes. The demo is not a pure function of
+`t`, so every check renders frames **sequentially from a fresh `build()`**, and
+because `ftdata.CACHE_DIR` binds at import, the fresh, stale and absent cases
+each run in a **separate process** with `FT_DATA_CACHE` set. One trap worth
+recording: the `contains_text()` helper the tide and wind tests use only asks
+whether a glyph's strokes are lit, which is fine on their mostly-black panels
+and useless on this one — inside a solid band every pixel is lit and every
+string in the language matches. It cost four false passes before it was
+noticed; this version checks that the counters are dark too. 57 checks, 0
+failed.
+
+**The cost is all in `build()`.** The stack, the lane, the gridlines, the
+legend, the forecast trace, the now-line's label and the header are rasterised
+once into two uint8 frames plus a float sheen table. `render()` does one
+full-frame copy, a multiply and an add over a 34-column window, and writes
+three short columns — six or seven numpy calls, which on the Pi is the budget,
+since a call there is 55-80 µs whatever the array size. Over two thousand
+frames on this desktop: **p50 0.022 ms, p95 0.026 ms, p99 0.032 ms**, worst
+frame 0.062 ms; at the measured 114× that is p95 **3.0 ms on the Pi** against
+50 ms for a 20 fps segment. `build()` is 1.8–3.7 ms here, so under half a
+second there, once, on the worker thread. The one thing that had to move out of
+the frame loop was the header: every number on it comes out of the record, but
+*finding out* whether it changed means formatting four strings and walking the
+ladder of shorter forms, and doing that twenty times a second to learn nothing
+had changed was the most expensive thing in the file.
+
+```console
+$ python3 ftdata.py --once --only caiso-mix        # the fetcher, first
+$ python3 caiso.py --host 127.0.0.1
+$ python3 caiso.py --24h --peak 40                 # fixed 40 GW axis
+$ python3 caiso.py --sweep 0 --reveal 0            # hold still, for a photo
+$ FT_DATA_CACHE=/tmp/empty python3 caiso.py        # the no-data card
+$ python3 scripts/test-caiso.py                    # the checks
+```
+
+### quake
+
+![quake](screenshots/quake.png)
+
+A week of earthquakes around San Francisco, at two scales, from the USGS ANSS
+catalogue. On the left the greater Bay Area at 1.4 km to the pixel, with the
+water filled, the eight strands of the plate boundary that run through it and
+every located event of the last seven days on top. In the middle the same week
+out to 300 km, which is where Parkfield, the Mendocino triple junction and the
+rest of the ground that shakes this city but has none of its address live. On
+the right the number the room actually wants — **how many days since the last
+M4 within 100 km** — and underneath it the week's count, its largest, its
+latest, and a strip of the planet's M4.5+.
+
+**Most days it is nearly empty, and that is the answer.** Which is the hard
+part, because an empty map is also what a projection bug, a bad date filter, a
+dropped event list and a dead fetcher all produce. So the empty state is the
+designed one rather than the default one: the coast and the faults are drawn
+whether or not anything happened on them, the count of days is in the largest
+type on the panel *because a large number there is good news*, the most recent
+event breathes once a second however small it was, the header says `QUIET`
+rather than nothing, and a heartbeat blinks in the corner. There is no state in
+which this demo shows nothing. There is only the state in which the ground has
+done nothing, which looks quite different from a panel that has stopped.
+
+**And it has to become loud.** An M4+ in the last six hours, an M5+ in a day or
+an M6+ in three days takes the panel over: the header turns into a blinking red
+bar, the right-hand column becomes that one earthquake — magnitude in the
+biggest type on the wall, place, distance and bearing *from this building*,
+depth, how long ago, how many since — the epicentre gets a crosshair, and rings
+expand out of it across whichever map it landed on. Among qualifying events the
+biggest wins rather than the newest, because during a sequence the newest event
+is a small aftershock and the M5.8 forty minutes ago is still the news.
+
+**Magnitude is logarithmic, so the marker is not scaled by it.** Scaling a
+marker by magnitude gives an M6 twice the radius of an M3 for thirty thousand
+times the energy, which flatters the small ones; scaling by energy gives an M2
+a radius of 10⁻⁸ pixels, which is worse. So the marker is not a symbol for the
+number at all — it is drawn at **the size of the ground that broke**. Wells &
+Coppersmith put strike-slip subsurface rupture length at
+log₁₀(L) = 0.59 M − 2.44, so the radius is L/2 in kilometres, projected like
+everything else on the map. Loma Prieta comes out at 21 km of radius against a
+real rupture about 40 km long, which is right to within a pixel, and an M7
+would take a third of the tile — also right. Below about M4.5 the rupture is
+smaller than a pixel, so those are floored at one pixel and their magnitude is
+carried by **colour**, a blue-through-red ramp, and their age by
+**brightness**, fading to about a quarter over the week with a white core on
+anything in the last hour. Three quantities, three channels, and the one that
+is genuinely enormous is the one drawn to scale.
+
+**The Bay map is stretched, and no version of it is not.** A tile's squash is
+arithmetic: the region's height-to-width ratio times the tile's
+width-to-height. On 155 by 57 pixels a square region is squashed 2.7 times
+whatever you do, and the only real choices are how much ground to cover and
+where the distortion goes. The tile covers 37.20–38.85 N, 121.15–123.55 W — 210
+km across, 183 down — and lands at 2.4 times, 1.36 km per pixel across against
+3.2 down. Everything is squashed equally, including the rupture discs, which is
+why a large event draws as a flat ellipse: on this projection the ellipse *is*
+the circle. The extent is a trade too. A tight crop of the Bay is a
+better-looking map and, most weeks, an empty one — the busiest ground in
+northern California is the Geysers geothermal field at 38.79 N, 60 km north of
+any crop that keeps the Bay looking like the Bay, and it alone supplies half
+the week's local events. Reaching up to it costs half a unit of squash and buys
+the map its earthquakes. The 300 km tile is the opposite: 57 by 57 over a
+620 km box, within 4% of true scale, with range rings at 100 and 300 km.
+
+The geography is baked into the file. **Water is a mask, not a coastline**, and
+that was the second attempt: drawn as polylines the Bay, Suisun Bay and the
+Delta are a horizontal scribble of thin strokes with no inside and no outside,
+and the eye cannot tell a channel from a fault. So each tile carries a 1-bit
+ocean mask, rasterised offline from Natural Earth 1:10m at 8×8 supersampling
+and base64'd — 1105 bytes and 407 bytes, about thirty lines of source — and the
+shoreline falls out of a dilation for free. The faults are the eight principal
+strands of the USGS 2014 National Seismic Hazard Model fault sections: San
+Andreas, Hayward, Calaveras, Rodgers Creek–Maacama, Concord–Green Valley,
+Greenville, San Gregorio, West Napa. There are 74 sections in that box; all of
+them is a grey smear and these eight are a plate boundary, and being nearly
+straight they cost 42 points between them.
+
+**One feed, two scales, and one request that is not a feed.**
+`ftdata.py` fetches `quake-usgs` from `all_week.geojson` — every event ANSS
+located anywhere on Earth in seven days, which answers both halves at once.
+Taking one file rather than composing `all_day` with `2.5_week` avoids the
+whole class of bug where two feeds hold two versions of the same earthquake,
+which happens constantly: USGS revises magnitudes for hours after an origin. It
+is 1.4 MB, which at a ten-minute interval averages 2.4 kB/s, and the record
+kept from it is about forty times smaller — every event within 300 km with
+distance and bearing precomputed, the M4.5+ of the week as time-and-magnitude
+pairs, and the single largest in full. Quarry blasts are dropped: the `type`
+field distinguishes them and the East Bay quarries put several a week inside
+300 km, and the count of what was dropped is kept so the filter can be checked.
+The **baseline is the one thing no summary feed can answer** — a local M4
+happens a few times a year, so on almost every day the answer lies outside
+every window that exists, and `significant_month` is global and would not list
+a Bay Area M4.2. That number comes from one FDSN event query instead, same
+catalogue and equally keyless, `limit=1` ordered by time, about 1 kB and under
+a second. It sits in its own try/except: losing the headline scalar must not
+cost the week's map with it, so a failure stores `baseline: null` and the panel
+prints `--`. The demo also checks the week's own events against it, or a local
+M4 four minutes old would leave "129 DAYS" on screen with the earthquake still
+on the map.
+
+**Age is part of the data, in three stages.** Fresh draws normally with the
+fetch age in the corner. Past the 3600 s TTL the corner turns amber and says
+`OLD`, and the map still draws — the geography did not expire. Past three TTLs
+it says `STALE`, prints `CATALOGUE 2D OLD — NOT DRAWN`, and stops drawing
+earthquakes altogether, because a day-old catalogue is a map of a city where
+nothing has happened since yesterday, which is a different and much worse claim
+than an empty one. No file at all, or a half-written one, or one from another
+product, gets the no-data card with the command that fixes it — and that card
+is loud on purpose, since a quiet empty map is this demo's *good* state and the
+two must never be confusable.
+
+**It is all baked, and the thing to watch is not the frame.** The maps, the
+type, the events and the sparkline are rasterised in `build()` into one uint8
+frame; `render()` copies it and repaints the pulse, the heartbeat and, when
+there is one, two ring masks. Over 400 sequential frames on a desktop that is
+**p50 0.006 ms / p95 0.007 ms** quiet and **p50 0.035 / p95 0.037** with an
+alert on screen — call it 0.8 ms and 4 ms on the wall's Pi against a 50 ms
+budget at 20 fps. The rebake is the part that could stutter: re-reading the
+cache and redrawing three hundred events across two maps costs 3.4 ms here and
+therefore perhaps 350 ms there, seven dropped frames in one lump. So it only
+happens when the record has actually changed, checked with an `os.stat` rather
+than by parsing 58 kB of JSON. Most of that 3.4 ms used to be 5.3: the single
+biggest cost in a rebake turned out to be `np.clip` on a *scalar* inside the
+magnitude-to-colour lookup, six thousand calls for 3.3 ms, now a list index.
+
+**The checks are the part that matters here**, because both of this demo's
+failure modes look like a working panel. `scripts/test-quake.py` asserts the
+projection against known coordinates in pixels — Sequoia Fabrica, the Golden
+Gate, the Geysers, San Jose, Parkfield, Cape Mendocino — and the water mask
+against places that are unambiguously wet or dry, with an east-west mirrored
+mask as a control that has to be rejected. It asserts the rupture scale against
+seismology rather than against itself: M6.9 has to give roughly Loma Prieta's
+40 km, and each whole magnitude has to multiply rupture by a constant *ratio*,
+which is the check that tells a log scale from a linear one. It counts, on the
+live cache, that every event which projects onto the Bay tile actually
+brightened its own pixel, and reads the event count and the data age back off
+the rendered pixels rather than off the objects they were formatted from. And
+it drives the loud path with a **synthetic M5.8 under Berkeley** written into a
+cache directory, because waiting for a real one is not a test plan: the header
+has to go red and blink, the distance and bearing have to appear, the epicentre
+has to be marked, and the rings have to *expand*, measured as the mean radius
+of the alert-coloured pixels over sequential frames — a ring stuck at a fixed
+radius, or running inwards, looks perfectly fine in a still.
+
+Two traps are worth naming. Everything renders **frames in sequence from a
+fresh `build()`**; the first version sampled `render()` and read forty
+references to the same reused buffer, and concluded the pulse was flat. And the
+three cache states each run in a **separate process** with `FT_DATA_CACHE` set,
+because `ftdata.CACHE_DIR` binds at import and a test that sets the variable
+and re-imports is testing the value it already had.
+
+```console
+$ python3 ftdata.py --once --only quake-usgs   # or --loop 900
+$ python3 quake.py --host 127.0.0.1
+$ python3 quake.py --alert-demo             # the loud path, on the week's biggest
+$ python3 quake.py --pulse-hz 0             # hold it still, for a photograph
+$ FT_DATA_CACHE=/tmp/empty python3 quake.py  # the no-data card
+$ python3 scripts/test-quake.py
+```
+
+### sats
+
+![sats](screenshots/sats.png)
+
+What is overhead, right now. Coastlines, the day/night terminator for this
+exact minute, fifteen satellites each carrying twenty minutes of ground track
+behind it and twenty ahead, the ISS labelled, San Francisco marked, and a strip
+along the bottom saying when the next thing goes over the workshop and how high
+it gets — `SF NEXT  CSS IN 23M  MAX EL 44 N`. The roster is the ISS and
+Tiangong, nine amateur birds from AO-7 (launched 1974, still worked today)
+through SO-50 and FUNcube to GreenCube at 5900 km and QO-100 sitting
+motionless over Africa, and four polar weather satellites.
+
+**The reason this one exists.** Every other live-data demo here is only as
+alive as the fetcher: a tide curve with a dead fetcher is a still picture.
+Orbital elements are not a measurement, they are a *description of an orbit*,
+and turning one into a position needs nothing but the time of day — so this
+panel moves continuously and correctly on a cache record three days old, and
+would keep moving all week. `ftdata.py` fetches CelesTrak's GP elements **once
+a day** (`ttl` three days, `interval` 86400) and trims 80 kB of three group
+queries down to a 3.7 kB record of seven mean elements per satellite. The
+obvious pick for a ham-adjacent wall would have been NOAA 15/18/19, the APT
+birds a cheap dongle can hear; `GROUP=noaa` returns *not found* now and those
+three are gone from `GROUP=weather` too, because NOAA ended POES operations in
+2025. Their successors are here instead, Meteor-M2 3 being the one still
+sending LRPT that anybody in the shop could receive.
+
+**The projection is a plate carrée squashed exactly two and a half times.**
+360° across 320 columns is 1.125° a column; the whole 180° of latitude across
+64 rows is 2.8125° a row. There is no honest way round it — a true-scale world
+map 320 px wide is 160 rows tall — and the alternative, keeping the scale and
+cropping to the 72° that fit, would cut off everything above 36 N, which is the
+ISS for most of its orbit and every polar bird entirely. So the world is
+squashed, Greenland comes out short and fat, and nothing is missing.
+`--lat-span 72` crops instead, for comparison. The coastline is Natural Earth
+1:110m, simplified offline and baked into the source as 3.5 kB the same way
+`defcon.py` bakes its own, so there is nothing to fetch at run time.
+
+**The propagator is Kepler plus J2 secular rates, and it is not SGP4** — worth
+saying plainly, because the picture looks identical either way and the
+difference only ever shows up as a satellite arriving somewhere a minute early.
+It does Brouwer element recovery (the mean motion in a TLE is a Kozai mean, and
+using it directly gets the period wrong by seconds an orbit), the three J2
+secular rates — nodal regression, which is what walks the ISS ground track west
+about 5° a day, apsidal rotation, and the correction to the mean motion — and
+the TLE's own *ṅ*/2 term as a quadratic in mean anomaly, which is the one piece
+of drag a Kepler propagator can carry. It does **not** do SGP4's short-period
+terms or BSTAR drag, which is why BSTAR is not even stored.
+
+Measured against a public SGP4 service at five moments spanning three days, on
+elements 18 hours old, the ISS subsatellite point comes out **0.09° away, 12 km
+— a twelfth of a column** — rising to 0.13° when propagated a further three days
+ahead, with altitude agreeing to 8 km. That is a better answer than it has any
+right to be and comes almost entirely from carrying the *ṅ*/2 term. For drawing
+where things are it is indistinguishable from the real thing; for pointing a
+dish it is not.
+
+The pass strip is computed once in `build()` — a 30 s search over the next day
+for everything above 10°, with the horizon crossings interpolated across the
+cell they fall in and the maximum refined by a parabola through the samples
+either side of it. That last part is not fussiness: a pass that goes nearly
+overhead moves a degree of elevation a second, so a raw grid maximum reads
+88.4 where the truth is 88.8, and the raw grid *time* is half a minute out —
+which is the difference between "IN 42M" and being wrong about it.
+
+**Past the record's three-day TTL the panel stops drawing satellites and says
+ORBITS TOO OLD.** That is a harder line than the other data demos take and it
+is the right one here: a stale tide curve is visibly the wrong shape, but a
+stale orbit is a perfectly plausible dot in the wrong place and nothing on the
+panel would give it away.
+
+Everything on it moves every frame, so nothing about the satellites is cached;
+what is cached is everything that does not move — the map, the terminator
+(rebuilt every two and a bit minutes, when the sun has moved half a column) and
+the strip. A frame is one full-frame copy, about sixty numpy calls over a
+single 1815-element array, and four scatters: **0.35 ms p50 and 0.37 ms p95**
+on a desktop, so about 37 ms on the wall's 600 MHz Pi against the 50 that
+20 fps allows. Three things paid for that and are worth knowing before touching
+the file — Kepler's equation is not iterated (the equation of the centre to
+second order plus one Newton step is already finer than the propagation it
+feeds, where five blind iterations cost 45 numpy calls a frame for nothing),
+geodetic latitude is a closed form rather than a fixed point (agrees with the
+converged answer to 0.0007°, a four-hundredth of a row), and sidereal time over
+a forty-minute track is a straight line.
+
+`scripts/test-sats.py` is 69 checks: Kepler by substitution, GMST against its
+published value at J2000, the projection against the corners of the map, the
+propagation against that SGP4 service with an hour of deliberate clock error as
+the control, the pass search against a brute-force 5 s scan of the same orbits,
+and then the pixels — every dot read back off the panel and converted to a
+latitude and longitude, the footprint ring measured to check every one of its
+pixels is the right angular distance from the satellite it belongs to, and the
+lit half of the map cross-correlated against where the sun actually is, with an
+inverted terminator as the control. Fresh, stale and absent caches each run in
+a **separate process**, because `ftdata.CACHE_DIR` binds at import and
+reloading the module in one process has produced a false pass here before.
+
+The footprint check earned its place immediately: it caught a ring wrapped as
+`x % 360 - 180` instead of `(x + 180) % 360 - 180`, which is the same thing for
+an eastern longitude and half a world out for a western one, and which drew a
+beautiful circle around nothing at all.
+
+```console
+$ python3 ftdata.py --once --only sats    # elements; once a day is plenty
+$ python3 sats.py --host 127.0.0.1
+$ python3 sats.py --rate 600              # an orbit past in nine seconds
+$ python3 sats.py --lat-span 72           # true scale, poles cropped
+$ python3 sats.py --site 51.48,-0.00 --site-name GRN   # somebody else's sky
+$ FT_DATA_CACHE=/tmp/nothing python3 sats.py           # the no-data card
+```
+
+
+### ships
+
+![ships](screenshots/ships.png)
+
+Ships in and out of San Francisco, drawn against the water they ride. Two and
+a half days run left to right with now marked: every scheduled arrival and
+departure at the Port's cruise berths as a mark on the axis, captioned with the
+vessel, the time, the berth and where she is coming from or going to.
+Underneath, on exactly the same axis, the predicted tide at Fort Point and a
+ribbon of the predicted current at the Golden Gate — warm where the flood is
+running in, cold where the ebb is running out, dark and still at the turn, with
+a faint vertical dropped through the board at every predicted slack.
+
+**That pairing is the entire point of the panel.** Big ships are handled
+around the water. The Bay entrance runs to five knots, and the interesting
+question about a movement is not what time it is but what the tide is doing at
+that time — so each caption carries a third line, `SLACK` or `EBB 2.1KN`,
+taken from the current prediction at the moment of the mark, and each mark can
+be read against the dark bands in the ribbon. A ship sitting on the slack is
+working with the water; one that is not has other constraints. Neither half of
+this panel can tell you that on its own.
+
+**Why there are no moving ships on it.** The obvious source is AIS, and every
+live AIS feed within reach wants a key: aisstream.io, MarineTraffic and
+VesselFinder all register you first, and AISHub's price is a receiver of your
+own feeding the pool. The [Marine Exchange of the San Francisco Bay
+Region](https://www.sfmx.org/daily-reports) publishes precisely the report this
+demo would want — due to arrive, due to depart, vessels in port, updated around
+the clock — and sells it to members; the samples are public and the live ones
+are not. There is no keyless live-position feed for this bay, so there is no
+dead-reckoned map here and nothing pretends there is. What *is* public, free
+and authoritative is the Port of San Francisco's own [cruise terminal
+schedule](https://www.sfport.com/maritime/cruise): a PDF calendar of every
+cruise call at Piers 27 and 35 for the year, with vessel, berth, line, ETA and
+ETD to the minute and the port either side. Cruise ships are the largest things
+that come through the Gate on a published timetable, which makes them the ones
+this panel can say something true about.
+
+**These are berth times, not bridge times**, and that is worth being plain
+about. The sheet says when a ship is alongside Pier 27; a ship alongside at
+07:00 passed under the Golden Gate the better part of an hour earlier. Nothing
+converts between the two, because the offset depends on the pilot, the ship and
+the day, and an invented one drawn to the minute would look exactly as
+authoritative as the published number beside it.
+
+**The PDF is parsed here rather than by a library.** There is no PDF module in
+this project's dependencies and adding one to a Pi for eleven columns of a
+table is a poor trade, so `ftdata.py` inflates the content streams, recovers
+the (x, y) of every text run, groups runs into rows by y, and assigns each cell
+to the nearest column of *the header row it found in the document*. Reading the
+columns off the page rather than out of a table of offsets in the source is
+what makes it survive a layout edit; when it does eventually break it raises,
+and `fetch()` leaves the previous record in place. Two files are fetched, one
+per calendar year, because in December the interesting window is on next year's
+sheet, and either failing is skipped rather than fatal. Grouping text by
+*stream* instead of by *page* is the trap: a page's content is often split
+across several streams and a table row lands either side of the split, which
+silently lost a column off five calls before the page tree got walked properly.
+
+The product is **`sfport-cruise`**, ttl a week and interval six hours. The
+payload is a year-long calendar, so like the tide predictions it keeps telling
+the truth long after it was fetched — what expires is not the data but the
+confidence that this is the current revision, and the Port reissues the sheet
+every few weeks. Six hours between fetches because the file changes a handful
+of times a quarter and is a quarter megabyte a time; four passes a day still
+puts a revision on the wall the day it is published, and keeps a PDF off the
+fifteen-minute timer where it would be pure waste.
+
+**The axis is stepped and clipped.** Stepped, because a window measured
+continuously from now slides a fraction of a pixel a minute and takes every
+label, tick and curve column with it; quantising the left edge to half an hour
+costs three pixels of drift, lets the cursor traverse between steps the way
+tide.py's does, and turns a redraw every few minutes into one every thirty.
+Clipped, because the NOAA payload only reaches about two days past the moment
+it was fetched — so the right-hand edge is pulled back to wherever the
+predictions actually stop, and *whichever of the two runs out first*. The water
+level is sampled every six minutes and the current every thirty, so the
+current's last sample is up to half an hour short of the tide's; clipping to
+the tide alone overran it, `covers()` refused, and the ribbon, the slack guides
+and every phase line silently went away, leaving a completely plausible panel
+with the best thing on it missing. When less than half a day of prediction is
+left the panel says so rather than drawing an axis with no water under it.
+
+**A quiet window is a true statement and has to look like one.** Cruise calls
+here run from two a week in February to two a day in September, so a two-day
+axis is often empty. The header always carries the next movement and a
+countdown to it, and a short `LATER` ledger fills the space the marks are not
+using with the next three dated calls beyond the right-hand edge — clearly off
+the axis, and skipped wherever a caption already is. Captions themselves are a
+ladder rather than a truncation: two movements of the same call are typically
+nine hours apart, which is almost exactly one caption wide, so a caption that
+will not fit tries shorter forms and then gives up and leaves its mark, because
+a mark with no words is a movement you can still see and two captions on top of
+each other is neither.
+
+**Age is part of the data, and the frame loop never touches the disk.** The
+cache is read once in `build()` and `render()` reads nothing, which is stricter
+than tide.py's periodic reload and is there because the scheduler builds the
+next segment on a worker thread. That would leave the age frozen at build time,
+so the elapsed displayed time is added back on: the corner counts up on its
+own and the TTL trips exactly as it would if the file were being reread. A
+schedule past its week draws its calls with `STALE` beside the age; a missing,
+corrupt or empty one draws the words and the command that fixes it and no axis
+at all. Losing only the predictions still draws the board.
+
+**Cost.** Everything is a function of the window, so the whole picture is
+rasterised once — the curve, the ribbon's colours, the ticks, every caption —
+and a frame is that copy plus three overlays: the past half of the curve
+painted under the cursor from a precomputed mask, the breathing now cursor, and
+the stipple. About fifteen numpy calls on 320-element arrays, **0.020 ms p95
+here**, which at the 76–114x this project keeps measuring is 1.5–2.5 ms on the
+wall against a 50 ms budget at 20 fps. The first static picture is drawn in
+`build()` (0.9 ms here) so the frame being crossfaded into is not the expensive
+one; the window steps twice an hour, and that one frame costs about 0.6 ms
+here, so roughly one hitch every thirty minutes.
+
+**The stipple is the only thing that moves, and it moves carefully.** The axis
+is *time*, not distance — two adjacent columns are eleven minutes apart, not
+eleven metres — so drifting anything along it at the speed of the water is a
+picture of nothing, and a phase advanced by the local current comes apart into
+noise within seconds of being switched on, which is exactly what the first
+version did. What is honest to animate is the water *now*, over the run of the
+present flood or ebb: from the turn behind us to the turn ahead is one sign of
+velocity, so a stipple crossing it at one uniform speed says which way it is
+running, how hard, and how much of it is left, and cannot alias.
+
+**Asserted rather than eyeballed**, because this is another panel that can be
+plausibly wrong. `scripts/test-ships.py` checks the ribbon's *sense* against
+the fetched velocity rather than against how it looks — an inverted ribbon is a
+handsome picture in which every ship sails on the wrong water; that every
+predicted slack has a full-height guide and no column three hours off one does;
+that every movement is on the axis at its own column in the colour of its
+direction; that a caption names its vessel, its clock time and the water at
+that moment, read back off the panel with the demo's own glyph masks; that the
+stipple moves, moves the way the water runs, and stays inside the run. Frames
+are rendered **sequentially from a fresh `build()`** every time, because this
+demo is not a pure function of `t` and sampling it at scattered timestamps has
+produced three separate wrong conclusions in this project. The fresh, stale,
+absent, corrupt and no-predictions cases each run in a **separate process**
+with `FT_DATA_CACHE` set, since `ftdata.CACHE_DIR` binds at import and
+reloading the module in one process only looks like it works.
+
+```console
+$ python3 ftdata.py --once
+$ python3 ships.py --at '2026-09-14 10:00'      # a busier week
+$ python3 scripts/test-ships.py
 ```
 
 ## demoscene.py
