@@ -1,0 +1,42 @@
+# The one-minute clock behind ftdata-fast.service. Enable this one:
+#
+#   sudo systemctl enable --now ftdata-fast.timer
+#   systemctl list-timers 'ftdata*'
+#
+# Disabling it does not break anything: the fast products keep being refreshed
+# by the ordinary fifteen-minute pass, and the panels that use them go on
+# saying honestly how old their data is. What is lost is only the liveness --
+# aircraft would move in quarter-hour jumps instead of continuously.
+
+[Unit]
+Description=Refresh the fast Flaschen Taschen data products every minute
+Documentation=https://github.com/FlaschenTaschen/ft-cpp
+
+[Timer]
+Unit=ftdata-fast.service
+
+# Not at boot. ftdata.timer's OnBootSec=2min already covers the cold start for
+# every product including these, and there is no point racing it to a network
+# that is not up yet.
+OnBootSec=3min
+
+# From the end of the last run, so a slow fetch delays the next rather than
+# stacking up behind it. One minute is the cadence the fastest product asks
+# for; --due means the timer firing is not the same thing as a request going
+# out, so this can be the tightest interval any product needs rather than a
+# compromise between them.
+OnUnitActiveSec=1min
+
+# No RandomizedDelaySec. The politeness argument that governs ftdata.timer is
+# about a herd of walls hitting one volunteer's server at the same instant past
+# the quarter hour; a once-a-minute timer is already spread by whenever the
+# machine booted, and three minutes of jitter on a one-minute interval would
+# simply mean skipped minutes.
+#
+# AccuracySec is tight on purpose too: the default 1min would let systemd
+# coalesce this with anything else in the same wakeup window, which on a
+# one-minute timer can silently halve the rate.
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

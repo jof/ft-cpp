@@ -312,7 +312,15 @@ def data_states(cache_dir=None, now=None):
     states = []
     for name in sorted(ftdata.PRODUCTS):
         try:
-            kind, age = _record_age(ftdata.path_for(name, cache_dir), now)
+            # record_path() rather than path_for(), because a volatile product
+            # writes its record to the /run tmpfs beside the image sidecars
+            # instead of to the card, and this line would otherwise report the
+            # liveliest thing on the wall as permanently absent. It returns the
+            # file load() would actually read, or None when there is none --
+            # which _record_age() reads as absent, correctly.
+            kind, age = _record_age(
+                ftdata.record_path(name, cache_dir) or
+                ftdata.path_for(name, cache_dir), now)
         except Exception:                                    # noqa: BLE001
             kind, age = "bad", None
         if kind != "ok":

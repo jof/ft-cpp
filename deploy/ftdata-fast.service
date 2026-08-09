@@ -1,0 +1,91 @@
+# One pass of the *fast* half of the outside-data fetcher. Driven by
+# ftdata-fast.timer, not enabled itself. Install alongside the ordinary pair:
+#
+#   sudo cp deploy/ftdata-fast.service deploy/ftdata-fast.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ftdata-fast.timer
+#
+# This unit exists because one cadence stopped suiting every product. The
+# fifteen-minute pass in ftdata.service is right for a tide prediction and
+# useless for an aircraft, which crosses the Bay in about four minutes -- but
+# refetching *everything* every minute would be sixty times the requests to a
+# set of free public APIs to say the same thing about the sun and the sea.
+#
+# So the split is by the products' own declared intervals rather than by a list
+# of names here, which would go stale the first time somebody added a product:
+# `--fast` selects those whose interval is five minutes or less, and `--due`
+# skips any of them fetched more recently than that. Most runs of this unit
+# therefore fetch nothing and print `0/1`, which is the healthy case.
+#
+# Everything else -- the security envelope, the cache paths, the reasoning
+# about RuntimeDirectory and the SD card -- is deliberately identical to
+# ftdata.service, and any change made there belongs here too.
+
+[Unit]
+Description=Refresh the fast half of the Flaschen Taschen data cache
+Documentation=https://github.com/FlaschenTaschen/ft-cpp
+
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi/ft-cpp/demos
+
+# --due is what makes a one-minute timer cheap: it is a stat and a JSON read
+# per fast product, and a fetch only when one is actually overdue.
+ExecStart=/home/pi/venv-np202/bin/python /home/pi/ft-cpp/demos/ftdata.py --once --due --fast
+
+ReadWritePaths=/home/pi/.cache/ftdata
+
+# The fast products write *volatile* records, which go to /run/ftdata beside
+# the image sidecars rather than to the card. That is the whole reason a
+# one-minute product is safe here: adsb-bay rewritten every minute would
+# otherwise be 1440 small writes a day onto the flash the Pi boots from, for
+# data that is worthless two minutes later and pointless after a reboot.
+#
+# RuntimeDirectory= and RuntimeDirectoryPreserve= must match ftdata.service
+# exactly. They name the same directory, and systemd removes it when the last
+# unit that declares it stops unless preservation is asked for -- so a
+# mismatch here would have this unit deleting the other one's cached imagery
+# every minute.
+RuntimeDirectory=ftdata
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+# Much tighter than ftdata.service's 300 s, because this is one small request
+# and the next attempt is a minute away. A fetcher still running when the timer
+# next fires is skipped, so a slow endpoint must not be able to hold the slot.
+TimeoutStartSec=45
+
+Restart=no
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+# Far below ftdata.service's 192M: this pass never touches imagery. The heaviest
+# thing it holds is one ADS-B response, a few tens of kB of JSON.
+MemoryMax=64M
+
+Nice=10
+IOSchedulingClass=idle
+
+StandardOutput=journal
+StandardError=journal
+
+# No [Install] section on purpose; ftdata-fast.timer starts this.

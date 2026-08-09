@@ -56,8 +56,16 @@ f32 = ds.f32
 # Effects that put a few bright things on mostly black. The transition picker
 # uses this: fading through black reads well going to or from one of these,
 # where a wipe or crossfade mostly just looks like a smear.
+#
+# The data panels are all here, and by a slightly different argument than the
+# effects are: they are not sparse so much as *read*. Measured on the shipped
+# screenshots, `propagation` lights 27% of its pixels and `winds` lights 86%,
+# and it is the first of those that needs the black fade -- because what makes
+# it fail is a busy neighbour blended over small type, not brightness. Anything
+# carrying a number somebody is meant to come away with belongs in this set.
 SPARSE = {"starfield", "fireworks", "boing", "daliclock", "sierpinski_rain",
-          "propagation", "scope", "wireworld"}
+          "propagation", "scope", "wireworld",
+          "adsb", "sats", "caiso", "quake", "ships"}
 
 # The default running order. Names not present in the checkout are dropped
 # with a warning, so effects still being written can already be listed here
