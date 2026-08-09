@@ -48,6 +48,37 @@ ExecStart=/usr/bin/python3 /home/pi/ft-cpp/demos/ftdata.py --once
 # the one on the wall.
 ReadWritePaths=/home/pi/.cache/ftdata
 
+# The pixels do not go there. `goes` caches a six-hour window of satellite
+# imagery as a 3.5 MB array and rewrites the whole thing every pass to add three
+# frames, which at four passes an hour is 336 MB a day onto the card this
+# machine boots from -- more than everything else on it put together, and for
+# data that is stale by its own TTL half an hour after it is written. So
+# ftdata.py splits the two: the JSON records stay in ~/.cache/ftdata above,
+# where they survive a reboot and are worth having at boot -- a tide prediction
+# fetched yesterday is still true this morning -- and the binary sidecars go to
+# /run/ftdata, which is tmpfs. The SD card then sees a few hundred bytes of JSON
+# a pass and nothing else. What is given up is the window at boot, for the two
+# minutes until ftdata.timer's OnBootSec fires, and the demo already has an
+# honest card for that.
+#
+# RuntimeDirectory= makes /run/ftdata and chowns it to User= above. It does not
+# need a ReadWritePaths= line to go with it: systemd mounts a RuntimeDirectory
+# writable for the unit itself even under ProtectSystem=strict, which is the
+# same reason ftctl.service can write /run/ft-motd. ftsched reads it rather than
+# writes it, and ProtectSystem=strict leaves /run readable, so nothing has to be
+# plumbed into that unit either -- the sidecar's name is in the record and the
+# demo finds it.
+RuntimeDirectory=ftdata
+RuntimeDirectoryMode=0755
+
+# Without this, systemd removes /run/ftdata when the process exits, and for a
+# Type=oneshot that is *every single run*: the fetcher would write a window,
+# exit, have it deleted, and refetch sixteen megabytes of JPEG on the next tick,
+# forever. The default is right for a daemon whose runtime files mean nothing
+# once it is gone. It is exactly wrong for a cache written by something built to
+# exit.
+RuntimeDirectoryPreserve=yes
+
 # For Type=oneshot this is the cap on the whole run, not on startup -- there is
 # no "started" for it to be measured against. Six products, each with urllib
 # timeouts of 20 s and a couple of them making two requests, so the honest
@@ -90,8 +121,14 @@ SystemCallErrorNumber=EPERM
 # remote end is down.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 
-# Comfortably more than it needs -- the largest thing it handles is the 650 kB
-# GOES X-ray feed, which is parsed and thrown away down to 96 numbers.
+# Comfortably more than it needs, and it has to cover two things now. The
+# largest feed it parses is the 650 kB GOES X-ray file, thrown away down to 96
+# numbers; the largest thing it *holds* is the goes window, a cold start
+# decoding 72 JPEGs into a 4.4 MB uint8 stack. The tmpfs sidecar counts too --
+# pages written to a tmpfs are charged to the cgroup that faults them in, so
+# /run/ftdata's 3.4 MB is on this unit's bill while it runs. Measured on
+# betelgeuse over a cold start: 49.6 MiB peak RSS plus 3.2 MiB of tmpfs, 53 MiB
+# against this 192.
 MemoryMax=192M
 
 # One niceness step down. Nothing is waiting on this; if it competes with the

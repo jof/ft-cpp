@@ -307,6 +307,33 @@ in either unit, and a demo run by hand for debugging reads the same cache the
 wall is reading. Move it to `/var/cache` and that stops being true in both
 directions.
 
+**Why the pixels are not in `/home/pi`.** `goes` caches a six-hour window of
+satellite imagery as a 3.5 MB array and rewrites the whole thing every pass to
+add the three frames that are new, which at four passes an hour is **336 MB a
+day onto the SD card the Pi boots from** -- more than everything else on the
+machine put together, for data that its own TTL calls stale half an hour after
+it is written. So the two halves of a record go to different places. The JSON
+stays in `~/.cache/ftdata`, where it is worth keeping: a tide prediction fetched
+yesterday is still true this morning, so those panels come up with a curve on
+them rather than a card. The binary sidecar goes to `/run/ftdata`, which is
+tmpfs, and the card sees **1,636 bytes a pass** -- the record and nothing else,
+157 kB a day, a two-thousandfold cut. Measured, on betelgeuse, over two
+consecutive passes against a populated cache.
+
+`RuntimeDirectory=ftdata` in `ftdata.service` makes that directory and gives it
+to `pi`; **`RuntimeDirectoryPreserve=yes` is what keeps it**, because without it
+systemd removes a `RuntimeDirectory` when the process exits and this is a
+`Type=oneshot` -- the fetcher would write a window, exit, lose it, and refetch
+sixteen megabytes of JPEG every quarter hour forever. Nothing needs adding to
+`ftsched.service`: `ProtectSystem=strict` leaves `/run` readable, and the demo
+finds the sidecar by the name in the record. The one thing given up is the
+window across a reboot, for the two minutes until `ftdata.timer`'s `OnBootSec=`
+fires, and `goes` already has an honest card for exactly that.
+
+`FT_DATA_BLOBS` overrides the directory; with no `/run/ftdata` -- a checkout on a
+workstation, which cannot make one -- sidecars fall back to sitting beside the
+records, as they used to, with no setup.
+
 Checking it works, in increasing order of effort:
 
 ```sh

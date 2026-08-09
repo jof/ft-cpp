@@ -2167,6 +2167,35 @@ because satellite imagery at 3.5 km a pixel is mostly texture. It stays
 compressed anyway: `np.load` of the whole thing is 18 ms on the desktop and it
 is read once per build.
 
+**And they are not cached on the SD card.** Sixty-one kilobytes a frame is a
+good number; rewriting all seventy-two of them every pass to add three is not.
+That is 3.5 MB a pass, 336 MB a day onto the card a Pi boots from, and by a wide
+margin the heaviest writer on the machine — everything else in the cache is a
+few hundred bytes to a few kilobytes of JSON. SD cards die of writes. So the
+record and its sidecar go to different filesystems: the JSON stays in
+`~/.cache/ftdata` on the card, where it is cheap and worth keeping across a
+reboot, and the sidecar goes to `/run/ftdata`, which is tmpfs —
+`RuntimeDirectory=ftdata` plus `RuntimeDirectoryPreserve=yes` in
+`ftdata.service`, the second because systemd deletes a runtime directory when a
+`Type=oneshot` exits and that would mean refetching the window every quarter
+hour. Measured over two consecutive passes against a populated cache on
+betelgeuse: **1,636 bytes to the card per pass, down from 3,365,556** — 157 kB a
+day against 323 MB, a two-thousandfold cut, and the 3.4 MB that moves is now 2%
+of a 182 MB tmpfs on a machine with 670 MB of RAM free. The fetcher's whole run
+peaks at 53 MiB including those pages, against its `MemoryMax=192M`.
+
+Splitting the frames into seventy-two files would have cut the writes too, and
+this is better: the pixels are pure cache with a half-hour TTL, so the right
+answer is not to write them more cleverly but not to write them to a card at
+all. What it costs is the window across a reboot — one honest `NO IMAGERY` card
+until `ftdata.timer`'s `OnBootSec=2min` fires — and the records, which are the
+part worth keeping, still survive. Nothing had to change in `ftsched.service`:
+`ProtectSystem=strict` leaves `/run` readable, so the demo reads the sidecar
+under its sandbox exactly as before (verified on the Pi: it loads the array and
+gets `EROFS` if it tries to write there). A checkout on a workstation has no
+`/run/ftdata` and cannot make one, so sidecars fall back to sitting beside the
+records with no setup at all, and `FT_DATA_BLOBS` overrides both.
+
 **The fetch is incremental, and it never asks for a directory listing.** The
 record lists the frame timestamps it already holds; a pass keeps the ones still
 inside the window, downloads only the slots that are new, and drops what has
@@ -2186,7 +2215,11 @@ afterwards. Write-then-rename makes each of two files atomic but says nothing
 about the *pair*, and a reader landing between the renames would otherwise get
 the new record with the old array and never know. Naming the array after its
 contents means every record ever visible points at a file that exists and holds
-exactly what it describes; the previous sidecars are swept the next pass.
+exactly what it describes; the previous sidecars are swept the next pass — in
+both the tmpfs directory and the cache directory, which is how the move to
+`/run` cleans up after itself: the first pass after the change writes the window
+to RAM and deletes the 3.4 MB that had been sitting on the card, with no
+migration step to remember.
 
 **Missing, partial and stale are three different things and it says which.** No
 cache, no sidecar, a sidecar that will not open, a truncated one, or a record
@@ -2220,7 +2253,12 @@ before it was baked once and copied, which is the same mistake in miniature as
 everything else on this wall: laying out four lines of type thirty times a
 second to draw the same picture. A non-default `--width`/`--height` resamples
 the whole stack in `build()` and that is not free — 3.2 s at 512x96 — so the
-geometry the fetcher stores should be the geometry the wall wants.
+geometry the fetcher stores should be the geometry the wall wants. Moving the
+sidecar into tmpfs changed neither: three runs each of the old code, the new
+code reading from the card, and the new code reading from `/run` came out at p50
+2.9–3.0 ms, p95 4.0–4.3, build 0.38–0.52 s on a 71-frame window, and all nine
+runs hashed to the same digest — the picture is identical byte for byte, which
+is the only thing a caching change is allowed to leave alone.
 
 **The fetcher has to be running.** Nothing in `goes.py` touches the network — it
 imports numpy and nothing else, no Pillow, no HTTP library, no JPEG decoder —

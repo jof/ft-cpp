@@ -11,7 +11,10 @@ never builds at all. Nobody standing in the workshop should be able to tell
 that a NOAA endpoint is having a bad afternoon.
 
 So the network lives here, in a process of its own, on a timer. It writes one
-JSON file per product into a cache directory. `load()` reads that directory
+JSON file per product into a cache directory -- and, for the products whose
+payload is pixels rather than numbers, one binary sidecar beside it, which on
+the wall is written to tmpfs instead of the SD card; see BLOB_DIR.
+`load()` reads that directory
 and **never touches the network** -- it does not import a HTTP library, and it
 returns rather than raises when a file is missing, malformed or ancient.
 
@@ -38,6 +41,36 @@ import time
 CACHE_DIR = os.environ.get(
     "FT_DATA_CACHE", os.path.expanduser("~/.cache/ftdata"))
 
+# Where the binary sidecars go, which is deliberately not where the records go.
+#
+# The records are hundreds of bytes to a few kilobytes and they are worth
+# keeping across a reboot: a tide prediction fetched yesterday is still true
+# this morning, so the panel comes up with a curve on it rather than a no-data
+# card. Rewriting them every quarter hour is nothing.
+#
+# The sidecars are the opposite on both counts. A GOES window is 3.5 MB
+# rewritten every pass -- 336 MB a day onto the SD card the Pi boots from, by a
+# wide margin the heaviest writer on the machine -- and none of it is worth
+# surviving a reboot, because imagery more than half an hour old is stale by
+# its own TTL. So the pixels go to tmpfs and the metadata stays on disk. On
+# betelgeuse that is /run/ftdata, made by `RuntimeDirectory=ftdata` in
+# ftdata.service; /run is a 182 MB tmpfs with 181 MB free and the machine has
+# 670 MB of RAM to spare, so a window costs about two per cent of one and half
+# a per cent of the other. What it costs at boot is one honest no-data card
+# until ftdata.timer's OnBootSec=2min fires.
+#
+# A workstation has no /run/ftdata and cannot make one, so this falls back to
+# the cache directory and a plain checkout keeps working with no setup at all.
+# FT_DATA_BLOBS overrides both, for a scratch cache or a machine that puts its
+# tmpfs somewhere else.
+BLOB_DIR = os.environ.get("FT_DATA_BLOBS", "/run/ftdata")
+
+# Backstops on the sidecar directory; see sweep_blobs(). Generous on purpose --
+# these are not the mechanism, prune_blobs() is, and anything these catch is
+# already a bug somewhere.
+BLOB_MAX_AGE = float(os.environ.get("FT_DATA_BLOBS_MAX_AGE", "86400"))
+BLOB_MAX_BYTES = int(os.environ.get("FT_DATA_BLOBS_MAX", str(64 << 20)))
+
 # Products are registered by name. `ttl` is how long a record stays worth
 # believing -- not how often it is fetched, which is the timer's business. A
 # tide prediction is good for a day; a K index is stale within the hour.
@@ -58,6 +91,30 @@ def product(name, ttl, description):
 
 def path_for(name, cache_dir=None):
     return os.path.join(cache_dir or CACHE_DIR, name + ".json")
+
+
+def blob_dirs(cache_dir=None):
+    """Where a sidecar might be, tmpfs first, cache directory second.
+
+    Two places rather than one because the split is a deployment decision and
+    not a data format: the wall's fetcher writes to /run/ftdata, a checkout on
+    a workstation writes beside the records, and a Pi that has just been
+    upgraded has yesterday's sidecar in the old place and today's in the new
+    one. Searching both is safe precisely because a sidecar is named after its
+    contents -- the same name never means two different things, so "look here,
+    then there" cannot pair a record with the wrong array. Never raises: a
+    caller of this is on `load()`'s side of the wall.
+    """
+    dirs = []
+    try:
+        if BLOB_DIR and os.path.isdir(BLOB_DIR):
+            dirs.append(BLOB_DIR)
+    except OSError:
+        pass
+    cache_dir = cache_dir or CACHE_DIR
+    if cache_dir not in dirs:
+        dirs.append(cache_dir)
+    return dirs
 
 
 def load(name, cache_dir=None):
@@ -93,14 +150,21 @@ def load_blob(filename, cache_dir=None):
     Callers pass the filename out of the record rather than composing one, so
     the basename check is not paranoia about the cache directory but about the
     record: a `../` in a fetched file is the one way this could reach outside
-    the cache, and it costs a line to make it impossible.
+    the cache, and it costs a line to make it impossible. It matters more now
+    that there are two directories to look in, not less: the check happens once
+    and applies to both, because it is the *name* that is being trusted.
     """
     try:
         import numpy as np
         if not filename or os.path.basename(filename) != filename:
             return None
-        with np.load(os.path.join(cache_dir or CACHE_DIR, filename)) as z:
-            return {k: z[k] for k in z.files}
+        for d in blob_dirs(cache_dir):
+            path = os.path.join(d, filename)
+            if not os.path.exists(path):
+                continue
+            with np.load(path) as z:
+                return {k: z[k] for k in z.files}
+        return None
     except Exception:
         # Same reasoning as load(): missing, half-written, corrupt or from a
         # version that stored different arrays all mean "draw the no-data
@@ -151,6 +215,28 @@ def _store(name, payload, source, cache_dir):
         raise
 
 
+def blob_write_dir(cache_dir=None):
+    """Where a new sidecar should be written: tmpfs if we can, cache if not.
+
+    Fails soft in both directions. Under systemd the directory is already there
+    and owned by this user, so the makedirs is a no-op; run by hand on a
+    workstation it fails on /run's permissions and the sidecar lands beside the
+    records, which is where it used to live and still works. The one thing that
+    must not happen is an exception: a fetcher that cannot write its pixels to
+    RAM should write them to disk, not fail the product.
+    """
+    cache_dir = cache_dir or CACHE_DIR
+    if BLOB_DIR and BLOB_DIR != cache_dir:
+        try:
+            os.makedirs(BLOB_DIR, exist_ok=True)
+            if os.access(BLOB_DIR, os.W_OK | os.X_OK):
+                return BLOB_DIR
+        except OSError:
+            pass
+    os.makedirs(cache_dir, exist_ok=True)
+    return cache_dir
+
+
 def store_blob(name, arrays, cache_dir, compress=True):
     """Write arrays to a sidecar and return its basename for the record.
 
@@ -164,18 +250,25 @@ def store_blob(name, arrays, cache_dir, compress=True):
     means every record ever visible names a file that exists and holds exactly
     the arrays it describes. The cost is one stale file for as long as a slow
     reader holds it open, which is what `prune_blobs()` sweeps up next pass.
+
+    The sidecar goes wherever `blob_write_dir()` says -- tmpfs on the wall, the
+    cache directory on a workstation -- and only its basename goes in the
+    record. That is what makes moving them a deployment decision rather than a
+    format change: nothing written into a record names a directory, so a
+    machine that changes its mind about where pixels live is one restart away
+    from doing it, and a record written on one side reads on the other.
     """
     import numpy as np
-    os.makedirs(cache_dir, exist_ok=True)
+    blob_at = blob_write_dir(cache_dir)
     filename = "%s-%08x.npz" % (name, int.from_bytes(os.urandom(4), "big"))
-    fd, tmp = tempfile.mkstemp(dir=cache_dir, prefix="." + name, suffix=".npz")
+    fd, tmp = tempfile.mkstemp(dir=blob_at, prefix="." + name, suffix=".npz")
     os.close(fd)
     try:
         # suffix=".npz" on purpose: savez appends the extension itself if the
         # path does not already have it, and would then write beside the temp
         # file rather than into it.
         (np.savez_compressed if compress else np.savez)(tmp, **arrays)
-        os.replace(tmp, os.path.join(cache_dir, filename))
+        os.replace(tmp, os.path.join(blob_at, filename))
     except Exception:
         try:
             os.unlink(tmp)
@@ -186,17 +279,91 @@ def store_blob(name, arrays, cache_dir, compress=True):
 
 
 def prune_blobs(name, keep, cache_dir):
-    """Delete `<name>-*.npz` sidecars other than `keep`. Best effort."""
+    """Delete `<name>-*.npz` sidecars other than `keep`. Best effort.
+
+    Both directories, which is what makes the move to tmpfs self-installing: the
+    first pass after the change writes the window to /run and deletes the 3.5 MB
+    that has been sitting in ~/.cache/ftdata since before it, with no migration
+    step to remember and nothing left behind if the change is reverted.
+    """
     prefix, suffix = name + "-", ".npz"
+    for d in blob_dirs(cache_dir):
+        try:
+            entries = os.listdir(d)
+        except OSError:
+            continue
+        for fn in entries:
+            if fn == keep or not (fn.startswith(prefix) and fn.endswith(suffix)):
+                continue
+            try:
+                os.unlink(os.path.join(d, fn))
+            except OSError:
+                pass
+    sweep_blobs(keep, cache_dir)
+
+
+def sweep_blobs(keep=None, cache_dir=None,
+                max_age=None, max_bytes=None):
+    """Bound the tmpfs sidecar directory's age and size. Best effort.
+
+    `prune_blobs()` is the mechanism and this is the backstop, for the files it
+    cannot see: a fetcher killed between the sidecar's rename and the record's,
+    a product that has been renamed or removed, somebody's prune that did not
+    run. On an SD card those would only waste space. In tmpfs they hold RAM that
+    the rest of the machine shares -- /run is 182 MB and the wall's other units
+    keep things in it -- so unreferenced pixels get a second, blunter sweep that
+    knows nothing about products.
+
+    Only ever the tmpfs directory, and only ever files ending `.npz`: pointed at
+    a cache directory this would be a thing that deletes records by age, which
+    is exactly the fault it exists to prevent. A day is generous by two orders
+    of magnitude -- every product here rewrites its record inside a quarter hour
+    -- so a sidecar this touches has not been named by anything for ninety-six
+    fetch passes, and any record still pointing at it went stale long before.
+    """
+    d = BLOB_DIR
+    cache_dir = cache_dir or CACHE_DIR
+    if not d or d == cache_dir:
+        return
+    max_age = BLOB_MAX_AGE if max_age is None else max_age
+    max_bytes = BLOB_MAX_BYTES if max_bytes is None else max_bytes
     try:
-        entries = os.listdir(cache_dir)
+        entries = os.listdir(d)
     except OSError:
         return
+
+    now = time.time()
+    live = []
     for fn in entries:
-        if fn == keep or not (fn.startswith(prefix) and fn.endswith(suffix)):
+        if not fn.endswith(".npz"):
+            continue
+        path = os.path.join(d, fn)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if fn != keep and now - st.st_mtime > max_age:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            continue
+        live.append((st.st_mtime, st.st_size, path, fn))
+
+    total = sum(sz for _, sz, _, _ in live)
+    if total <= max_bytes:
+        return
+    # Oldest first, and never the file the record being written names: a full
+    # tmpfs is somebody else's bug, and the fix for it must not be to break the
+    # product that noticed.
+    for mtime, size, path, fn in sorted(live):
+        if total <= max_bytes:
+            break
+        if fn == keep:
             continue
         try:
-            os.unlink(os.path.join(cache_dir, fn))
+            os.unlink(path)
+            total -= size
         except OSError:
             pass
 
@@ -678,6 +845,13 @@ for _st in [CURRENT_STATION] + [s for s in
 # The frames go in a sidecar (see store_blob) as one (N, H, W, 3) uint8 array;
 # the JSON record carries the timestamps, the crop, the geometry and the name
 # of the sidecar.
+#
+# The third difference is where that sidecar lands. 3.5 MB rewritten every pass
+# is 336 MB a day at the wall's timer, and on a Pi that is SD card wear for
+# pixels whose own TTL calls them stale in half an hour, so the sidecar goes to
+# tmpfs and only the record goes to the card. See BLOB_DIR at the top of this
+# file; nothing in this section has to know about it, because a record names a
+# basename and never a directory.
 # --------------------------------------------------------------------------
 
 GOES_CDN = "https://cdn.star.nesdis.noaa.gov"
