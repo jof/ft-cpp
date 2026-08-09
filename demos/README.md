@@ -2076,6 +2076,167 @@ have been — scaling the Golden Gate's channels by Boston Harbor's prediction
 would be a plausible-looking lie, and drawing nothing is the only honest
 option short of a second DEM.
 
+### winds
+
+![winds](screenshots/winds.png)
+
+The wind over San Francisco Bay, drawn the way Windy draws it: a coastline,
+and a few hundred particles blown across it by the forecast field, streaking
+longer and warmer as the air speeds up and collapsing to slow embers where it
+goes calm. The speed scale runs along the bottom, the numbers at the Golden
+Gate along the top. A wind map with no scale is decoration.
+
+**The panel exists to show one thing, which is the sea-breeze jet.** The coast
+range runs unbroken from Bodega to Big Sur except in one place, and that place
+is the Golden Gate — a sea-level gap three kilometres wide with a metropolitan
+bay behind it. The Central Valley heats, the gradient tips inland, and the
+marine layer accelerates through the gap and spreads out over the water. It
+runs roughly east-west, which is the one thing this bay does that suits a
+panel five times wider than it is tall, and it is the reason this demo exists
+rather than a thermometer.
+
+**The crop: 37.74–37.90 N, 122.28–122.68 W.** Nine kilometres of open Pacific
+on the left, the Gate dead centre, the East Bay shoreline hard against the
+right-hand edge — 35.2 km by 17.8 km across 320 columns and 52 rows, so a
+column is 110 m, a row is 342 m, and the picture is stretched **3.1×
+horizontally**. Same deal `tide.py` makes and stated as plainly: at true scale
+a strip 35 km wide fitted to 52 rows would be 5.7 km tall and would have
+neither the ocean nor Berkeley on it, which would leave a slot through the
+Gate with no gradient in it — the one thing the map is for. The east edge is
+not a choice at all; `voxel-dem.npz` stops at 122.28 W, so downtown Oakland is
+a few hundred metres off the panel. North and south are: San Pablo Bay and the
+South Bay are outside, and the fan-out north past Angel Island is clipped.
+
+What the width buys is the whole length of the jet at once, and the jet does
+not run the way you would guess. The fastest air is not out over the ocean, it
+is **in the gap**, and it gives most of that back within ten kilometres. One
+real evening off this panel — six o'clock on a Sunday in August — 12.6 kt ten
+kilometres offshore, 17.9 at the bridge, 13.8 over Alcatraz, 6.5 at the Bay
+Bridge, 4.9 off Berkeley. A crop that stopped at the Gate would show the 17.9
+and none of the rest of that sentence.
+
+**The field is an interpolation of a coarse model grid. It is not a
+simulation, and the difference matters.** Open-Meteo is free, keyless, and
+takes comma-separated coordinate lists, so a whole grid is *one* request: 7×11
+points, snapped by the API to its own model cells — it tells you where each
+one landed — which come back about 3 km apart and are NOAA's HRRR. Seventy-
+seven cells over an area this size is a real mesoscale model at its real
+resolution, so it does know about the gap. But between those cells there is
+nothing here except inverse distance weighting. The panel can tell you the
+Gate is blowing and Berkeley is not; it cannot tell you about the wind shadow
+behind Angel Island, the lift off Yellow Bluff, or the convergence line that
+parks off Crissy Field on a good day, because none of those are in the numbers
+it was handed. Nothing here solves anything. The coastline is drawn on top of
+the field, not into it — the air does not know the shoreline is there.
+
+The interpolation runs on a 48×24 lattice and is upsampled bilinearly to the
+panel, because doing the weighting per pixel would be a 16 640×77 matrix and
+forty times the arithmetic for a field whose shortest real wavelength is 3 km.
+East and north components are interpolated separately, never speed and
+bearing: the mean of 350° and 10° is 180°, which is the wrong way up the map.
+The smoothing length was not guessed either — interpolate, then read the field
+back at each station's own coordinates, and the soft settings this started
+with (1/d², 2.4 km) came back 2.4 kt RMS low and turned a 20 kt jet into a
+14 kt one. Smoothing away the exact peak the panel exists to show is not a
+cosmetic failure, it is the map lying about the number. At 1/(d²+1.2²)^1.5 it
+reproduces the stations to 0.4 kt RMS and still falls off smoothly between
+them.
+
+**Direction is the bug that would have looked fine.** Meteorological wind
+direction is the bearing the wind comes *from* — 270° is a westerly, blowing
+*towards* the east — so `u = -speed·sin(dir)`, `v = -speed·cos(dir)`, and a
+field drawn without those two minus signs runs backwards, is entirely
+plausible on a wall, and is entirely wrong. Nobody catches that by looking. So
+`scripts/test-winds.py` asserts it three ways: against a synthetic cache of
+uniform 20 kt wind from each cardinal point, where a westerly must move the
+drifters right (+0.50 px/frame) and a southerly must move them up (−0.16);
+against the fetched JSON at each real station, stepping the render and taking
+the median drifter displacement, which comes back within **1.8° at worst
+across eight stations**; and — the one that cannot be fooled by a bug living
+between the particle array and the screen — by cross-correlating two rendered
+frames six apart in a window over the Gate and asking which way the *picture*
+went. With the header quoting 15.7 kt from 256°, the picture shifted (+0,+2)
+px in six frames: a bearing of 090 against the 076 the data demands, which is
+as close as a two-pixel integer shift can get. Pixel motion is not a
+bearing until the 3.1× stretch is undone, and the test undoes it with the same
+metres per pixel the demo used to apply it.
+
+**It animates the forecast, and says so in words.** Standing still on the
+current hour throws away the best thing in this data, which is that the sea
+breeze has a daily cycle you can watch: filling after noon, howling at six,
+easing overnight, dead by dawn. So the panel sweeps from now through the next
+twenty-four hours and loops, one model hour at a time — no invented in-between
+fields, every frame is a forecast hour that exists. The first frame of each
+sweep is *now*, interpolated between the two model hours either side of it,
+labelled `NOW 6:00P` in green; every other frame is labelled `FCST +7H 2:00A`
+in amber. A forecast mistaken for an observation would be worse than no panel
+at all. `--hours 0` pins it to now, `--hour 7` pins it to a chosen one.
+
+Gusts ride along because they are the one extra number that changes what
+somebody does about the answer: eighteen knots steady and eighteen gusting
+thirty are different afternoons on the water. They are drawn as a number and
+not as a picture, which is about the right weight for them.
+
+**Being polite to a free service is arithmetic, not vibes.** Open-Meteo counts
+a multi-location request as one call per location, so 77 points four times an
+hour is 7 392 location-calls a day against a 10 000/day fair-use budget and
+308/hour against a 5 000/hour one. That, and not aesthetics, is why the grid
+is 77 points and not 200 — and asking for points closer together than 3 km
+just returns the same model cell twice, which the fetcher deduplicates and
+stores under its snapped coordinates: the honest statement of where these
+numbers actually live.
+
+**Staleness, as everywhere else here.** A forecast keeps telling the truth for
+a while after it was fetched, so both questions get asked: the fetch age is in
+the corner via `ftdata.describe_age()`, and separately the payload's hours are
+checked against the present moment. Five hours old but still covering now
+draws normally with `STALE` in the corner. No file, a half-written file, some
+other product's payload, or a record whose hours have run out from under it
+all get the same answer — `NO WIND DATA`, the command that fixes it, and no
+wind. Stations the model declined to answer for are dropped and counted;
+a station with a hole in one hour keeps its good hours and is weighted out of
+the bad one, because `w @ nan` poisons an entire field.
+
+**The cost is in `build()`.** The coastline raster, the interpolation weights,
+every hour's field, its speed wash and its colour table are all baked once —
+25 hours of them, about 10 MB — and the frame loop advances drifters and
+composites. On the Pi 3 at 600 MHz, pinned to the windiest hour in the record
+so every drifter is moving, that is **p50 6.6–6.8 ms and p95 7.8–8.3 ms**
+across runs of 900 frames on a machine already at load 3.8, against a 9 ms
+budget; build is 1.2–1.6 s, next to tide's 1.2 and voxel's 8.2. Two things
+bought most of it. The streak colours are baked per hour as a `(4, pixels, 3)`
+table, so drawing a sample is one gather instead of two — a gather is three
+times the price of a whole-array pass on this machine and the loop does four
+of them. And "has this drifter left the frame?" is asked as "does clipping
+move it?", which is three numpy calls where four comparisons and three ors
+would be seven. Re-reading the cache re-bakes two dozen fields, which is a
+third of a second and four dropped frames if it happens inside `render()`, so
+it happens one hour per frame into a shadow list and the old fields stay on
+the wall until the new ones are all there.
+
+The font, the DEM crop, the sea mask and the clock are `tide.py`'s, imported
+rather than copied, the same way `propagation.py` borrows `defcon.py`'s
+glyphs. That is deliberate beyond saving lines: the two demos are looking at
+the same bay, and if they ever disagreed about where the coast is, one of them
+would be lying.
+
+The fetcher must be running, or the panel says so:
+
+```console
+$ python3 ftdata.py --loop 900                     # or --once --only wind-bay
+$ python3 winds.py                                 # sweeps 24 h in 52 s
+$ python3 winds.py --hours 0                       # just now, no animation
+$ python3 winds.py --hour 18 --units mph           # pinned, in mph
+$ python3 winds.py --cycle 20 --particles 700      # busier, faster sweep
+$ python3 winds.py --extent 37.70,37.94,-122.60,-122.30   # tighter on the bay
+$ python3 winds.py --at '2026-08-09 18:00' --hours 0      # a chosen evening
+$ python3 scripts/test-winds.py                    # the checks, against the cache
+```
+
+`FT_WIND_GRID=9x13 python3 ftdata.py --once --only wind-bay` asks for a denser
+grid if you are feeling less polite; anything finer than about 3 km spacing
+buys nothing but duplicate cells.
+
 ### twister
 
 ![twister](screenshots/twister.png)
