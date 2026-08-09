@@ -1027,6 +1027,168 @@ product(GOES_PRODUCT, ttl=GOES_TTL,
 # helper exactly as the other twelve products use it.
 PRODUCTS[GOES_PRODUCT]["blob"] = True
 
+# The Bay Area wind field, from Open-Meteo. winds.py draws this.
+#
+# Everything above fetches a *point*: one gauge, one satellite, one index.
+# This one has to fetch a **field**, because the thing worth looking at here
+# is a gradient -- the Pacific marine layer accelerating through the Golden
+# Gate and losing half its speed by the time it is over Oakland. One station
+# cannot say that. Happily Open-Meteo takes comma-separated coordinate lists
+# and answers with a JSON *list* of location objects, so a grid is one request
+# rather than seventy-seven, which is the difference between a polite client
+# and an abusive one.
+#
+# It is free and keyless, so the arithmetic of not abusing it is worth writing
+# down. Open-Meteo counts a multi-location request as one call per location:
+# 7x11 points, four times an hour, is 7 392 location-calls a day against a
+# 10 000/day fair-use budget and 308/hour against a 5 000/hour one. That is
+# the whole reason the grid is 77 points and not 200.
+#
+# Resolution is chosen to match the model rather than to look impressive.
+# Requesting 37.81,-122.48 comes back stamped 37.8268,-122.5061 -- the API
+# snaps to the model cell and *tells you where it landed* -- and the distinct
+# cells in a request like this one sit about 3 km apart, which is NOAA's HRRR
+# CONUS grid. Asking for points closer together than that just returns the
+# same cell twice, so the payload stores the snapped coordinates, deduplicated:
+# the honest statement of where these numbers actually live.
+#
+# Direction is stored exactly as the API gives it -- **the compass bearing the
+# wind is coming FROM**, which is the meteorological convention and the
+# opposite of the direction anything drawn on a map should move. Converting it
+# is the demo's job and it is the one bug in this whole demo that would look
+# entirely plausible on the wall.
+# --------------------------------------------------------------------------
+
+OPENMETEO_URL = "https://api.open-meteo.com/v1/forecast"
+
+# lat0, lat1, lon0, lon1. Deliberately a little outside winds.py's map crop
+# (37.74-37.90 N, 122.28-122.68 W) so that every pixel of the panel is
+# surrounded by data and the interpolation is never an extrapolation.
+WIND_EXTENT = (37.70, 37.94, -122.72, -122.24)
+
+# Rows x columns of requested points. See the budget arithmetic above.
+WIND_GRID = (7, 11)
+
+# Hours ahead, plus the hour just gone. The extra past hour is what makes
+# "now" an interpolation between two model hours rather than an extrapolation
+# off the front of the array in the fifty-nine minutes after the top of one.
+WIND_FORECAST_HOURS = 30
+WIND_PAST_HOURS = 1
+
+# Two hours. This is a forecast, so like the tides the payload keeps telling
+# the truth for a while after it was fetched -- but unlike the tides it is a
+# *forecast of the weather*, which is a different kind of promise: the run it
+# came from is superseded hourly. Past two hours the panel says STALE, and
+# when the span itself stops covering now it says nothing at all.
+WIND_TTL = 7200
+
+
+def _wind_grid_env():
+    """(nlat, nlon) from FT_WIND_GRID='7x11', or the default."""
+    s = os.environ.get("FT_WIND_GRID", "").lower().replace(",", "x")
+    try:
+        a, b = s.split("x")
+        return max(2, int(a)), max(2, int(b))
+    except Exception:                                        # noqa: BLE001
+        return WIND_GRID
+
+
+def _linspace(a, b, n):
+    return [a + (b - a) * i / (n - 1.0) for i in range(n)]
+
+
+def _wind_url(extent=WIND_EXTENT, grid=None, hours=WIND_FORECAST_HOURS):
+    la0, la1, lo0, lo1 = extent
+    nlat, nlon = grid or _wind_grid_env()
+    lats, lons = [], []
+    for y in _linspace(la0, la1, nlat):
+        for x in _linspace(lo0, lo1, nlon):
+            lats.append("%.4f" % y)
+            lons.append("%.4f" % x)
+    from urllib.parse import urlencode
+    return OPENMETEO_URL + "?" + urlencode({
+        "latitude": ",".join(lats), "longitude": ",".join(lons),
+        "hourly": "wind_speed_10m,wind_direction_10m,wind_gusts_10m",
+        "wind_speed_unit": "kn", "timezone": "UTC",
+        "forecast_hours": hours, "past_hours": WIND_PAST_HOURS,
+        "cell_selection": "nearest",
+    })
+
+
+def _iso_hour_epoch(s):
+    """'2026-08-09T14:00' in UTC -> epoch seconds."""
+    import calendar
+    return float(calendar.timegm(time.strptime(s[:16], "%Y-%m-%dT%H:%M")))
+
+
+def _num(x):
+    return None if x is None else float(x)
+
+
+@product("wind-bay", ttl=WIND_TTL,
+         description="Open-Meteo 10 m wind over a grid of the SF Bay Area")
+def _wind_bay():
+    """A grid of hourly wind, deduplicated onto the model's own cells.
+
+    Gusts ride along because they are the one extra number that changes what
+    somebody does about the answer: eighteen knots steady and eighteen gusting
+    thirty are different afternoons on the water, and a mean wind speed cannot
+    tell them apart. They cost a third of the payload and are drawn as a
+    number rather than as a picture, which is about the right weight for them.
+
+    Anything the model declines to answer for comes back as null and is stored
+    as null. Dropping the station instead would silently shrink the grid and
+    move the interpolation without saying so; the demo can see a hole and
+    weight around it, which is the honest version of the same thing.
+    """
+    rows = get_json(_wind_url(), timeout=40)
+    if not isinstance(rows, list):
+        # A single-location request answers with an object, not a list. That
+        # only happens if someone shrinks the grid to one point, and the rest
+        # of this function would silently read it as a dict of hours.
+        rows = [rows]
+
+    times = None
+    cells = {}
+    for r in rows:
+        h = r.get("hourly") or {}
+        ts = h.get("time") or []
+        if not ts:
+            continue
+        if times is None:
+            times = ts
+        elif ts != times:
+            # Every location in one request shares a time axis. If that ever
+            # stops being true, the grid is not a grid.
+            raise ValueError("locations disagree about the hourly time axis")
+        key = (round(float(r["latitude"]), 4), round(float(r["longitude"]), 4))
+        if key in cells:
+            continue                    # two requested points, one model cell
+        cells[key] = {
+            "lat": key[0], "lon": key[1],
+            "elev": _num(r.get("elevation")),
+            "speed": [None if v is None else round(float(v), 1)
+                      for v in h.get("wind_speed_10m", [])],
+            "dir": [None if v is None else round(float(v)) % 360
+                    for v in h.get("wind_direction_10m", [])],
+            "gust": [None if v is None else round(float(v), 1)
+                     for v in h.get("wind_gusts_10m", [])],
+        }
+    if not times or not cells:
+        raise ValueError("no usable wind locations in the response")
+
+    grid = [cells[k] for k in sorted(cells)]
+    t0 = _iso_hour_epoch(times[0])
+    nlat, nlon = _wind_grid_env()
+    return {
+        "model": "open-meteo best_match (NOAA HRRR over CONUS, ~3 km)",
+        "units": {"speed": "kn", "dir": "deg true, FROM", "gust": "kn"},
+        "extent": list(WIND_EXTENT), "requested": [nlat, nlon],
+        "t0": t0, "step": 3600.0, "n": len(times),
+        "span": [t0, t0 + 3600.0 * (len(times) - 1)],
+        "grid": grid,
+    }, OPENMETEO_URL
+
 
 def main():
     ap = argparse.ArgumentParser(
