@@ -97,7 +97,7 @@
       "name": "propagation",
       "module": "propagation",
       "seconds": 30.0,
-      "fps": 10,
+      "fps": 20,
       "ms": 0.3,
       "enabled": true,
       "solo": false,

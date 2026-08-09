@@ -195,7 +195,7 @@ their whole `-t`, false for `send-text`, which sets a layer and returns at
 once.
 
 [`rotation-betelgeuse.json`](rotation-betelgeuse.json) is the Sequoia Fabrica
-installation's running order: 46 entries, 35 minutes, and **all of them
+installation's running order: 51 entries, 39 minutes, and **all of them
 native**. The segments that predate the numpy demos were ported rather than
 shelled out to — the pixel art into [`pixelart.py`](#pixelart), the C
 binaries into [`life.py`](#life) and [`maze.py`](#maze), the `send-text` jokes
