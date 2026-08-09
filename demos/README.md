@@ -2076,6 +2076,174 @@ have been — scaling the Golden Gate's channels by Boston Harbor's prediction
 would be a plausible-looking lie, and drawing nothing is the only honest
 option short of a second DEM.
 
+### goes
+
+![goes](screenshots/goes.png)
+
+The last six hours of weather over California, from orbit, on a twelve-second
+loop. GOES-18 hangs over the equator at 137° W and rescans the Pacific
+Southwest every five minutes; this plays the most recent seventy-odd of those
+frames as a time lapse. The marine layer slides in and out of the Gate,
+thunderheads go up over the Sierra through the afternoon and spread into
+anvils, a front walks down the coast. It is the only thing on the wall that is
+a photograph of right now rather than a drawing of it, and the loop is short
+enough that somebody walking past sees the weather actually move.
+
+**The band, and what it costs.** The panel is five times wider than it is tall
+and nothing NESDIS publishes is that shape, so this needed a decision rather
+than a resize, and the candidates were rendered at 320x64 and looked at rather
+than reasoned about. Two obvious ones died on sight. GOES-18's `CONUS` product
+is **not** the continental United States — from 137° W the "CONUS" scan is the
+eastern Pacific with the West Coast down the right-hand edge, four fifths open
+ocean, and a latitude band of it is a band of sea. GOES-19's CONUS is the real
+country, and a 5:3 frame squashed to 5:1 turns Florida into a stub and the Gulf
+into a smear; the undistorted 5:1 crop of it reads better than expected but
+puts the whole United States across 320 pixels, twelve kilometres each, at
+which scale a thunderstorm complex is a blob and the Bay Area is four pixels.
+
+What works is a **crop with no squash at all**: 500 by 100 pixels out of the
+600x600 `psw` sector image is exactly 5:1, so it goes to 320x64 with nothing
+stretched. That band runs from about 350 km west of the Farallones to central
+Utah — 1127 km by 301 km — centred so San Francisco Bay lands a third of the
+way in from the left and vertically dead centre. **What it costs is the two
+ends of the state**: the band is roughly 36.4° to 39.6° N, so Eureka is off the
+top and Los Angeles, San Diego and the Salton Sea are off the bottom. For a
+wall in a San Francisco workshop that is the right trade. The Bay is the part
+people look for, the ocean to the west of it is where the weather comes from,
+and at 3.5 km a pixel the fog bank has shape instead of being three pixels of
+grey. `--product` and the fetcher's `FT_GOES_SECTOR` will point it somewhere
+else; the crop is a constant in `ftdata.py` because the sector grid is fixed
+and never moves.
+
+The picture is the **satellite's own view and not a map**, which is worth
+saying because it looks enough like one to be mistaken for one. A geostationary
+grid is not north-up and it foreshortens north-south at this latitude, so the
+band is slightly skewed — its centre line runs from 37.7° N at the left edge to
+38.1° N at the right — and one panel pixel is 3.5 km across but 4.7 km down.
+Nothing here does that. It is what looking at 37° N from over the equator does,
+and it is the same picture NOAA puts on its own website.
+
+**The geography was checked rather than assumed**, because an off-by-one in a
+crop gives a perfectly plausible picture of the wrong place. The sector images
+carry NESDIS's own state borders drawn on them in white, and taking a pixelwise
+minimum over frames hours apart leaves those lines and throws the clouds away —
+a clean vector map, for free. Fitting the ABI fixed-grid projection (a
+geostationary perspective from 137.0° W) to three surveyed points on it — the
+Oregon/California/Nevada corner at 42° N 120° W, Nevada's north-east corner,
+and the Nevada/Utah/Arizona corner — lands with sub-pixel residuals and a scale
+of **56.1 µrad a pixel, which is the instrument's own 2 km grid**; a wrong fit
+would not have found that number. Landmarks held out of the fit then check it:
+Lake Tahoe, the Great Salt Lake, Lake Mead, the Salton Sea and San Francisco
+Bay all land within about three pixels of where the imagery puts them, and
+crosses drawn at the computed positions of the Bay, the Farallones, Monterey
+Bay, Sacramento and Tahoe sit on the right features in the finished 320x64
+frame.
+
+**GeoColor is two different products and the label says which.** In daylight it
+is true colour — white cloud, brown Central Valley, green Coast Range. After
+dark there is no visible light to work with, so it becomes infrared cloud over
+a static night map with city lights in orange: the Bay Area, Sacramento, the 99
+corridor, Reno over the hill. A window that straddles sunset therefore changes
+character completely partway through, which is the best thing about it and
+would look like a fault if it were not announced. Each frame carries `DAY`,
+`DUSK`, `SUNSET`, `DAWN`, `SUNRISE` or `NIGHT IR`, worked out from the sun's
+elevation — at *both ends of the band*, not the middle, because the band is
+fifty minutes of solar time wide and for the best part of an hour twice a day
+one end genuinely is dark and the other is not. The thresholds are GeoColor's
+rather than the almanac's: the product starts fading to its night rendering at
+a solar zenith of 80°, which is the better part of an hour before sunset, and
+that is why the east end of the picture goes murky while the clock still says
+afternoon.
+
+**Only cooked pixels are cached.** The source is a 240 kB JPEG every five
+minutes and a window of them is sixteen megabytes, which is not something to
+keep on a Pi's SD card or to hand to a demo that would then have to decode it.
+So `ftdata.py` decodes, crops and resizes each frame to the panel's exact
+geometry in the fetcher process and stores **only the 61 kB result**, as one
+`(N, 64, 320, 3)` uint8 array in a compressed `.npz` sidecar beside the JSON
+record. Seventy-two frames is **3.5 MB**, and it is worth saying that the
+compression is nearly pointless — 5.8 MB raw down to 3.5, nineteen per cent,
+because satellite imagery at 3.5 km a pixel is mostly texture. It stays
+compressed anyway: `np.load` of the whole thing is 18 ms on the desktop and it
+is read once per build.
+
+**The fetch is incremental, and it never asks for a directory listing.** The
+record lists the frame timestamps it already holds; a pass keeps the ones still
+inside the window, downloads only the slots that are new, and drops what has
+aged out. Frame names are *predicted* rather than discovered: GOES-18's psw
+scans start on a minute ending 1, 6, 11 … — ten days of the directory index,
+2888 files, without one exception — so the fetcher can name the file it wants.
+That matters, because the index itself is **3.1 MB** (349 kB gzipped) of every
+frame since last week, which would be a large download to learn three names.
+Cold start is the whole window: 66 frames, about 16 MB, 35 s. **Steady state at
+a fifteen-minute timer is three frames, about 735 kB a tick — 2.9 MB an hour**,
+plus one or two 404s at 150 bytes when the newest slot is not posted yet, which
+is normal and not an error.
+
+The sidecar is written under a fresh random name each pass —
+`goes-psw-fb9e2e0a.npz` — and the JSON record renamed over the old one
+afterwards. Write-then-rename makes each of two files atomic but says nothing
+about the *pair*, and a reader landing between the renames would otherwise get
+the new record with the old array and never know. Naming the array after its
+contents means every record ever visible points at a file that exists and holds
+exactly what it describes; the previous sidecars are swept the next pass.
+
+**Missing, partial and stale are three different things and it says which.** No
+cache, no sidecar, a sidecar that will not open, a truncated one, or a record
+pointing outside the cache directory all get the same answer: the `NO IMAGERY`
+card with the fetcher's command and the cache path on it. A window shorter than
+asked for plays anyway and prints `12/72` beside the age — a cold start *is* a
+partial window, and half an hour of weather moving beats a card that says wait
+— though one or two slots missing out of seventy is the CDN having an ordinary
+day and is not worth a number on the wall. And a window whose newest frame has
+gone past its half-hour TTL keeps playing with `STALE` and the age in red,
+because six hours of real weather from this morning is still worth watching so
+long as nobody can mistake it for now.
+
+**Playback is an index and one blend, which is the whole point.** Every frame
+in the cache is already the right size and the right crop, so `render()` picks
+one, dissolves it into the next, and scatters two precomputed text masks. Each
+frame's timestamp belongs to the frame and not to the clock, so all seventy-odd
+labels are typeset in `build()`; the caption strip is smoked into the imagery
+there too, once, so it rides through the dissolve for free instead of being
+composited every frame. The blend is integer — `a + ((b - a) * k >> 7)` through
+an int16 scratch, five whole-frame passes — rather than demoscene's float
+crossfade, because integer is about three times cheaper on the wall's Pi and
+this runs thirty times a second forever. Sevenths and not eighths so it stays
+inside int16: 255 × 127 is 32385, with three hundred to spare.
+
+On betelgeuse's Pi 3 at 600 MHz, on a loaded machine, three runs of 1200 frames
+at 320x64: **p50 3.2 ms, p95 3.9–4.1 ms**, max 5.6, against a 6 ms budget —
+0.7/1.0 with `--no-blend`, 0.09/0.14 for the no-data card. Build is 0.59 s, and
+it is the array load and the label typesetting. The no-data card was 6.2/7.7 ms
+before it was baked once and copied, which is the same mistake in miniature as
+everything else on this wall: laying out four lines of type thirty times a
+second to draw the same picture. A non-default `--width`/`--height` resamples
+the whole stack in `build()` and that is not free — 3.2 s at 512x96 — so the
+geometry the fetcher stores should be the geometry the wall wants.
+
+**The fetcher has to be running.** Nothing in `goes.py` touches the network — it
+imports numpy and nothing else, no Pillow, no HTTP library, no JPEG decoder —
+and `ftdata.load()` and `load_blob()` open no transport either; the only thing
+either pulls in beyond the interpreter's baseline is `urllib.parse`, which
+`np.load` drags in through `zipfile` to parse nothing at all.
+
+```console
+$ python3 ftdata.py --loop 900                    # the fetcher, its own process
+$ python3 ftdata.py --once --only goes-psw        # one pass, top up the window
+$ python3 goes.py                                 # needs the fetcher running
+$ python3 goes.py --frame-rate 3 --hold 3         # slower, longer look at now
+$ python3 goes.py --no-blend                      # cut instead of dissolve
+$ python3 goes.py --bar 0                         # no caption, all picture
+$ python3 goes.py --at '2026-08-09 09:00'         # the STALE path, on demand
+$ FT_DATA_CACHE=/tmp/nothing python3 goes.py      # the no-data card
+$ FT_GOES_FRAMES=24 python3 ftdata.py --once --only goes-psw   # two hours, 1.2 MB
+```
+
+`FT_GOES_FRAMES` sets the window length and `FT_GOES_SECTOR` the sector;
+`FT_GOES_MAX_FETCH` caps how much one pass will pull, so a cold start on bad
+wifi fills in over several ticks rather than blocking on sixteen megabytes.
+
 ### twister
 
 ![twister](screenshots/twister.png)

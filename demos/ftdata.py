@@ -77,6 +77,37 @@ def load(name, cache_dir=None):
         return None
 
 
+def load_blob(filename, cache_dir=None):
+    """Open a binary sidecar written by `store_blob()`. None if unusable.
+
+    JSON is the wrong container for pixels -- a base64'd megabyte of uint8 is
+    four times the bytes and a second of parsing -- so a product whose payload
+    is an array writes the array beside the record as an `.npz`, and the record
+    carries the metadata and the sidecar's name. This is the reading half, and
+    it keeps `load()`'s contract exactly: it does not touch the network, it
+    does not raise, and a missing, truncated or foreign file is simply None.
+
+    numpy is the one import here, and it is not a concession: every caller of
+    this is a demo that has already imported it to draw with.
+
+    Callers pass the filename out of the record rather than composing one, so
+    the basename check is not paranoia about the cache directory but about the
+    record: a `../` in a fetched file is the one way this could reach outside
+    the cache, and it costs a line to make it impossible.
+    """
+    try:
+        import numpy as np
+        if not filename or os.path.basename(filename) != filename:
+            return None
+        with np.load(os.path.join(cache_dir or CACHE_DIR, filename)) as z:
+            return {k: z[k] for k in z.files}
+    except Exception:
+        # Same reasoning as load(): missing, half-written, corrupt or from a
+        # version that stored different arrays all mean "draw the no-data
+        # state", and none of them should take the wall down.
+        return None
+
+
 def ttl_for(name):
     return PRODUCTS[name]["ttl"] if name in PRODUCTS else None
 
@@ -120,6 +151,56 @@ def _store(name, payload, source, cache_dir):
         raise
 
 
+def store_blob(name, arrays, cache_dir, compress=True):
+    """Write arrays to a sidecar and return its basename for the record.
+
+    The name carries a fresh random token every time -- `goes-psw-1f3c9a20.npz`
+    -- and that is the whole trick. A record and its sidecar are two files, so
+    write-then-rename makes each of them atomic but says nothing about the
+    pair: a reader landing between the two renames would get the new record
+    and the old array, or the reverse, and either is a silent mismatch rather
+    than an error. Writing the sidecar under a new name first, then renaming
+    the record that points at it, then deleting the sidecars nobody points at,
+    means every record ever visible names a file that exists and holds exactly
+    the arrays it describes. The cost is one stale file for as long as a slow
+    reader holds it open, which is what `prune_blobs()` sweeps up next pass.
+    """
+    import numpy as np
+    os.makedirs(cache_dir, exist_ok=True)
+    filename = "%s-%08x.npz" % (name, int.from_bytes(os.urandom(4), "big"))
+    fd, tmp = tempfile.mkstemp(dir=cache_dir, prefix="." + name, suffix=".npz")
+    os.close(fd)
+    try:
+        # suffix=".npz" on purpose: savez appends the extension itself if the
+        # path does not already have it, and would then write beside the temp
+        # file rather than into it.
+        (np.savez_compressed if compress else np.savez)(tmp, **arrays)
+        os.replace(tmp, os.path.join(cache_dir, filename))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return filename
+
+
+def prune_blobs(name, keep, cache_dir):
+    """Delete `<name>-*.npz` sidecars other than `keep`. Best effort."""
+    prefix, suffix = name + "-", ".npz"
+    try:
+        entries = os.listdir(cache_dir)
+    except OSError:
+        return
+    for fn in entries:
+        if fn == keep or not (fn.startswith(prefix) and fn.endswith(suffix)):
+            continue
+        try:
+            os.unlink(os.path.join(cache_dir, fn))
+        except OSError:
+            pass
+
+
 def get(url, timeout=20):
     """Fetch a URL as bytes. Imported lazily so `load()` stays network-free."""
     import urllib.request
@@ -143,7 +224,10 @@ def fetch(name, cache_dir=None):
     cache_dir = cache_dir or CACHE_DIR
     spec = PRODUCTS[name]
     try:
-        payload, source = spec["fn"]()
+        # A blob product writes its own sidecar, so it is the one kind of
+        # fetch function that has to be told where the cache is.
+        payload, source = (spec["fn"](cache_dir) if spec.get("blob")
+                           else spec["fn"]())
     except Exception as e:                                   # noqa: BLE001
         print("ftdata: %s failed: %r" % (name, e), file=sys.stderr)
         return False
@@ -570,6 +654,204 @@ for _st in [TIDE_STATION] + [s for s in
 for _st in [CURRENT_STATION] + [s for s in
                                 os.environ.get("FT_CURRENT_STATIONS", "").split(",") if s]:
     register_current_station(_st.strip())
+
+
+# --------------------------------------------------------------------------
+# GOES GeoColor imagery, from NESDIS STAR. goes.py plays these as a time lapse.
+#
+# This is the first product whose payload is not numbers, and it changes what
+# the cache has to do. The other records here are a few kilobytes of JSON and
+# the fetcher rewrites them wholesale every pass. A frame series cannot work
+# that way: the source is a 240 kB JPEG every five minutes, a window of them is
+# megabytes, and re-fetching the window each pass would put 70 MB an hour
+# through the shop wifi to change three frames.
+#
+# So two things are different. The fetch is **incremental** -- the record lists
+# the frame timestamps it already holds, and a pass downloads only the slots
+# that are new and drops the ones that have aged out. And the pixels are
+# **cooked before they are stored**: each JPEG is decoded, cropped and resized
+# to the panel's exact geometry and only the 61 kB result is kept, so a window
+# costs a twentieth of what the JPEGs would and, more to the point, the demo
+# never decodes anything. Pillow lives on this side of the wall, in the fetcher
+# process, next to the sockets. `goes.py` imports numpy and nothing else.
+#
+# The frames go in a sidecar (see store_blob) as one (N, H, W, 3) uint8 array;
+# the JSON record carries the timestamps, the crop, the geometry and the name
+# of the sidecar.
+# --------------------------------------------------------------------------
+
+GOES_CDN = "https://cdn.star.nesdis.noaa.gov"
+GOES_SAT = os.environ.get("FT_GOES_SAT", "GOES18")      # West; PSW is its sector
+GOES_SECTOR = os.environ.get("FT_GOES_SECTOR", "psw")   # Pacific Southwest
+GOES_SIZE = os.environ.get("FT_GOES_SIZE", "600x600")
+
+# The scan cadence, and its phase. GOES-18's mesoscale-and-sector schedule puts
+# every psw scan start on a minute ending 1, 6, 11 ... -- ten days of the
+# directory listing, 2888 files, and not one exception -- so the fetcher can
+# name tomorrow's files without asking. That matters more than it sounds: the
+# alternative is the HTML index for the directory, which is 3.1 MB (349 kB
+# gzipped) of every frame since last week, downloaded to learn three names.
+GOES_CADENCE = 300
+GOES_PHASE = 60
+
+# How much of the window to keep. 72 frames at five minutes is six hours, which
+# is long enough to watch a front arrive and, around dawn or dusk, to carry the
+# terminator across the panel. Stored at 320x64 that is 3.5 MB compressed.
+GOES_FRAMES = int(os.environ.get("FT_GOES_FRAMES", "72"))
+# A cold start is the whole window at 240 kB a frame, so it is capped: a pass
+# that only manages part of it leaves a shorter window, which the demo draws,
+# and the next pass fills in more.
+GOES_MAX_FETCH = int(os.environ.get("FT_GOES_MAX_FETCH", "96"))
+
+# The crop, in source pixels of the 600x600 sector image, and the panel it is
+# resized to. 500 x 100 is exactly 5:1, so this is a *crop* and not a squash --
+# nothing in the picture is stretched. See goes.py on why this band.
+GOES_CROP = (0, 236, 500, 336)
+GOES_PANEL = (320, 64)
+
+# The corners of that crop on the ground, north-west round to south-west. The
+# sector image is the ABI fixed grid -- a geostationary projection from
+# 137.0 W, 56.1 urad a pixel, which is the instrument's own 2 km grid -- and
+# these came from fitting that projection to the state borders NESDIS draws on
+# the imagery: the 42 N line, the 120 W line, and the corners of Nevada, which
+# are surveyed to the metre. Three landmarks fit to under a pixel and the ones
+# held back -- Lake Tahoe, the Great Salt Lake, the Salton Sea, San Francisco
+# Bay -- land within three. A geostationary grid is not north-up, so the band
+# is slightly skewed: its centre line runs from 37.7 N on the left edge to
+# 38.1 N on the right. On the ground it is 1127 km by 301 km, which is 3.5 km
+# a panel pixel across and 4.7 km down -- the north-south foreshortening of
+# looking at 37 N from over the equator at 137 W, not anything done here.
+GOES_EXTENT = {"nw": [39.02, -126.23], "ne": [39.48, -113.05],
+               "se": [36.80, -114.11], "sw": [36.40, -126.66],
+               "km_per_px": [3.52, 4.70], "km": [1127, 301]}
+
+GOES_PRODUCT = "goes-" + GOES_SECTOR
+# Imagery arrives every five minutes; a record whose newest frame is half an
+# hour old means the fetcher or the CDN has stopped, and the demo says so.
+GOES_TTL = 1800
+
+
+def goes_slots(now=None, count=GOES_FRAMES, cadence=GOES_CADENCE,
+               phase=GOES_PHASE):
+    """The `count` most recent scan-start epochs at or before `now`."""
+    now = time.time() if now is None else now
+    newest = ((now - phase) // cadence) * cadence + phase
+    return [newest - i * cadence for i in range(count - 1, -1, -1)]
+
+
+def goes_stamp(epoch):
+    """A scan-start epoch as NESDIS names it: YYYYDDDHHMM, UTC."""
+    return time.strftime("%Y%j%H%M", time.gmtime(epoch))
+
+
+def goes_url(epoch, sat=None, sector=None, size=None):
+    sat = sat or GOES_SAT
+    sector = sector or GOES_SECTOR
+    size = size or GOES_SIZE
+    # CONUS and FD sit at the top of the tree; everything else is under SECTOR,
+    # and the token in the filename is the directory's name in the case NESDIS
+    # writes it -- upper for CONUS, as given for a sector.
+    if sector.upper() in ("CONUS", "FD"):
+        path = "%s/ABI/%s/GEOCOLOR" % (sat, sector.upper())
+        token = sector.upper()
+    else:
+        path = "%s/ABI/SECTOR/%s/GEOCOLOR" % (sat, sector)
+        token = sector
+    return "%s/%s/%s_%s-ABI-%s-GEOCOLOR-%s.jpg" % (
+        GOES_CDN, path, goes_stamp(epoch), sat, token, size)
+
+
+def _goes_tile(data, crop, panel):
+    """One JPEG's bytes -> a (h, w, 3) uint8 tile, cropped and resized.
+
+    Pillow is imported here and only here. It is a fetcher-side dependency in
+    the same sense urllib is: the demo must not need it, must not pay for
+    importing it, and must not be the thing that discovers it is missing.
+    """
+    import io
+    import numpy as np
+    from PIL import Image
+    im = Image.open(io.BytesIO(data))
+    im.load()
+    im = im.convert("RGB")
+    x0, y0, x1, y1 = crop
+    if im.size != (600, 600):
+        # A different --size was asked for. Scale the crop with it rather than
+        # cropping the same pixels out of a different picture, which would
+        # quietly be a different piece of California.
+        sx, sy = im.size[0] / 600.0, im.size[1] / 600.0
+        x0, x1 = int(round(x0 * sx)), int(round(x1 * sx))
+        y0, y1 = int(round(y0 * sy)), int(round(y1 * sy))
+    tile = im.crop((x0, y0, x1, y1)).resize(panel, Image.LANCZOS)
+    return np.asarray(tile, dtype=np.uint8)
+
+
+def _goes_payload(cache_dir):
+    """Top the window up and rewrite the sidecar. Returns (payload, source)."""
+    import numpy as np
+
+    wanted = goes_slots()
+    want_set = set(int(t) for t in wanted)
+
+    # What survives from last pass. The sidecar is read rather than the JPEGs
+    # re-fetched, which is the entire point of storing cooked pixels.
+    have = {}
+    got = load(GOES_PRODUCT, cache_dir)
+    if got is not None:
+        blob = load_blob((got[0] or {}).get("blob"), cache_dir)
+        if blob is not None and "frames" in blob and "stamps" in blob:
+            frames, stamps = blob["frames"], blob["stamps"]
+            if (len(frames) == len(stamps)
+                    and frames.shape[1:] == (GOES_PANEL[1], GOES_PANEL[0], 3)):
+                for t, f in zip(stamps, frames):
+                    if int(t) in want_set:
+                        have[int(t)] = f
+
+    # Newest first: a pass that runs out of time or wifi should have left the
+    # most recent weather on the wall, not the oldest.
+    todo = [t for t in reversed(wanted) if int(t) not in have][:GOES_MAX_FETCH]
+    fetched = failed = 0
+    source = goes_url(wanted[-1])
+    for t in todo:
+        try:
+            have[int(t)] = _goes_tile(get(goes_url(t), timeout=30),
+                                      GOES_CROP, GOES_PANEL)
+            fetched += 1
+        except Exception:                                    # noqa: BLE001
+            # A slot can be missing for the ordinary reasons -- the newest one
+            # is not posted yet, the scan was pre-empted by a mesoscale
+            # request -- and a hole in a time lapse is not an error worth
+            # failing the whole product over.
+            failed += 1
+
+    stamps = sorted(have)
+    if not stamps:
+        raise ValueError("no GOES frames could be fetched")
+    frames = np.stack([have[t] for t in stamps])
+    stamps = np.asarray(stamps, np.float64)
+
+    filename = store_blob(GOES_PRODUCT,
+                          {"frames": frames, "stamps": stamps}, cache_dir)
+    payload = {
+        "blob": filename, "count": int(len(stamps)),
+        "stamps": [float(t) for t in stamps],
+        "oldest": float(stamps[0]), "newest": float(stamps[-1]),
+        "cadence": GOES_CADENCE, "want": len(wanted),
+        "sat": GOES_SAT, "sector": GOES_SECTOR, "size": GOES_SIZE,
+        "product": "GEOCOLOR", "crop": list(GOES_CROP),
+        "panel": list(GOES_PANEL), "extent": GOES_EXTENT,
+        "fetched": fetched, "missing": failed,
+    }
+    prune_blobs(GOES_PRODUCT, filename, cache_dir)
+    return payload, source
+
+
+product(GOES_PRODUCT, ttl=GOES_TTL,
+        description="GOES GeoColor time lapse, %d frames at %s"
+                    % (GOES_FRAMES, GOES_SECTOR))(_goes_payload)
+# Not a flag on product(): marking the spec afterwards keeps the registration
+# helper exactly as the other twelve products use it.
+PRODUCTS[GOES_PRODUCT]["blob"] = True
 
 
 def main():
