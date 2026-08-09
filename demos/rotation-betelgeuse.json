@@ -182,6 +182,17 @@
     },
     {
       "kind": "py",
+      "name": "adsb",
+      "module": "adsb",
+      "seconds": 40,
+      "fps": 30,
+      "ms": 8.0,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "headroom",
       "module": "headroom",
       "seconds": 45.0,
@@ -274,6 +285,17 @@
     },
     {
       "kind": "py",
+      "name": "caiso",
+      "module": "caiso",
+      "seconds": 30,
+      "fps": 20,
+      "ms": 1.7,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "tunnel",
       "module": "tunnel",
       "seconds": 45.0,
@@ -292,6 +314,17 @@
       "seconds": 45.0,
       "fps": 28,
       "ms": 4.0,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "sats",
+      "module": "sats",
+      "seconds": 30,
+      "fps": 20,
+      "ms": 26.1,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -442,6 +475,17 @@
     },
     {
       "kind": "py",
+      "name": "quake",
+      "module": "quake",
+      "seconds": 30,
+      "fps": 20,
+      "ms": 0.9,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "space-invaders",
       "module": "pixelart",
       "seconds": 30,
@@ -523,6 +567,17 @@
       "seconds": 45.0,
       "fps": 30,
       "ms": 21.1,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "ships",
+      "module": "ships",
+      "seconds": 30,
+      "fps": 20,
+      "ms": 3.4,
       "enabled": true,
       "solo": false,
       "options": {}
