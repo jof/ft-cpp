@@ -241,6 +241,17 @@
     },
     {
       "kind": "py",
+      "name": "goes",
+      "module": "goes",
+      "seconds": 45.0,
+      "fps": 30,
+      "ms": 3.9,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "mario",
       "module": "mario",
       "seconds": 45.0,
@@ -360,6 +371,17 @@
     },
     {
       "kind": "py",
+      "name": "winds",
+      "module": "winds",
+      "seconds": 60.0,
+      "fps": 30,
+      "ms": 7.1,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "sewing",
       "module": "pixelart",
       "seconds": 30,
@@ -464,6 +486,17 @@
       "seconds": 45.0,
       "fps": 20,
       "ms": 37.9,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "wx",
+      "module": "wx",
+      "seconds": 30.0,
+      "fps": 20,
+      "ms": 0.2,
       "enabled": true,
       "solo": false,
       "options": {}
