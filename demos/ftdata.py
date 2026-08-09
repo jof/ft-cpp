@@ -572,6 +572,382 @@ for _st in [CURRENT_STATION] + [s for s in
     register_current_station(_st.strip())
 
 
+# --------------------------------------------------------------------------
+# Hyper-local weather for the wall's own address. wx.py draws these.
+#
+# Three products, from three services, because no single keyless service knows
+# what a panel on 18th Street needs to say. That is not a shortcoming to be
+# papered over -- it is the fact the demo is built around, and it is why each
+# product records *what kind of number it is* as well as its value:
+#
+#   wx-obs-<station>   a real observation, from a real instrument, 2.8 km away
+#   wx-model-<site>    a numerical forecast evaluated at the exact address
+#   wx-air-<site>      a chemistry model's grid cell, likewise
+#
+# The station is the only measurement anywhere near the building. Unioning the
+# station lists of a 7x7 block of NWS gridpoints around the address turns up 52
+# stations and exactly one inside San Francisco: SFOC1, "San Francisco
+# Downtown", 2.8 km away. The next nearest is Oakland Museum at 12.3 km, on the
+# far side of the Bay and in a different climate; KSFO is 16 km south and in
+# another one again. Every dedicated PWS network -- Weather Underground,
+# PurpleAir, Synoptic, AirNow -- now answers 401 or 403 without a key.
+#
+# **Assume no field is present.** SFOC1 reports temperature, dewpoint and
+# humidity and reports `null` for wind, pressure, gust and visibility, with a
+# `Z` quality flag: the fields exist in the JSON and carry nothing. Other
+# stations drop other fields, and the same station drops different ones on
+# different hours. So every value goes through _nws_value(), which returns None
+# unless there is a number *and* the unit code is the one being converted from.
+# A missing field must reach the panel as absent, never as zero.
+#
+# **met.no's terms are honoured here, not in the demo.** They ask for an
+# identifying User-Agent with a contact address, and for the Expires header to
+# be respected rather than polled through. So: FT_CONTACT (or the default
+# below) goes into the UA; the response's Expires and Last-Modified are kept in
+# the payload; and a fetch before Expires makes **no request at all**, while a
+# fetch after it is conditional on If-Modified-Since and takes the 304 when
+# offered. A --loop 900 fetcher therefore touches api.met.no about twice an
+# hour, which is roughly how often the model actually changes.
+#
+# One consequence needs saying: when a fetch is skipped or 304s, the record is
+# rewritten with a new `fetched_at` and unchanged contents, so the *fetch* age
+# understates the *data* age. Every payload here therefore carries `t`, the
+# epoch the numbers describe, and wx.py ages them by that instead. Age is part
+# of the data, and the part that matters is the data's, not the socket's.
+# --------------------------------------------------------------------------
+
+WX_LAT, WX_LON = 37.7627, -122.3966     # 1736 18th Street, San Francisco
+WX_STATION = "SFOC1"                    # San Francisco Downtown, 2.8 km away
+
+# met.no and NWS both want to know who is calling and how to reach them. This
+# is a genuine address, not a decorative one; if this code is run somewhere
+# else, set FT_CONTACT so the complaint reaches whoever is actually fetching.
+WX_CONTACT = os.environ.get("FT_CONTACT", "jof@thejof.com")
+WX_UA = ("flaschen-taschen-wx/1 "
+         "(+https://github.com/hzeller/flaschen-taschen; %s)" % WX_CONTACT)
+
+NWS_STATION_URL = "https://api.weather.gov/stations/"
+METNO_URL = "https://api.met.no/weatherapi/locationforecast/2.0/compact"
+OPENMETEO_AQ_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
+
+# An observation is worth believing for about as long as it takes the next one
+# to arrive, plus a missed hour. The model products are hourly too, but a
+# forecast instant describes a whole hour and does not curdle at the boundary.
+WX_OBS_TTL = 5400
+WX_MODEL_TTL = 7200
+
+
+def _wx_http(url, headers=None, timeout=20):
+    """(status, headers, body) for a GET, with 304 as a result and not an error.
+
+    ftdata.get() is the right thing for a feed that is simply fetched. This
+    exists because met.no's terms are about *how* it is fetched: it needs a
+    request header on the way out and two response headers on the way back, and
+    a 304 with no body is a success. Imported lazily, like get(), so that
+    load() stays free of any network module.
+    """
+    import urllib.error
+    import urllib.request
+    hdrs = {"User-Agent": WX_UA}
+    hdrs.update(headers or {})
+    req = urllib.request.Request(url, headers=hdrs)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.getcode(), dict(resp.headers), resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 304:
+            return 304, dict(e.headers or {}), b""
+        raise
+
+
+def _wx_epoch(iso):
+    """An ISO 8601 stamp -> epoch seconds, or None. Accepts 'Z' and offsets."""
+    if not iso:
+        return None
+    try:
+        import datetime
+        s = iso.strip().replace("Z", "+00:00")
+        dt = datetime.datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.timestamp()
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+def _wx_http_date(s):
+    """An HTTP-date header -> epoch seconds, or None."""
+    if not s:
+        return None
+    try:
+        import email.utils
+        return email.utils.mktime_tz(email.utils.parsedate_tz(s))
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+def _wx_site(lat, lon):
+    """The product-name suffix for a site: '37.7627_-122.3966'."""
+    return "%.4f_%.4f" % (float(lat), float(lon))
+
+
+def _nws_value(props, key, unit, scale=1.0, offset=0.0):
+    """A converted NWS field, or None if it is absent, null or in another unit.
+
+    The unit check is not pedantry. windSpeed arrives as km_h-1 from most
+    stations and m_s-1 from a few, and silently applying one conversion to the
+    other is how a 5 m/s breeze becomes an 18 m/s gale on a wall in a workshop.
+    Unknown unit means unknown number means None.
+    """
+    field = props.get(key)
+    if not isinstance(field, dict):
+        return None
+    value = field.get("value")
+    if value is None or not isinstance(value, (int, float)):
+        return None
+    if unit and not str(field.get("unitCode", "")).endswith(unit):
+        return None
+    return float(value) * scale + offset
+
+
+def _nws_station_meta(station):
+    """(name, lat, lon) for a station; (id, None, None) if the lookup fails.
+
+    Best effort, exactly as _coops_meta is: the position is what lets the panel
+    print how far away the thermometer is, which is the single most important
+    caption on it, but not important enough to lose an observation over.
+    """
+    try:
+        rec = json.loads(_wx_http(
+            NWS_STATION_URL + station,
+            {"Accept": "application/geo+json"}, timeout=10)[2])
+        coords = (rec.get("geometry") or {}).get("coordinates") or []
+        props = rec.get("properties") or {}
+        return ((props.get("name") or station).upper(),
+                float(coords[1]) if len(coords) > 1 else None,
+                float(coords[0]) if len(coords) > 1 else None)
+    except Exception:                                        # noqa: BLE001
+        return station, None, None
+
+
+def _wx_obs_payload(station):
+    """The latest observation from one NWS station, per-field.
+
+    Everything is stored in one unit system -- degrees C, m/s, hPa, percent --
+    so the demo never has to know what the station happened to report in.
+    """
+    url = NWS_STATION_URL + station + "/observations/latest"
+    body = _wx_http(url, {"Accept": "application/geo+json"})[2]
+    props = json.loads(body).get("properties") or {}
+
+    name, lat, lon = _nws_station_meta(station)
+    payload = {
+        "station": station, "name": name, "lat": lat, "lon": lon,
+        "t": _wx_epoch(props.get("timestamp")),
+        "iso": props.get("timestamp"),
+        "temp_c": _nws_value(props, "temperature", "degC"),
+        "dewpoint_c": _nws_value(props, "dewpoint", "degC"),
+        "rh_pct": _nws_value(props, "relativeHumidity", "percent"),
+        # Present in the JSON, null at SFOC1, and quite possibly a number at
+        # whatever station somebody points this at next.
+        "wind_ms": _nws_value(props, "windSpeed", "km_h-1", 1000.0 / 3600.0),
+        "gust_ms": _nws_value(props, "windGust", "km_h-1", 1000.0 / 3600.0),
+        "wind_dir": _nws_value(props, "windDirection", "degree_(angle)"),
+        "pressure_hpa": _nws_value(props, "barometricPressure", "Pa", 0.01),
+        "text": (props.get("textDescription") or "").strip() or None,
+    }
+    if payload["wind_ms"] is None:
+        payload["wind_ms"] = _nws_value(props, "windSpeed", "m_s-1")
+    return payload, url
+
+
+# met.no is fetched at most once per Expires, and the state that makes that
+# possible lives here rather than in the record, because fetch() hands the
+# product function no cache directory. The disk record is consulted once per
+# process so a fetcher that has just started does not spend its first pass
+# re-requesting something it already has.
+_METNO_STATE = {}
+
+
+def _metno_previous(name):
+    if name in _METNO_STATE:
+        return _METNO_STATE[name]
+    got = load(name)
+    prev = None
+    if got is not None and isinstance(got[0], dict):
+        prev = got[0]
+    _METNO_STATE[name] = prev
+    return prev
+
+
+def _wx_model_payload(name, lat, lon):
+    """The instant nearest now out of met.no's locationforecast, and nothing else.
+
+    44 kB of hourly forecast arrives and about 300 bytes are kept. A 320x64
+    panel has no room for a forecast strip, and storing one so that it could
+    have a row later would put a day of numbers on the Pi's flash every quarter
+    hour for a row that does not exist.
+
+    See the block comment above on the Expires handling; it is the part of this
+    function that matters most, and it is the part that is easiest to delete by
+    accident while making some unrelated change.
+    """
+    from urllib.parse import urlencode
+    url = METNO_URL + "?" + urlencode({"lat": round(float(lat), 4),
+                                       "lon": round(float(lon), 4)})
+    now = time.time()
+    prev = _metno_previous(name)
+
+    # Still inside the Expires window the server gave us: there is nothing new
+    # behind that URL and asking would be rude. Not an error, not a failure --
+    # simply the same numbers again, with their own `t` unchanged.
+    if prev and prev.get("expires") and now < float(prev["expires"]):
+        return dict(prev), url
+
+    headers = {"Accept": "application/json"}
+    if prev and prev.get("last_modified"):
+        headers["If-Modified-Since"] = prev["last_modified"]
+    status, resp_headers, body = _wx_http(url, headers)
+
+    expires = _wx_http_date(resp_headers.get("Expires"))
+    last_modified = resp_headers.get("Last-Modified")
+    if status == 304 and prev:
+        payload = dict(prev)
+        payload["expires"] = expires or (now + 1800.0)
+        if last_modified:
+            payload["last_modified"] = last_modified
+        _METNO_STATE[name] = payload
+        return payload, url
+
+    doc = json.loads(body)
+    props = doc.get("properties") or {}
+    series = props.get("timeseries") or []
+    if not series:
+        raise ValueError("no timeseries from met.no for %s,%s" % (lat, lon))
+
+    # The entry whose hour contains now, which is the last one at or before it;
+    # the first entry if the whole series is somehow in the future.
+    chosen, chosen_t = series[0], _wx_epoch(series[0].get("time"))
+    for entry in series:
+        t = _wx_epoch(entry.get("time"))
+        if t is None or t > now:
+            break
+        chosen, chosen_t = entry, t
+
+    data = chosen.get("data") or {}
+    inst = ((data.get("instant") or {}).get("details")) or {}
+    next1 = data.get("next_1_hours") or {}
+
+    def val(key):
+        v = inst.get(key)
+        return float(v) if isinstance(v, (int, float)) else None
+
+    payload = {
+        "lat": float(lat), "lon": float(lon),
+        "t": chosen_t, "iso": chosen.get("time"),
+        "updated_at": _wx_epoch((props.get("meta") or {}).get("updated_at")),
+        "temp_c": val("air_temperature"),
+        "rh_pct": val("relative_humidity"),
+        "pressure_hpa": val("air_pressure_at_sea_level"),
+        "cloud_pct": val("cloud_area_fraction"),
+        "wind_ms": val("wind_speed"),
+        # Meteorological convention: the direction the wind is coming FROM.
+        "wind_dir": val("wind_from_direction"),
+        "precip_1h": ((next1.get("details") or {}).get("precipitation_amount")),
+        "symbol_1h": (next1.get("summary") or {}).get("symbol_code"),
+        "label": "MET.NO",
+        "expires": expires or (now + 1800.0),
+        "last_modified": last_modified,
+    }
+    _METNO_STATE[name] = payload
+    return payload, url
+
+
+def _wx_air_payload(lat, lon):
+    """Open-Meteo's CAMS air quality at a point. Model output, not a sensor.
+
+    The response says which grid cell it actually answered for, and it is not
+    the point asked for -- a few kilometres off, typically. That is stored as
+    `grid_lat`/`grid_lon` rather than quietly discarded, because "modelled for
+    an 11 km cell that contains the Mission" is the honest description of this
+    number and the panel is entitled to say so.
+    """
+    from urllib.parse import urlencode
+    url = OPENMETEO_AQ_URL + "?" + urlencode({
+        "latitude": round(float(lat), 4), "longitude": round(float(lon), 4),
+        "current": "pm2_5,pm10,us_aqi,ozone,nitrogen_dioxide",
+        "timezone": "UTC"})
+    doc = json.loads(_wx_http(url)[2])
+    cur = doc.get("current") or {}
+    if not cur:
+        raise ValueError("no current air quality for %s,%s" % (lat, lon))
+
+    def val(key):
+        v = cur.get(key)
+        return float(v) if isinstance(v, (int, float)) else None
+
+    aqi = val("us_aqi")
+    return {
+        "lat": float(lat), "lon": float(lon),
+        "grid_lat": doc.get("latitude"), "grid_lon": doc.get("longitude"),
+        "t": _wx_epoch(cur.get("time")), "iso": cur.get("time"),
+        "us_aqi": int(round(aqi)) if aqi is not None else None,
+        "pm2_5": val("pm2_5"), "pm10": val("pm10"),
+        "ozone": val("ozone"), "no2": val("nitrogen_dioxide"),
+        "model": "CAMS via Open-Meteo", "label": "OPEN-METEO",
+    }, url
+
+
+def register_wx_station(station):
+    """Register a `wx-obs-<station>` product. Returns the product name."""
+    name = "wx-obs-" + station
+
+    def fetch_obs(station=station):
+        return _wx_obs_payload(station)
+
+    fetch_obs.__name__ = "_wx_obs_" + station
+    product(name, ttl=WX_OBS_TTL,
+            description="NWS observation, station %s (measured)" % station)(fetch_obs)
+    return name
+
+
+def register_wx_site(lat, lon):
+    """Register `wx-model-<site>` and `wx-air-<site>`. Returns both names."""
+    site = _wx_site(lat, lon)
+    model, air = "wx-model-" + site, "wx-air-" + site
+
+    def fetch_model(name=model, lat=lat, lon=lon):
+        return _wx_model_payload(name, lat, lon)
+
+    def fetch_air(lat=lat, lon=lon):
+        return _wx_air_payload(lat, lon)
+
+    fetch_model.__name__ = "_wx_model_" + site
+    fetch_air.__name__ = "_wx_air_" + site
+    product(model, ttl=WX_MODEL_TTL,
+            description="met.no forecast at %s (modelled)" % site)(fetch_model)
+    product(air, ttl=WX_MODEL_TTL,
+            description="Open-Meteo CAMS air quality at %s (modelled)" % site)(fetch_air)
+    return model, air
+
+
+for _st in [WX_STATION] + [s for s in
+                           os.environ.get("FT_WX_STATIONS", "").split(",") if s]:
+    register_wx_station(_st.strip())
+# FT_WX_SITES is 'lat,lon;lat,lon'. The wall's own address is the default
+# because that is the address the wall is at.
+_wx_sites = [(WX_LAT, WX_LON)]
+for _pair in os.environ.get("FT_WX_SITES", "").split(";"):
+    if "," in _pair:
+        try:
+            _a, _b = _pair.split(",", 1)
+            _wx_sites.append((float(_a), float(_b)))
+        except ValueError:
+            print("ftdata: bad FT_WX_SITES entry %r" % _pair, file=sys.stderr)
+for _lat, _lon in _wx_sites:
+    register_wx_site(_lat, _lon)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="fetch outside data into a cache the demos read",

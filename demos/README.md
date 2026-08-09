@@ -1918,6 +1918,162 @@ $ python3 propagation.py --blink-hz 0            # hold the flags, for a photo
 $ FT_DATA_CACHE=/tmp/nothing python3 propagation.py   # the no-data card
 ```
 
+### wx
+
+![wx](screenshots/wx.png)
+
+The weather outside *this building* — 1736 18th Street — and an honest account
+of where each number came from. Somebody walks past, looks for two seconds, and
+decides whether to roll the door up. What they must not be able to do is
+mistake a computed number for a measured one, and that turns out to be the
+whole design problem, because almost none of this can be measured near here.
+
+**Why it is a composite.** There is exactly one real instrument anywhere near
+the space. Unioning the station lists across a 7×7 block of NWS gridpoints
+around the address turns up 52 stations and precisely one inside San Francisco:
+**SFOC1, "San Francisco Downtown", 2.8 km away**. The next nearest is Oakland
+Museum at 12.3 km, across the Bay and in a different climate; KSFO is 16 km
+south and in another one again. And SFOC1 reports temperature, dewpoint and
+humidity and **nothing else** — no wind, no pressure. Not "sometimes": the
+fields are in the JSON, `null`, every hour, with a `Z` quality flag. Every
+dedicated personal-weather-station network that would have filled the gap now
+needs a key — Weather Underground PWS 401s, PurpleAir 403s, Synoptic 401s,
+AirNow 401s — which is exactly why this is a composite of three services rather
+than one tidy feed.
+
+So: temperature, dewpoint and humidity are **observed**, 2.8 km away. Wind,
+pressure and cloud are **modelled** at the exact address by met.no. Air quality
+is **modelled** by CAMS through Open-Meteo, for a grid cell a few kilometres
+wide. Blending those into one authoritative-looking readout would be worse than
+not building the panel, so the distinction is carried four ways at once,
+because any one of them fails on somebody:
+
+1. **Position.** Measured things live left of the first hairline; modelled
+   things live right of it. Nothing crosses.
+2. **A word.** Each zone is headed OBSERVED or MODELLED, with the instrument
+   and *how far away it is*, or the model and whose it is.
+3. **Colour.** Observed values are near-white, modelled values blue — two
+   hues, not two brightnesses, since brightness is already spoken for by the
+   aging state and would be destroyed exactly when provenance matters most.
+4. **A mark on every number.** A modelled value is printed `~5.4`, the way one
+   writes an approximation by hand. Crop the panel, photograph it, read it
+   colour-blind: the tilde is still there.
+
+The zone title, the hue and the mark are all *derived from the product's own
+provenance* rather than from where the zone happens to sit, so pointing the
+panel at the wrong kind of product makes it say so rather than quietly relabel
+the data.
+
+**Both temperatures are on the wall on purpose**, observed at the station and
+modelled here, with the difference printed beside the modelled one. When they
+disagree that is not an error to be hidden, it is the sea breeze — the gradient
+across a couple of kilometres of this city, which is the most interesting thing
+this panel knows. The wind is the model's alone and gets the arrow and the big
+type, since nobody within 12 km measures it; the arrow flies *downwind* and the
+label says FROM, because arrow conventions split the room and neither half is
+wrong. If the compass point will not fit it is dropped rather than truncated:
+shortening "FROM WSW" to "FROM W" does not abbreviate a label, it moves the
+wind two points and says so with a straight face.
+
+**The AQI is the number people actually cross the room for.** In this city, in
+fire season, it decides whether the roll-up door opens. So it gets a block of
+the EPA's own colour scale — ≤50 green, 51–100 yellow, 101–150 orange, 151–200
+red, 201–300 purple, 301+ maroon — with the category word beneath it, and the
+ink on the block flips from black to white when the block goes dark enough to
+need it. Those six colours are not adjusted for the panel: everybody here has
+spent a fire season learning to read exactly them, and a nicer green would only
+be a slower one to recognise. And it still says `~55`, because a chemistry model
+over the Mission is not a sensor on the roof. A bright confident block is the
+easiest thing on the wall to mistake for a measurement, which is precisely why
+the mark matters most there.
+
+**The data comes off a disk cache, not a socket.** `build()` calls
+`ftdata.load()`, which reads one JSON file and nothing else, for the reason in
+[`ftdata.py`](ftdata.py)'s docstring: the scheduler builds the next segment on a
+worker thread sharing the GIL with the render loop, so a `build()` that blocks
+on a socket stops the wall for everybody. **The fetcher has to be running:**
+
+```console
+$ python3 ftdata.py --once                  # one pass, to see it work
+$ python3 ftdata.py --loop 900 &            # its own process, every 15 min
+$ python3 ftdata.py --list                  # what is cached, and how old
+$ python3 wx.py --host 127.0.0.1
+$ python3 wx.py --station KSFO --lat 37.6188 --lon -122.3750 --site "SFO"
+$ python3 wx.py --blink-hz 0                # hold the flags, for a photo
+$ FT_DATA_CACHE=/tmp/nothing python3 wx.py  # the no-data card
+```
+
+It adds three products, all trimmed in the fetcher rather than in the demo,
+because the cache lives on a Pi on shop wifi: `wx-obs-<station>` is 450 bytes of
+NWS observation (ttl 5400 s), `wx-model-<lat>_<lon>` is 540 bytes — one instant
+out of 44 kB of hourly forecast, since a 64-row panel has no room for a forecast
+strip — and `wx-air-<lat>_<lon>` is 500 bytes of CAMS (both ttl 7200 s). Nothing
+assumes a field is present: every NWS value goes through a converter that
+returns absent unless there is a number *and* the unit code is the one being
+converted from, because windSpeed arrives as km/h from most stations and m/s
+from a few, and applying one conversion to the other turns a 5 m/s breeze into
+an 18 m/s gale.
+
+**met.no's terms are honoured in the fetcher, and they are not decorative.**
+The User-Agent identifies the project and carries a contact address (`FT_CONTACT`
+overrides it); the response's `Expires` and `Last-Modified` are stored in the
+payload; a fetch inside the Expires window makes **no request at all**, and one
+outside it is conditional on `If-Modified-Since` and takes the 304 — which
+api.met.no does return. A `--loop 900` fetcher therefore touches met.no about
+twice an hour, which is roughly how often the model changes. One consequence
+needs saying: a skipped or revalidated fetch rewrites the record with a new
+`fetched_at` and unchanged contents. So every payload carries `t`, the epoch the
+numbers *describe*, and the panel ages them by that instead. Age is part of the
+data, and the part that matters is the data's, not the socket's.
+
+**Staleness is propagation.py's three stages, in propagation.py's vocabulary**,
+since the two panels share a rotation and a second vocabulary would be a second
+thing to learn. Fresh: full brightness. Past TTL: half brightness, amber ages,
+AGING. Past three TTLs: the numbers are withdrawn — `--`, never a plausible
+zero — the zone says OBSERVATION TOO OLD or MODEL RUN TOO OLD, and a red flag
+blinks. A product nobody has ever fetched is MISSING rather than STALE; calling
+an empty cache stale would imply there is something behind it. An entirely
+empty cache is a NO DATA card naming the fetcher, the command and the cache
+path. **The provenance survives every one of those states** — a stale zone
+keeps its header, its hue and every tilde. It has nothing to say and says so in
+the right voice.
+
+**Two upgrades are already on the table, and they slot in as products.** The
+panel does not know where a number came from; it knows what its *product* is
+called, and `--obs-product`, `--model-product` and `--aqi-product` each name
+one. A product whose name matches a prefix in `OBSERVED_PREFIXES` is drawn as
+observed — no tilde, near-white, OBSERVED in the header — and anything else is
+treated as modelled, because the failure that matters is claiming a measurement
+nobody made.
+
+* **PurpleAir**, if a key is obtained: add a `register_purpleair()` alongside
+  the other products in `ftdata.py` writing `wx-pa-<sensor>` with `us_aqi`,
+  `pm2_5`, `t` and a `label` such as `PURPLEAIR 0.4KM`, then run
+  `wx.py --aqi-product wx-pa-<sensor>`. The tile relabels itself, turns mint,
+  and the tilde comes off the big number, because a sensor a few hundred metres
+  away *is* an observation.
+* **A roof sensor over MQTT**: the site already runs a broker and
+  [`ftctl_mqtt.py`](ftctl_mqtt.py) already speaks to it. A subscriber that
+  writes `wx-local.json` into the same cache directory — same envelope,
+  `fetched_at` and a payload carrying `t`, `temp_c`, `dewpoint_c`, `rh_pct`,
+  optionally `wind_ms`/`wind_dir`, and `label: "ROOF"` — turns the observed
+  half from 2.8 km away into the building's own roof with
+  `wx.py --obs-product wx-local`. The wind line stops saying NO WIND AT THIS
+  STATION and starts printing a measured wind, unmarked, on its own.
+
+Both were tested with hand-written cache records before either service existed;
+neither needs a line of this panel changed.
+
+It is all baked. The layout, the type, the compass arrow and the AQI block are
+rasterised once in `build()`; `render()` copies that frame and repaints two
+small rectangles — the state flag and a heartbeat, which is there because a
+frozen render loop and a calm evening look identical on a panel made of static
+type. On the wall's Pi 3, throttled to 600 MHz, that is **0.11 ms p50 and 0.18
+ms p95** against a 6 ms budget, with `build()` costing 26 ms once on the worker
+thread — a quarter of what propagation's costs on the same machine. There are
+exactly two distinct frames over a full cycle, which is why the standalone
+default is 10 fps: the other twenty a second would be identical datagrams.
+
 ### tide
 
 ![tide](screenshots/tide.png)
