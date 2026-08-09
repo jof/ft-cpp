@@ -80,7 +80,22 @@ WARMUP = {
     # the first signal's 7 s dwell, so the preview shows a settled trace rather
     # than catching a switch between waveforms.
     "scope": 2.0,
+    # caiso draws itself on: frame zero is an empty graticule and a legend, and
+    # the stack sweeps in from midnight to now over about two seconds. Four gets
+    # past that into the settled chart, which is what the panel looks like for
+    # the rest of its slot.
+    "caiso": 4.0,
     # Deliberately absent, and each for its own reason rather than by oversight:
+    #   adsb, sats, quake, ships -- these four take their clock from
+    #                 time.monotonic(), not from the `t` handed to render(), so
+    #                 that aircraft dead-reckon and satellites propagate in real
+    #                 time on the wall. A warmup here advances virtual t while
+    #                 barely any real time passes, so it would move nothing: the
+    #                 four measure 0.000 to 0.013 mean absolute frame delta over
+    #                 a rendered minute. Their clips are therefore stills, and
+    #                 honestly so -- an airliner covers about a tenth of a pixel
+    #                 in the two seconds a preview lasts, so a still is what
+    #                 these panels genuinely look like over that window.
     #   wireworld  -- its 300-generation transient is spent in build(), which
     #                 settles the board and stores the 72-generation cycle;
     #                 render() is then a pure function of t, so t=0 is already
