@@ -63,9 +63,15 @@ f32 = ds.f32
 # and it is the first of those that needs the black fade -- because what makes
 # it fail is a busy neighbour blended over small type, not brightness. Anything
 # carrying a number somebody is meant to come away with belongs in this set.
+#
+# Which is the same test the nostalgia panels are in on: a scan log and a BBS
+# screen are type, and toasters is a handful of sprites on black. gibson is
+# deliberately absent -- once its towers became filled glass it stopped being a
+# few thin lines and became one of the densest things in the show.
 SPARSE = {"starfield", "fireworks", "boing", "daliclock", "sierpinski_rain",
           "propagation", "scope", "wireworld",
-          "adsb", "sats", "caiso", "quake", "ships"}
+          "adsb", "sats", "caiso", "quake", "ships",
+          "wardial", "ansi", "toasters"}
 
 # The default running order. Names not present in the checkout are dropped
 # with a warning, so effects still being written can already be listed here
