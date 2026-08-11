@@ -93,6 +93,13 @@ WARMUP = {
     # wardial wants the exchange map part filled and a few results in the log
     # rather than one dialling line under an empty grid.
     "wardial": 14.0,
+    # bgp's chart is complete at frame zero -- it is fifteen minutes of history
+    # -- but the ticker underneath prints one line a second into an empty half
+    # panel, and that half is what makes the panel read as live rather than as
+    # a graph. Ten seconds fills it. helicorder draws its six lanes on rather
+    # than showing them all at once, so a preview taken early is a couple of
+    # ribbons and four empty rows.
+    "bgp": 10.0, "helicorder": 6.0,
     # Deliberately absent, and each for its own reason rather than by oversight:
     #   gibson, toasters -- both are moving at full speed from frame zero, and
     #                 both are exactly periodic, so a warmup would only rotate
@@ -114,6 +121,16 @@ WARMUP = {
     #   propagation -- near-static by design; it is a panel of numbers, and the
     #                 only motion is the blink, which the 2 s clip catches.
     #   tide, twister -- settled from the first frame.
+    #   swell, sfmix -- both are periodic and moving at frame zero: swell's
+    #                 wave train is at the buoy's own period and sfmix's comets
+    #                 run from the first frame, so a warmup only rotates a
+    #                 phase, exactly as for gibson and toasters.
+    #   stringline, bikes -- the same case as adsb above, for the same reason.
+    #                 Both take their present from the wall clock, so advancing
+    #                 virtual t moves nothing: a stringline's 90-minute window
+    #                 travels about two pixels in the time a warmup takes, and
+    #                 bikes is a scalar field that changes on a ten-minute
+    #                 fetch. Stills, and honestly so.
 }
 
 # The demos are driven at their own frame rate through the warmup and between

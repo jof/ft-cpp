@@ -68,10 +68,20 @@ f32 = ds.f32
 # screen are type, and toasters is a handful of sprites on black. gibson is
 # deliberately absent -- once its towers became filled glass it stopped being a
 # few thin lines and became one of the densest things in the show.
+#
+# The six panels added after it each came with a density measurement and a
+# recommendation, and five of the six recommended staying out of this set on
+# the grounds that they light too much of the panel. That is the effects test,
+# not the data test, and the paragraph above is the reason they are in anyway:
+# `swell` fills its middle band edge to edge but the thing you are meant to
+# leave with is "5.2FT 9S NW", `helicorder` is quiet ribbons around a µm/s
+# figure, and `bgp` is a wall of green under a prefix rate. Every one of them
+# is a number over a picture, which is exactly what a crossfade ruins.
 SPARSE = {"starfield", "fireworks", "boing", "daliclock", "sierpinski_rain",
           "propagation", "scope", "wireworld",
           "adsb", "sats", "caiso", "quake", "ships",
-          "wardial", "ansi", "toasters"}
+          "wardial", "ansi", "toasters",
+          "swell", "helicorder", "stringline", "bikes", "bgp", "sfmix"}
 
 # The default running order. Names not present in the checkout are dropped
 # with a warning, so effects still being written can already be listed here

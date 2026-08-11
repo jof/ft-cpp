@@ -2158,6 +2158,148 @@ have been — scaling the Golden Gate's channels by Boston Harbor's prediction
 would be a plausible-looking lie, and drawing nothing is the only honest
 option short of a second DEM.
 
+### swell
+
+![swell](screenshots/swell.png)
+
+What the Pacific is actually doing, moving at the speed it is actually doing
+it. `tide` next door draws a *prediction* — a harmonic fit computed years ago
+that would print the same curve this afternoon if every buoy in the ocean were
+switched off. This is a *measurement*. Eighteen nautical miles west of the
+Golden Gate there is a three-metre discus hull, **NDBC station 46026**, which
+every ten minutes reports how high the sea around it is, how long between
+crests, and which way they are running; the middle band of the panel is that
+sea, drawn from above with north up.
+
+**The wave train is the data, and that is the whole idea.** The crests cross
+the panel at the measured heading, spaced at the wavelength the measured period
+implies, moving at the speed that follows from it. Deep water gives the rest
+for free — L = gT²/2π, c = L/T — so nine seconds of dominant period means a
+crest passes any point on the wall every nine seconds, and nine seconds is a
+rhythm somebody walking past can feel without reading a digit. A twenty-second
+groundswell draws as wide slow bands; a four-second local chop draws as fine
+fast texture. Neither of those is a stylistic choice.
+
+**Two trains, because that is what the sea is.** The `.spec` sidecar carries
+the directional spectral summary, which splits the same sea state into a swell
+part and a windsea part with a height, a period and a direction each, and both
+are drawn, superposed, at their own wavelengths and their own headings. A clean
+groundswell day is long smooth bands with a faint texture on them; a blown-out
+day is the same bands broken up by chop crossing them at forty degrees. That
+distinction — is this swell, or is it slop — is the single most useful thing
+the data says, and it is why the second file is fetched at all.
+
+Drawing it as *interference* rather than as an energy-versus-period plot is
+deliberate, and it is the design decision this panel turns on. A spectrum at
+this size is four bars and a squint; two superposed sinusoids are simply what
+the water looks like, and they cost the same to draw as one. The numbers behind
+it are in the header anyway (`SWL 5.2FT 9S NW` over `SEA 1.3FT 4S W`) with a
+one-word verdict beside them — CLEAN, MIXED or CHOPPY, on the ratio of the two
+heights — so nothing the plot would have said is missing.
+
+**Height is contrast, not amplitude.** In plan view there is no third dimension
+to put a metre and a half of swell into, so significant height drives how far
+the surface swings through the palette instead: a small sea stays in the middle
+of the blue ramp and reads as flat, a big one reaches the dark trough and the
+white foam at either end. Three metres is full scale, which is a proper storm
+here. The scale is fixed rather than fitted to the day, because a panel whose
+contrast normalises itself cannot be compared with yesterday's, and comparing
+is most of what anybody wants from it.
+
+**The zoom is fixed in wavelengths, not in metres**, at 2.6 swell wavelengths
+across the panel, and the scale bar in the corner says what that came out as —
+129 m on the day of the screenshot. A fixed patch of ocean would draw a
+twenty-second groundswell as one vast crest filling the wall and pulsing, which
+is honest and useless; fixing the number of wavelengths keeps the picture
+legible at every period and keeps the thing that matters exactly right, since a
+crest still passes any given point once every T seconds either way. The arrow
+on the water points the way the waves are going; the header says where they are
+coming *from*, which is the convention every forecast uses, and the compass in
+the top-left corner is there so the two can be reconciled.
+
+**The strip along the bottom is twenty-four hours of trend**, significant height
+as a filled area with the dominant period dotted over it on a fixed 4–20 s
+scale, because "1.9 m" says nothing about whether that is a swell building for
+tomorrow or the end of one. The right edge is the newest *sample*, not the wall
+clock. Holes are the interesting part: the buoy drops samples constantly — on
+the day this was written it reported a wave height on 87 of 156 ten-minute
+slots and a dominant period on 42 — and drawn faithfully that is not a trend
+line, it is a comb. So holes up to half an hour are bridged and longer ones are
+left as holes, which keeps the property that matters: an outage still looks
+like an outage.
+
+**Two different things can be stale, and the panel says which.** The fetch age
+says whether the fetcher is alive; the observation age says whether the *buoy*
+is. Station 46237 on the San Francisco bar was serving a week-old file
+throughout the writing of this, perfectly parseable, and a panel that trusted
+the fetch age would have animated it without a murmur. So `OBS 64M` sits in the
+corner next to the fetch age, goes to warning colour past ninety minutes — NDBC's
+own pipeline runs half an hour behind the buoy on a good day, and a panel that
+cries stale every afternoon is one nobody believes on the day it matters — and
+past twelve hours the wave train is not drawn at all, replaced by
+`BUOY 46026 SILENT 5D`. Animating a sea state at a rhythm the ocean is no longer
+keeping is the one lie this panel could tell.
+
+**600 kB of text becomes 2.7 kB of JSON, and most of it is never downloaded.**
+The realtime2 files are newest-row-first, which is the piece of luck the fetcher
+is built on: the last day of a buoy's life is the first sixteen kilobytes of a
+file that runs to six hundred, so it issues a ranged GET and NDBC's CloudFront
+answers 206 with the top of the file. A server that ignored the header would
+answer 200 with the lot and the parser would still be right, just dearer. `MM`
+means missing and it is everywhere, so nothing assumes a row is complete: each
+headline value is taken from the newest row that actually has it and carries the
+time of *that* row, because a buoy with a dead wave sensor keeps reporting wind
+and water temperature for months. Both files are parsed off their own
+`#YY MM DD ...` header line rather than a hardcoded column order. TTL is an
+hour, fetch interval ten minutes, which is the buoy's own cadence and no faster.
+
+**Frame budget.** Everything is baked in `build()`: the header, the strip, the
+compass and — the part that makes this cheap — one integer *phase image* per
+wave train, the distance along that train's direction of travel at every pixel.
+A frame is then two table lookups, an add, one palette lookup and one scatter
+for the overlay: seven numpy calls, none of which allocate, into a buffer whose
+header and strip rows are never touched at all because they cannot change
+between fetches. Measured over 4000 frames on the desktop: **mean 0.038 ms, p95
+0.042 ms, worst frame 0.063 ms**, with `build()` at 1.2 ms. Numpy costs tens of
+microseconds a call on the wall's Pi whatever the array size, so the call count
+is the budget and not the pixel count; at a hundred times the desktop figure
+this is still under 5 ms against a 50 ms frame.
+
+`render` is a pure function of `t` — asserted in `scripts/test-swell.py` by
+comparing a cold `render(3.7)` against the same instant driven frame by frame
+from zero — and the wall clock is read only to decide when to re-read the cache.
+
+**It can draw a beautiful, confident, wrong picture, so it is asserted in
+pixels rather than eyeballed.** `scripts/test-swell.py` measures the crest rate
+off the rendered frames by counting zero crossings at one pixel and asserts it
+against the reported period (7, 12 and 18 s all come back within 0.01 s); it
+measures the crest *spacing* down a tall panel and asserts it against the
+geometry; and it cross-correlates successive frames to assert that a swell from
+the north travels south, which is the sign error that looks perfect on screen
+and puts a northwest swell running back out to sea. It also checks that a long
+outage stays a hole, that a silent buoy blames the buoy, and that the three
+data states each render in a process of their own — `ftdata.CACHE_DIR` binds at
+import, so reloading the module does not test what it looks like it tests.
+
+```console
+$ python3 ftdata.py --once --only ndbc-46026
+$ python3 swell.py --host 127.0.0.1
+$ python3 swell.py --waves 4 --hours 48        # wider ocean, two days of trend
+$ python3 swell.py --no-windsea                # the groundswell alone
+$ python3 swell.py --rate 6                    # a minute of ocean in ten seconds
+$ FT_DATA_CACHE=/tmp/empty python3 swell.py    # the no-data card
+$ python3 scripts/test-swell.py
+```
+
+`FT_BUOYS` is a comma-separated list the fetcher adds to its default, so
+`FT_BUOYS=46013 python3 ftdata.py --once` registers and fills Bodega Bay and
+`swell.py --station 46013` draws it. Any NDBC station with a wave sensor works;
+one without publishes no `.spec` and gets a single wave train, which is the
+fallback path and is drawn from the standard file's dominant period and mean
+direction. Station 46237 is closer in, on the bar itself, and would be the
+better buoy for what the water is doing *at* the Gate — it just has not
+reported since the third of August.
+
 ### goes
 
 ![goes](screenshots/goes.png)
@@ -2846,6 +2988,174 @@ address; `--extent` moves the map. The coastline will follow anywhere in the
 United States that 3DEP covers, but only after a re-bake — the committed mask
 is this bay, because this bay is what the wall is in.
 
+### stringline
+
+![stringline](screenshots/stringline.png)
+
+Every BART train on one line, drawn the way railways have drawn them since the
+1880s: a **Marey diagram**, distance down, time across, one diagonal per train.
+The picture reads without a legend once you know what the axes are. The
+**slope** of a line is the train's speed, so the run through the Berkeley hills
+is visibly steeper than the crawl down Market Street, and a train standing at a
+platform is flat. Trains going the **other way** lean the other way. Where two
+lines **cross**, two trains passed each other, and those crossings are drawn in
+white because "where do they meet" is the question the notation was invented to
+answer. **Headway** is the horizontal gap between parallel lines, so bunching —
+two lines converging — is visible half an hour before anybody on a platform
+could know about it. The bright vertical is now, and the dots standing on it
+are where the trains are at this instant.
+
+Deliberately **not** another dot-on-a-map panel; the wall already has `adsb`,
+`quake` and `sats`. There is no route map here on purpose. A map of BART tells
+you where the stations are, which has not changed since 2018. A stringline tells
+you what the trains are doing.
+
+**Distance is real track kilometres, and that is the whole design.** Stations
+are horizontal gridlines spaced by how far apart they actually are, not evenly:
+the eight stations between Embarcadero and Balboa Park share seven rows because
+they share seven kilometres, and Orinda to Rockridge gets more rows than all of
+them because the tunnel under the hills is longer than the whole of downtown
+San Francisco. An evenly spaced axis is tidier and is a diagram of a railway
+where every train travels at a constant speed, which throws away the one thing
+the notation is for. The kilometres come out of BART's own GTFS shape
+polylines — each station projected onto the line's alignment and the cumulative
+arc length taken, every station landing within 69 m of the shape — so the
+Transbay Tube is as long here as it is under the bay.
+
+**The Yellow line, because it is the one that crosses the whole picture.** It
+is the busiest of the five (26 of the 83 trains BART had running the evening
+this was written), the longest at 100 km, and the only one that touches
+Antioch, the hills, the tube, Market Street and SFO. A hundred kilometres in
+ninety minutes against ninety minutes of panel width means an end-to-end run is
+very nearly the diagonal of the screen, which is exactly the scale a Marey
+diagram wants. `--line` takes `orange`, `green`, `red` or `blue` as well; they
+are shorter, and Red in particular is a beautiful sparse picture with the
+crossings very clear, but they leave more of the panel empty.
+
+**Past and future are drawn differently, because they are different.** Left of
+the now-line the trains are solid; right of it they are dashed and knocked back
+to half brightness. That is not decoration and it is not a guess about which is
+which: a GTFS-Realtime TripUpdate contains only the stops a train has **not**
+reached yet, and a stop drops out of the feed behind the train as it passes it.
+So the solid half is composed of times BART published for stops within sixty
+seconds of the train actually being there — an observation in every sense that
+matters here — and the dashed half is BART's prediction, still being revised.
+The right-hand edge thins out honestly too: a train that has not been dispatched
+from Antioch yet is not in the feed at all, so nothing is drawn for it rather
+than a timetable pretending to be a forecast.
+
+The **colours are directions**, warm one way and cool the other, the same pair
+`tide` uses for flood and ebb. Slope already says direction, but at this scale a
+stringline leans about seventeen degrees off horizontal and telling +17 from −17
+on a one-pixel line across a room is not something anybody should have to do.
+The two terminals in the gutter are labelled in the colour of the trains heading
+towards them, which is the entire legend.
+
+**BART, because BART needs no key.** `https://api.bart.gov/gtfsrt/tripupdate.aspx`
+answers 200 with about 39 kB of protobuf to anybody who asks — no signup, no
+token, no terms beyond politeness. The obvious first choice for a wall in the
+Mission is Muni, and 511.org's GTFS-RT returns **401 without a free-but-
+registered key**, which was verified before any of this was written.
+
+**The protobuf is decoded by hand, in about sixty lines**, rather than dragging
+`gtfs-realtime-bindings` and therefore `protobuf` — a C extension, a wheel and a
+version skew — onto a Raspberry Pi that has enough of those already. The wire
+format is self-describing: every field is a tag varint carrying a number and a
+type, and the four types that appear are a varint, a length-delimited block and
+two fixed widths that can be skipped without understanding them. What is
+actually needed is five field numbers. The honest cost of no schema is that a
+field which *changed meaning* would be read as the old meaning; against that,
+the reader cannot be broken by a field being **added**, which is the thing that
+actually happens to these feeds. The test file encodes its own FeedMessage and
+asserts the reader against it, including the two cases the live feed rarely
+shows: a negative delay (protobuf writes a negative int32 as a 64-bit two's
+complement varint, and reading it naively gives 1.8×10¹⁹) and a `SKIPPED` stop.
+
+**The fetcher keeps the other half of the diagram.** Because a TripUpdate is
+only the future, the past has to be remembered: each pass merges the new
+predictions into what the previous record held for that trip, and a stop that
+has fallen out of the feed keeps the last time it was given. `bart-stringline`
+is therefore the only product in `ftdata.py` whose new record is a function of
+its old one — it is registered with the same `["blob"] = True` marker `goes`
+uses, purely to be handed the cache directory so it can read itself. It carries
+ninety minutes, which is one end-to-end run of the Yellow line, and comes to
+16 kB on a cold start and about 23 kB once the history has filled — a hundred
+trips and sixteen hundred stop times, for all five lines. The cold-start consequence
+is visible and worth knowing about: for the first forty minutes after the
+fetcher is started, the left of the panel fills in from the now-line outwards,
+because there is no history yet to draw.
+
+**Trips have to be matched to a line, and the feed does not say.** BART's
+TripDescriptor carries a trip_id and nothing else — no route, no direction, no
+headsign. Two things recover it. First, a `trip_id → line` table baked out of
+the static schedule; trip ids are regenerated whenever BART publishes a new
+timetable, so this is only ever a *hint*, accepted when the live stop list is
+consistent with it (all stations on that line, running the right way round,
+ending at or before the scheduled terminal) and ignored otherwise. That check
+had to be loosened once: BART's feed drops a trip's **final stop a station
+early** — a Millbrae train's last update is SFO — and requiring an exact
+terminal match threw away a quarter of the feed. Second, failing the hint, the
+set of stations the trip calls at: a trip whose stops all lie on exactly one
+line is on that line. Run against the whole static schedule that is right for
+2384 trips, wrong for none, and undecidable for 346 — the SFO–Millbrae and
+Warm Springs–Berryessa shuttles, which really are on two lines at once. A trip
+neither method resolves is counted and dropped, never guessed at. Guessing
+would put a Red train on the Yellow diagram, which on a stringline is not a
+small error: it invents a headway that does not exist.
+
+**Station order and distance are baked**, in `stringline-lines.npz` (16 kB, all
+five lines, 105 platform ids and the trip hint table), because the static GTFS
+is an 892 kB zip that must never be on a fetch timer. The baker lives in the
+demo itself so that the asset and the code that reads it cannot drift apart:
+
+```console
+$ python3 stringline.py --bake-lines https://www.bart.gov/dev/schedules/google_transit.zip
+$ python3 ftdata.py --loop 60 --due --fast &     # this one wants a minute
+```
+
+Re-bake it when BART publishes a new schedule. Nothing breaks if you forget —
+the trip hints stop matching and the station-set fallback carries it — but a
+station that moves or opens will be missing until you do.
+
+**The panel is a sliding strip, which is the whole performance story.** A
+stringline is a picture in *absolute time*: a train that passed MacArthur at
+5:42 passed it at 5:42 no matter when you look at the panel. So the picture is
+never redrawn as the clock advances — it is **slid**. Everything, gridlines and
+clock ruler included, is rasterised once into a strip seven minutes wider than
+the panel, and a frame is two slices out of it: solid up to the now column and
+dashed after it, which works out to a fixed split because the now column never
+moves. That comes to **about ten numpy calls a frame regardless of how many
+trains are running**, against the several hundred line segments a naive redraw
+would need, and it also removes any possibility of the picture jittering — it
+translates by whole columns and by nothing else. One column is eighteen seconds,
+so it steps left three times a minute, which is the honest speed of the thing
+being drawn.
+
+The dots on the now-line are read straight out of the same rasterised field at
+the now column, rather than computed separately, so a dot **is** the place a
+string crosses the present moment and the two cannot disagree.
+
+The rebuild is one `np.interp` per train — a train is a *function* of time, in
+one place at any moment, so its whole diagonal falls out of a single
+interpolation onto the strip's columns instead of a segment-by-segment
+rasteriser. Thirty trains rebuild in 1.2 ms on a desktop; it happens once a
+minute, when a new record lands. Steady-state frames are 0.017 ms mean, 0.019
+p95, on the same machine.
+
+Three degraded states, all deliberate. No record at all draws `NO BART DATA`
+and the command that fixes it. A record older than its five-minute TTL still
+draws its trains — the geometry is still a true account of what was happening
+then — with `STALE` and the age on the header. And **BART is shut for six hours
+every night**, which is not an error: an empty record draws the grid, the
+station names and the time ruler with `NO TRAINS RUNNING` across the top, so
+the panel looks like a railway at three in the morning rather than like a
+crashed demo.
+
+Like `tide` and `adsb`, `render()` takes the present moment from the wall clock
+rather than from `t`, so it is not a pure function of its argument. `--at` and
+`--rate` move and scale its idea of now, which is how the contact sheets and
+the tests are made.
+
 ### caiso
 
 ![caiso](screenshots/caiso.png)
@@ -3167,6 +3477,186 @@ $ FT_DATA_CACHE=/tmp/empty python3 quake.py  # the no-data card
 $ python3 scripts/test-quake.py
 ```
 
+### helicorder
+
+![helicorder](screenshots/helicorder.png)
+
+Six hours of raw ground motion from a seismometer ten miles away, drawn as a
+drum recorder. Six traces, an hour each, oldest at the top, newest at the
+bottom, the pen at the leading edge of the data.
+
+`quake` is the other end of this pipeline and the two are deliberately a pair.
+That panel shows earthquakes *after* somebody's algorithm has decided they were
+earthquakes: located, magnitudes assigned, plotted as discs on a map. This one
+shows the measurement all of that is derived from — one station, one channel,
+the ground going up and down — before anything has been decided about it. The
+drum is one of the most recognisable scientific images there is, and it happens
+to fit a 5:1 letterbox exactly.
+
+**The quiet is the data.** Most of the time this panel is six ragged flat
+lines, and the raggedness is not instrument noise: it is the microseism, the
+whole Pacific coast ringing at five to eight seconds from swell hitting the
+continental shelf. It gets louder when there is weather offshore, and you can
+watch that happen over a few days. Nothing on this panel is more important than
+the fact that a normal afternoon looks like a normal afternoon, because
+everything the panel is for depends on the eye knowing what normal is.
+
+**The clipping is deliberate.** The vertical scale is fixed against the
+*background* — one trace lane is 2.5 times the background's own peak-to-peak,
+so a quiet hour fills about two fifths of its lane — and an event that will not
+fit is allowed to run out of its lane and scribble over its neighbours, in a
+warmer colour so it is obvious whose ink it is. That is what the paper ones do
+and what the framed ones in every seismology department look like. Rescaling to
+fit would be worse in both directions: it would flatten the background to a
+hairline on the rare days it mattered, and it would draw an M5 and an M2 at the
+same size with a different number on the axis. The overrun is capped at one and
+a half lanes, which is reached often — the M5.6 in the screenshot is five
+hundred times the background, or two hundred and sixty lanes of trace asking
+for twenty rows of panel — so the cap is doing real work and one local
+earthquake still cannot black out the whole picture.
+
+The screenshot is a real six hours: 04:00 to 09:20 Pacific on 24 June 2026,
+ending seventy minutes after the M5.6 near Redwood Valley, 190 km north. The
+lane it lands in saturates for the rest of that hour, which is the coda and the
+aftershock sequence and not a drawing fault — the columns after the burst sit
+at two to four times the background for another fifty minutes. It was captured
+by pinning `FT_HELICORDER_END=2026-06-24T16:20:00` (UTC), which is the
+fetcher's one testing lever and is unset on the wall.
+
+**Where the numbers come from.** BK.BRK, Byerly Vault, an STS-2 broadband
+seismometer under the UC Berkeley campus, 37.8735 N 122.2610 W — 17 km
+north-east of this building, close enough that anything the room would feel is
+emphatic on the trace, and a real instrument somebody could go and look at.
+BHZ is its 40 samples-a-second vertical channel. Berkeley runs its own network
+and NCEDC serves it over FDSN, keyless and with no signup:
+`service.ncedc.org/fdsnws/dataselect/1/query?net=BK&sta=BRK&cha=BHZ&...`. The
+data is about a second behind real time, which is startling the first time you
+notice it. BK.BRIB (Briones) and BK.BKS answer the same query shape if this
+vault ever goes off the air.
+
+**The one real cost was the compression.** NCEDC hands out miniSEED with Steim2
+compression and there is no ASCII option for this network — EarthScope's
+`irisws/timeseries` will serve ASCII but does not archive BK, only the global
+networks, and a panel captioned "the ground near you" showing a station in New
+Mexico would be a lie told to avoid writing a decoder. So `ftdata.py` has a
+Steim2 decoder in it, about a hundred lines: 64-byte frames of sixteen
+big-endian words, word 0 a map of two bits per following word saying how many
+differences that word holds, and the samples are the running sum of those
+differences with the first sample carried separately.
+
+Two things about it are worth writing down. The first is that **the
+differences are packed right-aligned against bit 0**, and the obvious thing to
+write — shift down from bit 31 — decodes every record into a plausible-looking
+wiggle of entirely invented numbers, because for the two- and three-nibble
+cases the top two bits are a sub-type field and the differences live in what is
+left. Seven 4-bit differences occupy bits 0–27 and bits 28–29 are simply
+unused. The second is that **the format carries the answer**: each record
+stores its own last sample redundantly in the header frame, the reverse
+integration constant, for no other reason than to let a decoder prove it walked
+the differences correctly. It is asserted on every record and a mismatch
+raises, so a subtly wrong decoder cannot quietly become six hours of fiction.
+`scripts/test-helicorder.py` round-trips the decoder against a Steim2 *encoder*
+written for the test, over a series chosen so that all seven packings are
+exercised, and separately checks that corrupting that constant is refused.
+
+The decoder is vectorised rather than looped because it runs on the wall's own
+Pi: six hours is 864,000 samples, and a per-sample Python loop is a minute
+there against about eighty milliseconds like this.
+
+**What is stored is an envelope, not a waveform.** Six hours of BHZ is 1.7 MB
+of miniSEED and what the panel can draw is 1800 columns one pixel wide, so each
+12 seconds is reduced to its minimum and its maximum — which is exactly what a
+pen does, and is the one decimation that does not lie about amplitude. A mean
+would flatten every burst and a subsample would hit or miss one at random. That
+is 3600 numbers, about 23 kB of JSON, and it is the whole six hours at the
+finest resolution the panel has.
+
+**It tops up rather than refetching.** The columns are anchored to absolute
+12-second bins, so a fetch five minutes after the last one asks NCEDC for five
+minutes — 23 kB — and slides the stored columns along by the number of bins the
+window moved. A cold start, or a gap longer than the window, fetches the whole
+six hours once. Refetching six hours every five minutes would be 20 MB an hour
+off the shop wifi to receive the same 1.7 MB seventy times over; this is 280 kB
+an hour. The fetch function takes `cache_dir` for this reason and is flagged as
+a blob product to get it, which is the only hook `fetch()` has for "this
+fetcher needs to read its own last record". It writes no sidecar.
+
+The baseline is removed before storing. A broadband vault wanders a couple of
+thousand counts over six hours with the temperature and the tide, which at this
+scale is half a lane of slow drift that has nothing to do with anything, so a
+two-minute box smoothing of the column midpoints is subtracted. That is the
+modern version of the pen's zero adjustment, and nothing a local earthquake
+does is slower than two minutes.
+
+**The events are borrowed, not refetched.** `quake-usgs` is already in the
+cache with a week of located events in it, so any event that falls inside the
+window is marked on the trace — a dark bar under the ink with a bright cap
+above and below the lane — and the largest one gets its magnitude and place in
+the header. Two details make the marks honest rather than decorative. They are
+slid from origin time by the P-wave travel time at 6.1 km/s, so the mark lands
+where the ground here started moving rather than where the earthquake started,
+which at 200 km is thirty seconds and a couple of columns. And an event is only
+marked if its magnitude clears **two plus a hundredth per kilometre** of
+distance: the catalogue is complete to about M1 around here and a quiet week
+holds a couple of hundred events inside 300 km, nearly all far too small to
+have reached this vault. An M2.5 at Willits is 190 km of rock away and is not
+on this trace at any scale; marking it would be the panel claiming something
+the picture does not show, which is the one thing a raw-data panel must not do.
+That record belongs to `quake` and is never written here; if it is missing the
+marks go and nothing else does.
+
+**The vertical scale is stated in real units.** The instrument response comes
+out of NCEDC's station service — 2.53×10⁹ counts per metre per second for this
+vault, and it has changed eight times since 1996, so the epoch covering the
+data is the one used — and the axis strip says what one full lane is worth in
+microns per second peak to peak. Around 2.5 µm/s on a quiet day. A wiggle
+nobody can put a number on is decoration.
+
+**The three states.** Fresh draws normally with the fetch age in the corner.
+Past the 1800 s TTL the corner says `STALE` in red and the drum keeps drawing,
+because six hours of ground motion does not stop being six hours of ground
+motion and every lane is labelled with the hour it belongs to. A gap inside the
+window — the station down, the request truncated — is drawn as a red dash on
+that lane's zero line rather than as a flat trace, which would be the panel
+claiming the ground was still when in fact nobody was listening. The pen sits
+at the end of the *data*, so if the fetcher stopped an hour ago the last lane
+stops an hour short and the gap is visible. No record at all, a corrupt one or
+one with no samples in it gets a clean `NO SEISMOGRAM` card.
+
+**Motion.** The drum draws itself in reading order when the segment starts,
+line by line, at about six hours in two and a half seconds, with the pen at the
+writing point. It is the one animation this subject actually asks for, and it
+is the reason `build()` bakes seven frames instead of two: a line's ink can
+overrun into the line *below*, which has not been written yet, so the
+half-drawn drum is not something the finished picture can be masked back into.
+`stack[i]` is the paper with lines 0..i on it, `render()` takes everything left
+of the pen from `stack[lane]` and everything right of it from `stack[lane-1]`,
+and cutting the picture at the pen's column rather than at the lane's rows is
+what makes the overrun appear exactly when the pen reaches it. Two whole-frame
+slices, no mask. Afterwards a slow sheen crosses the paper and the pen
+breathes; both are functions of the segment's own `t`, so the preview baker and
+the wall see the same animation.
+
+**Frame budget.** Everything is baked. `render()` is one frame copy plus either
+two slice assignments (revealing) or a multiply-and-add over a 40-column window
+(the sheen), plus two short column writes for the pen — six or seven numpy
+calls, and numpy costs tens of microseconds a call on the wall whatever the
+array size, so the call count is the budget and not the pixel count. Measured
+over fourteen hundred frames here: **mean 0.021 ms, p50 0.023, p95 0.031, p99
+0.036**, worst frame 0.083 ms; the reveal is cheaper than the steady state at
+0.005 ms mean. `build()` is 3–5 ms, once, on the scheduler's worker thread. The
+fetcher's cold pass is 1.7 MB and about a second of network plus 80 ms of
+decode here, which is the only part of this that will be noticeably slower on
+the Pi — and it happens once, in another process.
+
+Run:
+
+    python3 ftdata.py --once --only helicorder-bk
+    python3 helicorder.py --host 127.0.0.1
+    python3 helicorder.py --gain 1.5          # a louder trace
+    FT_DATA_CACHE=/tmp/empty python3 helicorder.py     # the no-data card
+    python3 scripts/test-helicorder.py
+
 ### sats
 
 ![sats](screenshots/sats.png)
@@ -3426,6 +3916,685 @@ $ python3 ftdata.py --once
 $ python3 ships.py --at '2026-09-14 10:00'      # a busier week
 $ python3 scripts/test-ships.py
 ```
+
+### bikes
+
+![bikes](screenshots/bikes.png)
+
+San Francisco's shared bikes, drawn as what they actually are: a fluid on a
+hillside. Bay Wheels is less a fleet of vehicles than a tide — every weekday
+morning the city's bikes get ridden downhill and eastward into the financial
+district, and every evening they come back up, while the operator's vans push
+them the other way in between. The count of bikes in the city barely moves. What
+moves is *where they are*, and a station at zero bikes and a station with no free
+dock are both failures that a total cannot show. So the panel is a hill: all 383
+San Francisco docks laid out left to right in order of **ground altitude**,
+Embarcadero and Mission Bay at three metres on the left, Twin Peaks and Buena
+Vista at a hundred and fifty on the right. The ridge is the city's own
+hypsometry. Each dock colours the strip of ridge it sits on — hot amber where it
+is dry, quiet teal where it is healthy, cold blue where it is jammed — and the
+big number in the sky says how far the whole fleet has slid.
+
+**Why a hill and not a map.** A map of the Bay with dots on it is what `adsb`
+already draws, and `adsb` is about individual objects with velocity vectors,
+which this is the opposite of: a slow scalar field over three hundred fixed
+locations. But the stronger argument is that geography is not the variable that
+explains this data and altitude is. Bikes roll downhill for free and have to be
+pedalled, or trucked, back up, so gravity is the force the whole system spends
+its day losing to, and putting gravity on the x axis is what makes the fight
+visible. A map would spend three hundred columns saying that San Francisco is
+seven miles square, and would put a station on Nob Hill two pixels from one at
+the foot of it. Sorting by height puts them at opposite ends of the panel, which
+is where they belong. The cost is that the picture is not a place — you cannot
+find your own dock on it — and that is a real loss, taken deliberately.
+
+**The number in the sky is the fleet's centre of mass.** The record carries two
+averages: the mean altitude of a bike you could go and unlock, and the mean
+altitude of a *parking space*, which is where the fleet would sit if it were
+spread evenly across the docks. The difference is the headline, in metres.
+Negative — the usual state by teatime — means the fleet has run downhill and the
+hills are running dry. It is deliberately a metre count and not a bike count, so
+it does not move when the operator adds a hundred bikes to the city overnight:
+this panel is about *distribution*, which is the thing that actually fails, and
+a number that mixed distribution with fleet size would be neither.
+
+**The source.** GBFS, the open bikeshare standard, keyless and with no signup, at
+`gbfs.lyftbikes.com/gbfs/en/` — note that `gbfs.baywheels.com` 301-redirects
+there, so the demo uses the destination directly. Three files a pass:
+`station_information.json` (348 kB, near-static: names, coordinates,
+capacities), `station_status.json` (243 kB, regenerated every minute: bikes and
+docks per station) and `free_bike_status.json` (200 kB: the undocked ebikes).
+790 kB every ten minutes is 1.3 kB/s averaged, about half what `quake` costs.
+`station_information` could be fetched far more rarely, and the first draft did;
+re-fetching it every pass is what makes a newly-installed dock appear correctly
+instead of being silently dropped, and 348 kB is not worth a staleness bug.
+The record that comes out is **6.8 kB** — four arrays over the stations inside
+the city, sorted by height, a 64-bin histogram of the loose bikes, and two dozen
+scalars. The arrays stay per-station rather than being binned into panel columns
+by the fetcher, for the same reason `caiso-mix` stores thirteen fuels and not
+five bands: how to bin them is a drawing decision and belongs where it can be
+argued with.
+
+**GBFS has no elevation in it, so the elevation is baked.** `demos/bikes-terrain.npz`
+carries the ground height of all 634 system stations, keyed by station id.
+
+    source     opentopodata.org public API, dataset ned10m — the USGS 3D
+               Elevation Program 1/3 arc-second seamless DEM, ~10 m posting,
+               public domain, keyless
+    stations   gbfs.lyftbikes.com/gbfs/en/station_information.json
+    retrieved  2026-08-10, 100 locations per request at 1 request/second
+    arrays     ids, elev (m), lat, lon, meta (the recipe, as text)
+    licence    public domain (USGS); Bay Wheels GBFS is published openly
+
+Baked rather than fetched because a terrain service is a second thing that can
+be down and the ground does not move. A station the bake has never heard of —
+one installed since — takes the height of the nearest baked station, which in a
+city with a dock every few blocks is a great deal better than dropping it, and
+is counted in the payload as `interpolated` so the number is checkable. Note the
+`aster30m` dataset, which is the obvious first choice, is wrong here by ten
+metres at the waterfront: it reads 11 m at Embarcadero and Bay where NED reads
+2.8. On a panel whose whole low end is the interesting part that is not a
+rounding error. There is no `scripts/make-bikes-terrain.py` in the tree because
+adding one was outside the file list this demo was written under; the recipe
+above is complete and reproduces the file exactly.
+
+**The crop is San Francisco only.** Bay Wheels is one system covering four
+separated cities — SF, Oakland/Emeryville/Berkeley across the bay, and San Jose
+fifty miles south — and they do not share a commute, a terrain or a tide.
+Putting them on one altitude axis would sit a San Jose dock at 25 m next to a
+Nob Hill dock at 25 m and mean nothing by it. The box (37.700–37.840 N,
+122.530–122.350 W) is the city and county plus the handful of Daly City docks on
+its south edge: 383 of the system's 634 stations, and the ones whose hill is the
+story. The other 251 are in the elevation bake, so changing the crop is one
+constant.
+
+**The occupancy ramp is diverging and its middle is the dimmest part of it.**
+Empty and full are both failures and both have to be visible; a dock that is
+between a fifth and four fifths full is working and nobody needs to look at it.
+So the ramp runs hot amber at zero, through a quiet dark teal across the whole
+healthy middle, to a cold near-white blue at capacity, and what glows on the
+panel is what is wrong. Warm-is-empty is the convention every dock map uses and
+was not worth being clever about. Individual failures also get their own marks,
+because a column is one or two docks wide and averaging can hide a single dry
+one: a dry dock flies a two-pixel flag above the ridge, which *pulses* — the
+only animation here that carries meaning rather than merely proving the panel is
+alive — and a jammed one bites two pixels down into the rock.
+
+**The vertical scale is a square root, and the gridlines say so.** Half of San
+Francisco's docks are below 21 m. Drawn linearly the entire interesting low city
+is squashed into six rows and the panel is a flat line with a spike on the end;
+under a square root it is a hill. The contours are labelled in metres so the
+compression is declared rather than hidden.
+
+**The mist above the ridge is a different fleet.** Several hundred ebikes are
+parked loose at the kerb rather than in any dock, and they are a genuinely
+different population: nobody rebalances them, they simply pile up wherever the
+last rider left them. Having no dock, they have no altitude of their own, so each
+takes the altitude of its nearest station and the histogram of that is stippled
+at quarter density over the ridge. Where the mist is thick, loose bikes have
+collected. It is drawn three rows clear of the crest and never on it — a
+one-row error there would replace the occupancy colours with grey stipple and
+read as "quiet" rather than as "missing", which is the failure mode the test
+script checks for by name.
+
+**The feeds have no history, so the fetcher grows one.** `station_status` is a
+snapshot, and the commute pump is only visible over a day, so each pass appends
+one sample to a rolling series inside the record: ten-minute buckets keyed on
+absolute epoch, 24 hours, capped at 150 entries and trimmed on every write. That
+keying is what makes every failure mode benign. A pass that runs twice inside one
+bucket overwrites instead of lengthening the series; a missed pass leaves a hole,
+and the hole is *visible* because the epochs are stored rather than assumed
+regular; a clock that jumps backwards — a Pi with no RTC getting NTP for the
+first time after boot — drops the future rather than leaving the series in an
+order the demo would draw as a scribble. It is also the one product here that is
+deliberately **not** `volatile`: the accumulated day is the only thing in this
+cache that cannot be re-fetched, so it goes on disk and survives a reboot.
+
+The lane draws that series as a signed area against the docks' own altitude, and
+it **does not join up its gaps** — an hour when the fetcher was not running is
+left blank rather than bridged, because the whole reason the series exists is to
+show a shape and an interpolated shape is an invention in the shape of data. On a
+cold cache almost the whole lane is gap, the caption reads `24H TRACK BUILDING`,
+and it fills in over a day. The lane is scaled to the range the day actually had
+rather than symmetrically around zero: in this city the fleet is below its docks
+almost every hour of every day, so a zero-centred lane would leave half its
+thirteen rows permanently blank and squeeze the few metres of daily swing —
+which is the entire signal — into six. Zero is forced to stay inside the range,
+so the reference line is always drawn and the sign is never in doubt.
+
+**Three data states, and a fourth that is worse than stale.** Past its
+half-hour TTL the panel still draws, with the age and `STALE` in red, because a
+twenty-minute-old occupancy map is nearly right. Past `--max-age` (six hours) it
+is refused outright and gets a no-data card naming the age: by then every dock
+that was dry has been refilled, and a confident hillside of this morning's
+colours is the one lie this panel could tell. No record at all gets the same card
+and the command that fixes it.
+
+**Frame budget.** Everything is baked in `build()` — ridge, rock, contours,
+occupancy colours, mist, flags, lane, legend and header are rasterised once into
+two uint8 frames. `render()` copies one, runs the sheen over a 32-column window
+(one multiply, one add, one copy), writes the dry flags at a pulsing brightness
+through a single fancy index, and draws the now-line in the lane. Eight or nine
+numpy calls a frame, and the cost model on the wall is calls and not pixels.
+Measured here over 3000 frames: **mean 0.026 ms, p50 0.027, p95 0.036, p99
+0.048**, worst frame 0.067. `build()` is 2.0 ms. Even at a hundredfold that is
+under 4 ms of a 50 ms budget. `render` is a pure function of `t` with
+`--reload 0`, and the test script asserts it; with the default `--reload 300` it
+asks the wall clock whether to re-read the cache, exactly as `caiso` does.
+
+**What was hard.** Three things, all of them about the ridge. Laying stations
+out by *metre* rather than by rank piles two hundred docks into the leftmost
+fifty pixels and leaves the right half of the panel empty, so the x axis is
+rank and the ridge is the sorted profile — which has to be said out loud,
+because it looks like a cross-section of the city and is not one. Drawing the
+ridge one pixel per column gives a dotted line wherever the hill is steep, with
+sky showing through it, so the surface is a band from the ridge row up to
+halfway towards its higher neighbour. And the per-column aggregation started as
+`np.add.at` and then `np.add.reduceat`; the first is startlingly slow and the
+second is simply wrong here, because the column slices overlap wherever a column
+gets fewer docks than the one before it and `reduceat` can only sum between
+consecutive start indices. It is a differenced prefix sum now, which is exact
+and has no loop in it.
+
+**One disclosure about the screenshot.** The hill, the numbers and the mist are a
+real Bay Wheels snapshot. The 24-hour lane under it is synthesised, because the
+series accumulates ten minutes at a time and this panel was written in an
+afternoon; the first real day of it appears on the wall a day after the fetcher
+starts.
+
+    python3 ftdata.py --once --only baywheels
+    python3 bikes.py --host 127.0.0.1
+    FT_DATA_CACHE=/tmp/empty python3 bikes.py      # the no-data card
+    python3 scripts/test-bikes.py
+### bgp
+
+![bgp](screenshots/bgp.png)
+
+The internet's routing table, churning, as San Francisco's own exchange hears
+it. Fifteen minutes of the global default-free zone across 320 columns, second
+by second, with a ticker of the actual prefixes scrolling underneath. The number
+in the corner is how many prefixes a second are being announced or withdrawn to
+the RouteViews collector at SFMIX — which is a couple of miles from the wall and
+is where the makerspace's own ISP hands its traffic off. The routes on this
+panel are the ones the room's packets are steered by, which is not a claim any
+other vantage point could make.
+
+BGP never stops. Somewhere on earth a network announces or withdraws a prefix a
+few thousand times a second, most of it churn from a handful of unstable origins
+and occasionally something that matters, and the shape of that noise is the only
+thing this panel is trying to say: **a constant hiss with structure in it.** A
+quarter of an hour of it is a floor of a hundred-odd prefixes a second with
+spikes an order of magnitude above it, and every spike is a real event — a
+session that reset and re-sent its whole table, a network that flapped,
+somebody's maintenance window.
+
+**This is the one panel on the wall showing infrastructure its audience
+operates, and that makes the honesty load-bearing.** There are already five
+demos here in the green-on-black terminal register — `wardial`, `ansi`, `wopr`,
+`defcon`, `sneakers` — and every one of them is a prop with invented numbers in
+a hacker-movie typeface. This one deliberately borrows the same visual language
+and then has to earn its way back out of it. So the prefixes in the ticker are
+literal strings out of the MRT dump, the AS numbers are real and lookupable,
+IPv6 is in there because the real table is half IPv6, and the awkward numbers
+are left on the screen rather than smoothed off. Somebody who knows what
+`2a14:67c3:ff0::/44` is can check this panel against their own looking glass and
+find it correct. That is the test it is built to pass.
+
+**Why the data is a quarter of an hour old, on purpose.** The obvious source is
+RIPE's RIS Live, which streams the whole DFZ over plain HTTP as
+newline-delimited JSON and would put the panel a second behind the world. It was
+tried first and rejected twice over. Unfiltered it delivered **78 MB in 25
+seconds**, which is not going near a Pi on shop wifi; and any affordable use of
+it is *sampled* — open the socket, read twenty seconds, close it, and be blind
+for the other hundred and sixty. A burst lasting a minute would simply not
+appear, and a chart that silently omits the interesting parts is worse than a
+coarser one that does not. RouteViews has the opposite shape: every collector
+writes a complete MRT dump of every update it saw in each fifteen-minute window
+and publishes it about a minute after the window closes, bzip2'd. One 1.2 MB
+file buys **the entire window** — 75,000 messages, 150,000 prefixes, per-second
+resolution, nothing sampled away. Trading fifteen minutes of latency for a chart
+with nothing missing from it is the right trade for a panel about texture, and
+the age is on the screen in any case.
+
+Two things had to be measured rather than assumed, and both are in `ftdata.py`:
+the RIS Live filters go in an `X-RIS-Subscribe` **header** and not in the query
+string (the query-string forms are silently ignored — a `host=rrc11` parameter
+changes nothing and you get the firehose), and `socketOptions.includeRaw` does
+not work on the HTTP streaming endpoint at all, so every message carries its own
+hex-encoded wire form whether you want it or not. That is roughly half the
+bytes. RIPEstat was also tried and timed out twice at 25 s from this machine
+while every other RIPE endpoint answered, so nothing here is built on it.
+
+**MRT is parsed by hand, in `ftdata.py`, and that needs justifying.** The usual
+answers are `libbgpstream` and `mrtparse`; the first is a C library with a
+build, the second a dependency tree, and neither is going on a Pi to do
+something this file already does for the Port's cruise PDF. The wire format is
+RFC 6396 for the framing and RFC 4271 plus RFC 4760 for the UPDATE inside it,
+and the part a churn counter needs is small: walk the record frames, find the
+BGP UPDATEs, count the prefixes in the withdrawn block, the NLRI block and the
+two multiprotocol attributes, and read the AS_PATH. What is deliberately *not*
+implemented is everything else — communities, MED, aggregators, the two-byte-ASN
+subtypes nobody has emitted this decade. An attribute the parser does not
+understand is stepped over by its own length field, which is why an unknown one
+cannot desynchronise the walk.
+
+It is also where all the plausible wrong answers live, so it is the part with
+the most tests. `scripts/test-bgp.py` builds MRT byte by byte and asserts
+against arithmetic, because every one of these failures draws a panel that looks
+completely fine:
+
+  * **A miscounted prefix block.** NLRI is a length-in-*bits* byte followed by
+    that many bits rounded up to whole octets, with the trailing zero octets
+    left off the wire entirely. Get the rounding wrong and the walk
+    desynchronises, the rest of the record is garbage, and the chart is just a
+    different height. There are `/22` and `/25` cases in the tests for exactly
+    this: a `/25` is on the wire as four octets and a `/22` as three.
+  * **IPv6 silently missing.** v6 routes are not in the NLRI field at all; they
+    ride inside `MP_REACH_NLRI`, which is an *optional* attribute. A parser that
+    skips attributes it does not recognise — which is what a parser must do —
+    drops half the real table and reports a perfectly plausible rate.
+  * **The AS path read off the wrong end.** The origin is the last ASN of the
+    last segment. Reading the first gives the peer, and the ticker then
+    confidently prints the collector's own neighbours as the origin of
+    everything on the internet.
+  * **The ET record variant.** Real RouteViews files are 100% type 17, which is
+    type 16 with four extra bytes of microseconds ahead of the body. Four bytes
+    of offset error lands the parser in the middle of a peer address.
+
+**The axis is square root, and it says so.** This was the one real design
+problem. BGP churn is a floor around 150 prefixes a second with spikes twenty
+times that, and a linear axis fitted to the spikes draws the floor — the panel's
+entire subject — as one row of green along the bottom with no texture in it at
+all. The first version did exactly that and was unreadable. Fitting the axis to
+the floor instead clips every spike flat, and the spikes are the events. Log
+would be the usual answer for a rate and cannot be used here, because a stacked
+area cannot be drawn on a log axis: a zero has nowhere to go, and half the
+columns have no withdrawals in them. Square root splits the difference the way
+this data wants — the floor lands around a fifth of the height with its texture
+intact and a twentyfold spike still reaches the top.
+
+A non-linear axis that does not admit it is a lie, so there are **two** numbers
+down the left edge instead of one: the full scale and the value at half height.
+Under this transform the half-height number is a *quarter* of the full scale,
+not a half, and anybody who reads both discovers the axis in about a second —
+which is exactly the audience this panel has. The ladder the full scale rounds
+onto has 1.5, 3 and 7 on it as well as the usual 1, 2 and 5, which is not
+decoration either: a 1/2/5 ladder rounds a 2760/s peak up to 5000, and on a
+square-root axis that leaves the tallest event of the quarter hour at three
+quarters of the height with a quarter of the chart permanently empty above it.
+
+**Withdrawals get their own colour and the bottom of the stack.** They are about
+five per cent of prefix churn and they are far more likely than an announcement
+to be somebody's outage, so folding them into one line would hide the only part
+of this number that is unambiguously bad news. They are underneath rather than
+on top because they are the smaller quantity and a two-pixel band floating on a
+moving surface cannot be read, whereas one sitting on the floor has a straight
+edge to be measured against. Their band has a **one-row minimum** wherever there
+were any at all: a single withdrawn prefix in a 900-second window is four
+ten-thousandths of a row, and an outage that vanishes from the chart because it
+was small is precisely the failure this panel must not have.
+
+**The ticker is a reservoir sample, and that is a real distortion worth naming.**
+Its 48 lines are drawn from across the whole fifteen minutes rather than off the
+front, because the front of a window is regularly one router dumping its table
+and forty-eight lines of the same peer is not what the routing table looks like.
+Announcements and withdrawals go into the *same* reservoir at their true
+proportions, which means most windows have one or two amber lines in the loop
+and some have none — that is correct, and the chart is what carries the real
+ratio. What the ticker cannot show is a prefix's second announcement: only the
+first prefix of each UPDATE becomes a line, so a message announcing six prefixes
+contributes one. The chart counts all six.
+
+A withdrawal line names the **peer** that sent it and says `WDR BY`, because a
+withdrawal genuinely has no origin — an UPDATE that withdraws a prefix carries
+no AS_PATH, there being no longer a path to describe. Inventing one from a
+previous announcement would be the exact kind of plausible lie this panel exists
+not to tell. AS path prepending is collapsed on the way to the screen: a path
+like `[16582]×9` is one network saying one thing nine times and costs 36 pixels
+of a ticker line to say nothing.
+
+One detail worth knowing, since it looks like a bug and is not: **Monkeybrains'
+own prefixes never appear on this panel.** AS32329 did not show up once in a
+sampled window's 2,261 distinct ASNs, and that is the system working — a stable
+route generates no churn, and the whole panel is a picture of instability.
+Everything on it is, by construction, somebody having a worse day than the
+makerspace's ISP.
+
+**Frame budget.** Everything is baked in `build()`: the header, the chart, the
+legend and the entire ticker are rasterised once into a static frame and one
+tall strip, which is what makes the scroll two slice copies a frame rather than
+a re-render. `render()` does one copy of the top of the panel, one window into
+the strip, and three short writes for the pulse — five or six numpy calls, and
+the cost model on the wall is calls and not pixels. Measured over a full 1200
+frame (60 s) loop on the desktop this was written on: **mean 0.004 ms, p50
+0.004, p95 0.004, p99 0.006**, worst frame 0.022 ms. `build()` is about 4 ms.
+Even at two hundred times slower this is under a millisecond a frame against a
+50 ms budget, and the only thing that could change that is the ticker strip
+growing, which it cannot — it is 48 lines by construction.
+
+`render()` is a **pure function of `t`** and is asserted to be: a cold
+`render(7.3)` is byte-identical to the same moment reached by driving from zero.
+The scroll and the pulse are both driven by the segment's own `t` and never by
+the wall clock, which is what makes them the same animation on the wall and
+under a preview baker rendering a hundred frames in a millisecond. The only
+clock read is the periodic cache re-read, same as `caiso`.
+
+**Three states.** Fresh is the panel above. A record past its 45-minute TTL
+still draws — a picture of the routing table from an hour ago is still a picture
+of the routing table — with `STALE` and the age in red in the header, because
+the one thing this panel must never do is imply that a flat stretch is happening
+now. No record at all gets a no-data card. All three are rendered in separate
+processes by the test script, since `ftdata.CACHE_DIR` binds at import and
+reloading the module in one process does not test what it looks like it tests.
+
+The fetcher pulls one file every 15 minutes on the collector's own cadence,
+turning 1.2 MB of bzip2 (12.5 MB of MRT, 75,000 records) into an 11 kB record.
+Both ends are capped — `BGP_MAX_BZ2`, `BGP_MAX_MRT`, `BGP_MAX_RECORDS` — at
+roughly five times normal, so they never fire in ordinary operation and do fire
+on the day a collector emits a pathological window; a capped parse says so in
+the record and its rates are computed against the span actually parsed rather
+than the fifteen minutes it was supposed to be. `FT_BGP_COLLECTOR` and
+`FT_BGP_SITE` move the vantage point, since every RouteViews collector publishes
+the identical layout and somebody forking this wall for another city should not
+have to edit code.
+
+    $ python3 ftdata.py --once --only bgp-sfmix
+    $ python3 bgp.py --host 127.0.0.1
+    $ FT_DATA_CACHE=/tmp/empty python3 bgp.py      # the no-data card
+    $ python3 scripts/test-bgp.py
+### sfmix
+
+![sfmix](screenshots/sfmix.png)
+
+A NOC weathermap for the San Francisco Metropolitan Internet Exchange: the
+oldest picture in network operations, drawn for the exchange this wall's owner
+helps run. The fibre goes where the fibre actually goes, each span is coloured
+by how much traffic is on it, and light runs along it at a speed proportional
+to that traffic, so the map is alive rather than a diagram. Five metros from
+San Francisco down to San Jose, the five inter-metro trunks between them, and
+on the right the number an exchange is judged by — how many bits are crossing
+it right now, today's curve, and where the peak was.
+
+**The data is the exchange's own, from three keyless endpoints.**
+`portal.sfmix.org/statistics/map/map.json` is the public structure: twelve
+sites, five metros, twenty-two cables, and — the part that matters here —
+`metro_cables`, pre-aggregated inter-metro trunks carrying their real coarse
+fibre routes as lon/lat polylines. `/statistics/map/traffic` is live bits per
+second per opaque cable id. `/statistics/metrics/?panel=ix_total&range=24h` is
+the aggregate, ingress and egress summed over every member port at 300 s
+resolution. Nothing needs a key and nothing here is private: the precise
+carrier geometry and the cable-id-to-circuit mapping live in files the portal
+never serves, and this panel never asks for them.
+
+Both map.json and the traffic feed carry a `generation` string, and the fetcher
+treats it as a **safety interlock rather than a version number**. The cable ids
+are opaque *per generation* — rebuilt from scratch every time the portal re-runs
+its NetBox build — so traffic joined onto the wrong generation does not fail
+loudly, it quietly colours trunks with numbers belonging to other trunks. The
+two are fetched, compared, and the structure refetched once if they disagree
+(the ordinary race: the builder republished between the two GETs). A second
+disagreement raises, and `fetch()` keeps the last good record.
+
+About 135 KB of JSON becomes a 7 KB record. The twelve sites collapse to five
+metros, because at this scale — eighty kilometres across two hundred columns,
+so a third of a kilometre a pixel — the six Santa Clara facilities are the same
+pixel and the six intra-metro cables between them are zero pixels long. The per
+link 24-hour series and per-member breakdowns go entirely. The routes are
+Douglas–Peucker simplified from 846 vertices to 153 at a tolerance of a third
+of a pixel. The aggregate curve is bucketed from 289 points to 97 taking each
+bucket's **maximum**, and the true peak and its timestamp are carried
+separately, because the peak is the whole point of the curve and a decimation
+that shaved it would be the one lie this record could tell.
+
+**The map is turned forty-five degrees, and that decides the entire layout.**
+SFMIX's footprint is a corridor — San Francisco and Oakland at the top, then
+Fremont, Santa Clara and San Jose strung down the south bay. North up, that
+cloud is 56 × 64 km: very nearly square, and a square on a 5:1 letterbox wastes
+three quarters of the wall. Turned 45°, it is 82 × 23 km, an aspect of 3.62
+against the map pane's 3.6, and it fits **at true scale in both axes with
+nothing stretched**. The rotation is not a stylistic choice, it is the only way
+this geography is a letterbox. So the arrow bottom-right says where north is
+and the bar bottom-left says how far ten kilometres is, and it stays a real
+map: anisotropic scaling would have filled the box exactly and would silently
+have been a lie about distance, so the slack went into margin instead.
+
+The alternative was the schematic subway diagram the portal itself draws when
+zoomed out, which is more legible in the abstract and throws away the one thing
+this particular audience already knows by heart — the shape of their own bay.
+The coastline is the label that needs no text, and it is why the Dumbarton
+crossing on the San Francisco–Fremont trunk reads as a bridge rather than as a
+line that happens to bend.
+
+**Two strands per trunk, because in and out are different numbers.** A
+weathermap has split every link into two half-arrows since MRTG, and the reason
+is that a link is not one quantity: San Jose–Fremont was carrying 118 Gb/s one
+way and 67 the other while this was written, 19.6% and 11.2% of the same 600
+Gb/s of fibre. So each trunk is two parallel one-pixel tracks either side of its
+route, each coloured by *its own* direction's load, with light running along it
+in that direction. The counter-flow reads from across the room, and the busier
+half is both the warmer one and the faster one.
+
+**The colour ramp is the portal's own, compressed four-fold, and the legend
+says so.** SFMIX's map colours 0–80% blue-green-yellow-orange-red, which is the
+right scale for a map you lean into and can spot a link about to melt. An
+exchange deliberately overbuilds its backbone, so on that scale every trunk
+here is blue, all day, forever — a dead panel that is also uninformative. This
+one keeps the five hues and runs them **0 to 30 per cent**, which is where the
+traffic actually lives: on a normal evening the quiet Santa Clara–San Jose
+trunk is blue at 2.5%, San Francisco–Santa Clara is a yellow-green 11.9%, and
+San Francisco–Fremont is orange at 24.3%. The ramp is drawn bottom right with
+its numbers on it, because a colour scale without its numbers is decoration.
+The compression is honest in the direction that matters: nothing on this panel
+can look calmer than it is, and 30% or more clamps to red rather than wrapping.
+The scale is fixed and not derived from the day's own maximum — a traffic light
+whose boundaries move with the traffic is not a traffic light.
+
+**Three things are deliberately not the ramp.** A `planned` trunk — San
+Francisco–Oakland, in the structure and not yet lit — is dashed in the portal's
+own slate blue, outside the ramp entirely, and carries no light; colouring an
+unlit fibre "0%, healthy blue" would be the easiest lie available here. A trunk
+whose members reported nothing at all is grey, which is a different statement
+from zero. And a direction genuinely measured at zero *is* drawn at the bottom
+of the ramp, because zero is a fact — but it gets no comets, since running
+light along it would say bits are moving when the measurement says they are not.
+
+**The right third is the aggregate.** Total exchanged right now, at 2x, large
+enough to read from the far bench; today's 24-hour curve under it with the peak
+marked as a dotted rule and labelled with its clock time; the time axis
+captioned inside the chart at both ends because 64 rows had exactly one row
+spare and the legend needed it. Ingress and egress across the whole exchange
+agree to two parts in ten thousand — which is what an exchange *is* — so it is
+one curve and the word is "exchanged" rather than a side picked arbitrarily.
+The curve is zero-based: a traffic curve zoomed onto its own top few per cent is
+the classic way to make a flat day look like an event.
+
+**What was hard.** Captions. Five three-letter metro codes on an 80 × 23 km map
+collide with each other and land on top of the trunks, and five-pixel white type
+over a yellow cable is unreadable in a way a screenshot at 3x hides completely.
+Two things fixed it: every caption gets a one-pixel dark halo around each
+stroke, and each one is placed at whichever of four fixed offsets has the fewest
+lit pixels already under it — scored against the half-drawn frame, so San Jose's
+caption steps off the orange trunk that terminates on it. It scores once and
+does not iterate, so a given metro's caption is in the same place every build.
+
+The other one was the flow direction, and it is exactly why `test-sfmix.py`
+exists. `render()` lights a pixel where `(s + speed·t) mod period` is near zero,
+so the lit position along a strand is `s = −speed·t` and the sign that sends a
+comet from a to z is a *negative* speed. The first version negated both the
+phase and the speed for the reverse strand — which looks like the symmetric
+thing to do, is a no-op on direction, and sent both tracks of every trunk the
+same way. It is undetectable in a still frame and very hard to see in motion.
+The test builds a synthetic trunk carrying traffic in one direction only,
+identifies the comet pixels as exactly the pixels where the rendered frame
+differs from the baked one, and measures a **circular** mean of their positions
+modulo the comet period — a plain centroid jitters backwards at random as the
+leading comet leaves the end while the next enters, and a test built on one
+passes or fails by luck.
+
+**Frame budget.** Everything is baked in `build()`: the sea, the shoreline, all
+ten strands, the nodes, the captions, the header, the chart and the legend go
+into one uint8 frame. `render()` does a full-frame copy, six arithmetic passes
+over a flat array of the 1170 pixels that carry flowing light, one fancy-indexed
+write of those pixels, and a one-pixel dot on the chart — ten numpy calls, all
+into preallocated buffers, nothing that formats a string or allocates, and
+nothing that depends on how many comets happen to be lit. Over 1200 frames on
+the development machine: mean 0.027 ms, p50 0.026, p95 0.029, p99 0.039, worst
+0.057. `build()` is 4–5 ms, once, on the scheduler's worker thread, most of it
+resampling the coastline.
+
+`render` is a **pure function of `t`**, which is unusual for a data panel here
+and is asserted rather than assumed: a cold `render(4.35)` is byte-identical to
+the same instant reached by stepping from zero.
+
+**The coastline** is `sfmix-map.npz`, 4.5 KB: a 768 × 768 bit-packed land/sea
+mask over lon −122.80..−121.60, lat 37.05..38.00, rasterised by an even-odd
+scanline fill from the exchange's own committed, public, coarse basemap water
+rings (`portal/mapbuild/data/basemap-water.json`, OSM-derived). It is
+deliberately not `adsb-coast.npz`, which stops at 37.4 N and therefore has no
+south bay — which is most of this map.
+
+Product `sfmix-ix`, TTL 30 minutes, fetched every 5 minutes (the resolution of
+the underlying counters; asking faster returns the same numbers and costs the
+portal a Prometheus burst). Past its TTL the panel still draws, with the age and
+STALE in red where the age goes, because the routes and the day's curve are
+still true and only "now" has gone soft. With no record at all, a no-data card.
+
+    python3 ftdata.py --once --only sfmix-ix
+    python3 sfmix.py --host 127.0.0.1
+    python3 sfmix.py --util-full 15        # a tighter ramp on a quiet day
+    FT_DATA_CACHE=/tmp/empty python3 sfmix.py     # the no-data card
+    python3 scripts/test-sfmix.py
+
+## Group buttons
+
+Sixty-three cards is a lot of switches. The thing people actually want from the
+panel during an event is a mode — *just the data ones*, *just the movie ones*,
+*just the Sequoia Fabrica ones* — and getting there by hand means working down
+the whole list on a phone while the room fills up.
+
+So the panel has a row of group buttons above the cards. Pressing one enables
+that group's entries and disables everything else. It is not a view filter: the
+wall changes. `All` puts the whole rotation back.
+
+They behave as radio buttons, because the modes are exclusive — but membership
+is not, and that distinction is the reason the taxonomy lives where it does.
+`tide` is honestly both a data panel and a San Francisco panel; `voxel` is both
+a demoscene technique and a flight over the Bay; `scroller` is both a classic
+scroller and a sign that says SEQUOIA FABRICA. Each of them is in two groups. A
+model that forced every demo into exactly one bucket would have had to pick a
+loser in each of those cases, and the wrong answer would then be baked into the
+rotation file for good.
+
+#### The file
+
+`rotation-groups.json`, next to the rotation and separate from it:
+
+```json
+{"version": 1,
+ "groups": [
+   {"key": "data", "label": "Data",
+    "description": "Live panels reading the outside world",
+    "members": ["propagation", "adsb", "goes", "..."]}
+ ]}
+```
+
+Separate for two reasons. Groups are a presentation concern, and the same
+taxonomy should survive a different running order — betelgeuse's rotation is one
+installation's, the taxonomy is not. And the rotation file is the one that gets
+edited every time a demo is added, by somebody who is thinking about frame
+budgets and transitions rather than about the panel; a field on every entry
+there would rot.
+
+**Names it does not recognise are skipped.** This is load-bearing, not
+defensive programming for its own sake. The file names demos that are not in
+every installation, and in practice it is edited days before the demos it names
+exist — the six live-data panels went into it while they were still being
+written. Resolution happens once at startup against the loaded rotation, and
+the startup log says how many names it dropped, in one line rather than one per
+name. It is one line because there are usually a few in flight, and a paragraph
+of warnings at every restart is how people learn to skip the startup log.
+
+A group that resolves to nothing at all is dropped rather than kept, because a
+button that would empty the wall is worse than a button that is not there.
+`set_only()` refuses an empty set for the same reason, the way `set_all()`
+already refused to switch the last effect off.
+
+`all` is not in the file. It is synthesised, so that an edit to the file cannot
+take away the way back.
+
+#### The API
+
+One new op on `/api/command`:
+
+```json
+{"op": "select", "group": "data"}
+```
+
+The obvious implementation was `all(off)` followed by a `toggle` per member,
+entirely from the page. That is N+1 round trips and N+1 frames, and the wall
+would visibly play a half-applied group for about a second on its way to the
+right one. Every other op in this file lands at the top of one frame, and this
+one does too: the whole set changes under the rotation lock, once.
+
+The payload is the group's key rather than a list of names, so the group file
+stays the only place membership is written down — a client cannot invent a set
+of its own, and editing the file is genuinely enough to change what the buttons
+do.
+
+The group list rides on `/api/schema` alongside the option schemas, because it
+is fixed for the life of the process and is fetched once per page load. Which
+group is *active* rides on `/api/state`, because that changes.
+
+Indices past the playhead are invalidated and the effect on air plays out its
+slot, exactly as a single toggle already did. Cutting mid-segment because
+somebody chose a mode is a worse answer than the next forty seconds being the
+old mode.
+
+#### When it is none of them
+
+The interesting state is the one after somebody presses `Movies` and then flips
+a single card. The live set is now no group, and a button still drawn as
+pressed would be claiming a mode the wall is not in.
+
+So the scheduler compares the enabled set against each group and answers `null`
+when it matches none of them — `"group": null` in the state — and the page
+lights no button and shows a quiet `custom mix` next to the row. Flip the card
+back and the claim comes back. The comparison is server-side so that every
+phone looking at the wall agrees, and it is a handful of frozenset comparisons
+once a second against a snapshot that is being rebuilt anyway.
+
+`all` is tested first, so a group that happened to list the entire rotation
+loses the tie — that is the same selection under a more specific name than
+anyone chose.
+
+#### The taxonomy
+
+Seven groups plus `All`, which is as many as fits across a phone without the
+row becoming its own screen. Every one of the rotation's entries is in at least
+one; thirteen are in two.
+
+| group | what is in it |
+|---|---|
+| Data | the live outside-world panels: propagation, adsb, goes, caiso, sats, winds, quake, wx, ships, tide |
+| Movies | wopr, defcon, tron, sneakers, trench, fsn, esper, headroom, gibson, wardial, ansi |
+| Makerspace | console, knit, sewing, printer, lathe, wheel, laser, scope, splitflap, scroller, sf-tree, sf-tree-bounce |
+| San Francisco | goldengate, karl, sunset, grove, voxel, sf-tree, sf-tree-bounce, wardial, tide, ships, quake, caiso, adsb, wx |
+| Demoscene | fire, tunnel, starfield, metaballs, rotozoom, twister, water, cycle, floor, voxel, boing, scroller, fireworks, daliclock |
+| Games | pacman, pacman-ghosts, space-invaders, mario, nyancat, toasters, boing |
+| Algorithms | sort, wireworld, life, maze, slime, fireflies, chladni, scope |
+
+Some of these took a decision rather than a lookup. `console` is in Makerspace
+rather than anywhere filmic because it types out Arduino one-liners that people
+in the space wrote, and it is the only demo anyone can add to without touching
+code. `scope` is in both Makerspace and Algorithms: it is a bench instrument, and
+it is also the closest thing here to a live plot of a function. `chladni` sits
+in Algorithms rather than Demoscene because it is a physics simulation that
+happens to be pretty, not an effect. `wardial` is in San Francisco as well as
+Movies — the exchange it works through is a real one.
+
+Bandwidth for a network group was considered and dropped. `bgp` and `sfmix`
+would have been the whole of it, both are honestly data panels, and two members
+does not earn a button on a phone.
 
 ## demoscene.py
 

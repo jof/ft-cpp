@@ -70,6 +70,17 @@
     },
     {
       "kind": "py",
+      "name": "swell",
+      "module": "swell",
+      "seconds": 40.0,
+      "fps": 20,
+      "ms": 2.6,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "cycle",
       "module": "cycle",
       "seconds": 45.0,
@@ -169,6 +180,17 @@
     },
     {
       "kind": "py",
+      "name": "sfmix",
+      "module": "sfmix",
+      "seconds": 40.0,
+      "fps": 20,
+      "ms": 1.7,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "voxel",
       "module": "voxel",
       "seconds": 70.0,
@@ -226,6 +248,17 @@
     },
     {
       "kind": "py",
+      "name": "bgp",
+      "module": "bgp",
+      "seconds": 45.0,
+      "fps": 20,
+      "ms": 0.2,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "maze",
       "module": "maze",
       "seconds": 45,
@@ -249,6 +282,17 @@
       "options": {
         "messages": "SEQUOIA FABRICA|DEPARTURES {TIME};FLASCHEN TASCHEN|320 X 64 PIXELS;WELCOME|MAKE SOMETHING TODAY"
       }
+    },
+    {
+      "kind": "py",
+      "name": "stringline",
+      "module": "stringline",
+      "seconds": 40.0,
+      "fps": 20,
+      "ms": 0.9,
+      "enabled": true,
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
@@ -384,6 +428,17 @@
       "seconds": 48.0,
       "fps": 20,
       "ms": 25.9,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "helicorder",
+      "module": "helicorder",
+      "seconds": 35.0,
+      "fps": 20,
+      "ms": 1.2,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -532,6 +587,19 @@
         "speed": 18.0,
         "poses": ",b",
         "sequence_ms": 500.0
+      }
+    },
+    {
+      "kind": "py",
+      "name": "bikes",
+      "module": "bikes",
+      "seconds": 35.0,
+      "fps": 20,
+      "ms": 1.3,
+      "enabled": true,
+      "solo": false,
+      "options": {
+        "reload": 300
       }
     },
     {
