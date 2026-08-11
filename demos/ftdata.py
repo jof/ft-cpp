@@ -2264,6 +2264,483 @@ def _quake_usgs():
 
 
 # --------------------------------------------------------------------------
+# Raw ground motion, from the seismometer ten miles from the wall.
+# helicorder.py draws these as a drum recorder.
+#
+# quake-usgs above is the *processed* end of this pipeline: events, located,
+# with a magnitude on them, after somebody's algorithm has decided they are
+# events at all. This is the other end -- the ground going up and down at one
+# station, which is the measurement everything else is derived from, and which
+# is mostly a flat line with a microseism wobble in it. That is the point of
+# drawing it: the quiet is the data too.
+#
+# **The station is BK.BRK, Byerly Vault on the UC Berkeley campus**, an STS-2
+# broadband seismometer 17 km from the wall -- close enough that anything the
+# room would feel is emphatic on this trace, and it is a real instrument that a
+# person could walk to. BHZ is the 40 sps vertical channel. Berkeley's own
+# network is served by NCEDC's FDSN endpoints, keyless, no signup, no quota
+# published; the same query shape works for BK.BRIB and BK.BKS if this vault
+# ever goes off the air.
+#
+# **The data is miniSEED with Steim2 compression and there is no ASCII option
+# for this network**, which is the one real cost in this product. EarthScope's
+# `irisws/timeseries` will hand out ASCII but it does not archive BK, only the
+# global networks, and a panel captioned "ground motion near you" showing a
+# station in New Mexico would be a lie told to avoid a hundred lines of code.
+# So `_steim_decode()` below is that hundred lines. It is checked on every
+# record against the reverse integration constant -- Steim2 stores the last
+# sample of each record redundantly in the header frame precisely so that a
+# decoder can prove it walked the differences correctly -- and a mismatch
+# raises rather than storing a plausible wrong wiggle.
+#
+# **What is stored is an envelope, not a waveform.** Six hours at 40 sps is
+# 864,000 samples and 1.7 MB of miniSEED; what the panel can draw is 1800
+# columns one pixel wide. Each column is 12 seconds reduced to its minimum and
+# its maximum, which is exactly what a helicorder pen does and is the one
+# decimation that does not lie about amplitude -- a mean would flatten every
+# burst, and a subsample would hit or miss one at random. 3600 numbers, about
+# 22 kB of JSON: the whole six hours at the finest resolution the panel can
+# actually show.
+#
+# **It tops up rather than refetching.** The grid is anchored to absolute
+# 12-second bins, so a fetch five minutes after the last one asks NCEDC for
+# five minutes (23 kB) and slides the previous columns along. A cold start, or
+# a gap longer than the window, fetches the whole six hours once. That is the
+# difference between 7 MB an hour off the shop wifi and 300 kB.
+#
+# The baseline is removed before storing: an STS-2 wanders a couple of thousand
+# counts over six hours with the temperature and the tide, which at this scale
+# is half a trace lane of slow drift that has nothing to do with anything. A
+# two-minute box smoothing of each column's midpoint is subtracted, which is
+# the modern equivalent of the pen's zero adjustment. Everything above about a
+# minute of period goes with it, and nothing a local earthquake does is that
+# slow.
+#
+# FT_HELICORDER_END pins the end of the window to a fixed time, which is how
+# the screenshot of a real earthquake in the README was made and how the tests
+# get a known six hours. Unset -- always, on the wall -- it means now.
+# --------------------------------------------------------------------------
+
+HELI_DATASELECT = "https://service.ncedc.org/fdsnws/dataselect/1/query"
+HELI_STATION_URL = "https://service.ncedc.org/fdsnws/station/1/query"
+
+HELI_NET, HELI_STA, HELI_CHA = "BK", "BRK", "BHZ"
+
+# Six lanes of one hour. One hour a lane is the classic drum format and the
+# unit a person actually thinks in; six of them is what fits in 54 rows with
+# nine rows a lane, which is the least a trace can be and still have a shape.
+HELI_SPAN_H = 6
+HELI_TRACE_COLS = 300                  # columns per hour, one panel pixel each
+HELI_BIN_S = 3600.0 / HELI_TRACE_COLS  # 12 s a column
+HELI_COLS = HELI_SPAN_H * HELI_TRACE_COLS
+
+# Half an hour. Past that the panel says STALE and keeps drawing: a drum with
+# an honest gap at the right-hand end is still six hours of ground motion, and
+# is exactly what the paper would look like if the pen had run dry.
+HELI_TTL = 1800
+HELI_INTERVAL = 300
+
+# The zero adjustment: the baseline subtracted from each column is a box
+# smoothing of the column midpoints this many seconds wide. Two minutes is
+# well outside anything a local earthquake does and well inside the thermal
+# and tidal wander of a broadband vault.
+HELI_BASE_S = 120.0
+
+# The response -- counts per m/s -- changes when somebody recalibrates the
+# vault, which is a thing that has happened eight times since 1996 and never
+# twice in a day. Refetched daily; carried in the record in between.
+HELI_META_MAX_AGE = 86400
+
+HELI_PRODUCT = "helicorder-bk"
+
+# Steim2's seven packings. (nibble, dnib) -> (differences per word, bits each).
+# The fields are packed right-aligned against bit 0, which is the one thing in
+# the format that is easy to get backwards: for c=1 four 8-bit differences fill
+# all 32 bits, but for c=2 and c=3 the top two bits are the dnib and the
+# differences live in what is left, so seven 4-bit differences occupy bits 0-27
+# and bits 28-29 are simply unused. Shifting down from bit 31 instead decodes
+# every quiet record into a plausible-looking wrong number.
+_STEIM2_PACK = {
+    (1, 0): (4, 8), (1, 1): (4, 8), (1, 2): (4, 8), (1, 3): (4, 8),
+    (2, 1): (1, 30), (2, 2): (2, 15), (2, 3): (3, 10),
+    (3, 0): (5, 6), (3, 1): (6, 5), (3, 2): (7, 4),
+}
+
+# Steim1: same frame structure, three packings, no dnib.
+_STEIM1_PACK = dict(((1, d), (4, 8)) for d in range(4))
+_STEIM1_PACK.update(dict(((2, d), (2, 16)) for d in range(4)))
+_STEIM1_PACK.update(dict(((3, d), (1, 32)) for d in range(4)))
+
+
+def _steim_decode(payload, nsamples, order=2):
+    """Steim1/2 -> samples. Returns (samples, x0, xn); caller checks xn.
+
+    Vectorised rather than looped because this also runs on the wall's Pi, and
+    six hours is 864,000 samples: a per-sample Python loop is a minute there
+    and about eighty milliseconds like this.
+
+    The shape of the format: 64-byte frames of sixteen big-endian 32-bit words,
+    word 0 a map of two bits per following word saying how many differences
+    that word holds, and the samples are the running sum of those differences.
+    Frame 0's words 1 and 2 are not differences -- they are X0, the first
+    sample, and Xn, the last -- and their map nibbles are 0, so the mask
+    arithmetic drops them without a special case. The first *difference* in the
+    stream is the step from the previous record's last sample and is therefore
+    meaningless here, which is why the cumulative sum starts at d[1].
+    """
+    import numpy as np
+
+    w = np.frombuffer(payload, dtype=">u4")
+    nframes = len(w) // 16
+    if nframes < 1 or nsamples <= 0:
+        return np.zeros(0, np.int64), 0, 0
+    w = w[:nframes * 16].reshape(nframes, 16)
+
+    nib = (w[:, :1] >> (30 - 2 * np.arange(1, 16, dtype=np.uint32))) & 3
+    body = w[:, 1:]
+    dnib = (body >> 30) & 3
+
+    # Every word decodes into at most seven differences; `count` says how many
+    # of the seven slots are real, and the boolean take at the end flattens
+    # them back into stream order (frame, then word, then position).
+    diffs = np.zeros((nframes, 15, 7), np.int32)
+    count = np.zeros((nframes, 15), np.int8)
+    for key, spec in (_STEIM2_PACK if order == 2 else _STEIM1_PACK).items():
+        n, bits = spec
+        m = (nib == key[0]) & (dnib == key[1])
+        if not m.any():
+            continue
+        sel = body[m]
+        for k in range(n):
+            if bits == 32:
+                v = sel.astype(np.int64)
+            else:
+                shift = np.uint32(bits * (n - 1 - k))
+                v = ((sel >> shift) & np.uint32((1 << bits) - 1)).astype(np.int64)
+            v -= (v >= (1 << (bits - 1))) * (1 << bits)
+            diffs[m, k] = v.astype(np.int32)
+        count[m] = n
+
+    d = diffs[np.arange(7)[None, None, :] < count[:, :, None]]
+    x0 = int(w[0, 1]) - (int(w[0, 1]) >> 31) * (1 << 32)
+    xn = int(w[0, 2]) - (int(w[0, 2]) >> 31) * (1 << 32)
+
+    out = np.empty(nsamples, np.int64)
+    out[0] = x0
+    if nsamples > 1:
+        if len(d) < nsamples:
+            raise ValueError("steim%d: %d differences for %d samples"
+                             % (order, len(d), nsamples))
+        np.cumsum(d[1:nsamples].astype(np.int64), out=out[1:])
+        out[1:] += x0
+    return out, x0, xn
+
+
+def _mseed_series(data):
+    """miniSEED bytes -> ([(start_epoch, samples), ...], sample_rate).
+
+    Fixed 48-byte header, then a chain of blockettes of which the only one that
+    matters here is 1000: it carries the encoding and the record length, and
+    without it there is no way to know how far the next record is. Records with
+    an encoding this cannot read raise rather than being skipped -- a drum with
+    silently missing hours is worse than no drum.
+    """
+    import datetime
+    import struct
+
+    import numpy as np
+
+    segs, rate, off, n = [], None, 0, len(data)
+    while off + 64 <= n:
+        hdr = data[off:off + 48]
+        nsamp, = struct.unpack(">H", hdr[30:32])
+        factor, mult = struct.unpack(">hh", hdr[32:36])
+        nblk = hdr[39]
+        data_off, = struct.unpack(">H", hdr[44:46])
+        blk_off, = struct.unpack(">H", hdr[46:48])
+
+        reclen, enc, p = None, None, blk_off
+        for _ in range(nblk):
+            if not p or off + p + 8 > n:
+                break
+            btype, nxt = struct.unpack(">HH", data[off + p:off + p + 4])
+            if btype == 1000:
+                enc = data[off + p + 4]
+                reclen = 1 << data[off + p + 6]
+                break
+            p = nxt
+        if reclen is None:
+            raise ValueError("miniSEED record with no blockette 1000")
+        if enc not in (10, 11):
+            raise ValueError("miniSEED encoding %r is not Steim1 or Steim2" % enc)
+
+        year, doy, hh, mm, ss, _u, ticks = struct.unpack(">HHBBBBH", hdr[20:30])
+        jan1 = datetime.datetime(year, 1, 1,
+                                 tzinfo=datetime.timezone.utc).timestamp()
+        start = (jan1 + (doy - 1) * 86400.0 + hh * 3600.0 + mm * 60.0
+                 + ss + ticks * 1e-4)
+
+        # SEED's two-field sample rate: a positive factor is samples per
+        # second, a negative one is seconds per sample, and the multiplier
+        # does the same trick again.
+        if factor > 0:
+            r = float(factor * mult) if mult > 0 else -float(factor) / mult
+        elif factor < 0:
+            r = -float(mult) / factor if mult > 0 else 1.0 / (factor * mult)
+        else:
+            r = 0.0
+        if r > 0:
+            rate = r
+
+        if nsamp:
+            s, _x0, xn = _steim_decode(data[off + data_off:off + reclen],
+                                       nsamp, 2 if enc == 11 else 1)
+            # The whole reason the reverse integration constant exists.
+            if int(s[-1]) != xn:
+                raise ValueError("steim: record at %d ends %d, header says %d"
+                                 % (off, int(s[-1]), xn))
+            segs.append((start, np.asarray(s, np.int32)))
+        off += reclen
+    if not segs or not rate:
+        raise ValueError("no decodable miniSEED records")
+    return segs, rate
+
+
+def _heli_iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t))
+
+
+def _heli_window_url(t0, t1):
+    from urllib.parse import urlencode
+    return HELI_DATASELECT + "?" + urlencode({
+        "net": HELI_NET, "sta": HELI_STA, "cha": HELI_CHA,
+        "starttime": _heli_iso(t0), "endtime": _heli_iso(t1)})
+
+
+def _heli_bins(segs, rate, t0, t1):
+    """Reduce samples to per-column (min, max). Returns (lo, hi, have).
+
+    One expanded array at the sample rate and then a reshape-and-min, rather
+    than np.minimum.at over scattered indices: ufunc.at is roughly a
+    microsecond an element, which is a second here on a desktop and half a
+    minute on the wall. The expansion costs 7 MB for six hours and is thrown
+    away immediately.
+    """
+    import numpy as np
+
+    ncols = int(round((t1 - t0) / HELI_BIN_S))
+    per = int(round(HELI_BIN_S * rate))
+    if ncols <= 0 or per <= 0:
+        return None
+    big = np.iinfo(np.int32).max
+    lo_s = np.full(ncols * per, big, np.int32)
+    hi_s = np.full(ncols * per, -big, np.int32)
+    for start, s in segs:
+        i = int(round((start - t0) * rate))
+        a, b = max(0, i), min(ncols * per, i + len(s))
+        if b <= a:
+            continue
+        chunk = s[a - i:b - i]
+        lo_s[a:b] = chunk
+        hi_s[a:b] = chunk
+    lo = lo_s.reshape(ncols, per).min(1)
+    hi = hi_s.reshape(ncols, per).max(1)
+    have = lo != big
+    return lo, hi, have
+
+
+def _heli_centre(lo, hi, have):
+    """Subtract a two-minute smoothing of the column midpoints, in place-ish.
+
+    The pen's zero adjustment. Gaps are filled with the median before smoothing
+    so that a missing minute does not drag the baseline through the hole and
+    bend the trace either side of it.
+    """
+    import numpy as np
+
+    mid = np.where(have, (lo.astype(np.float64) + hi) * 0.5, np.nan)
+    if not have.any():
+        return lo.astype(np.int32), hi.astype(np.int32)
+    mid = np.where(have, mid, np.nanmedian(mid))
+    k = int(HELI_BASE_S / HELI_BIN_S) | 1
+    k = min(k, len(mid) if len(mid) % 2 else len(mid) - 1)
+    if k >= 3:
+        pad = k // 2
+        # Edge-padded so the first and last columns get a full window rather
+        # than a baseline that tapers towards zero and tips the trace up.
+        ext = np.concatenate([np.full(pad, mid[0]), mid, np.full(pad, mid[-1])])
+        base = np.convolve(ext, np.full(k, 1.0 / k), mode="valid")
+    else:
+        base = mid
+    return (np.round(lo - base).astype(np.int32),
+            np.round(hi - base).astype(np.int32))
+
+
+def _heli_station_meta(when):
+    """Latitude, longitude and counts-per-m/s for the epoch covering `when`.
+
+    The text format is one line per response epoch and the vault has had eight
+    of them; picking the current one matters because the sensitivity changed by
+    a factor of four in 2010 and every micron on the panel is scaled by it.
+    """
+    import calendar
+
+    url = (HELI_STATION_URL + "?net=%s&sta=%s&cha=%s&level=channel&format=text"
+           % (HELI_NET, HELI_STA, HELI_CHA))
+    text = get(url, timeout=30).decode("utf-8", "replace")
+
+    def _epoch(s):
+        s = s.strip().split(".")[0]
+        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return calendar.timegm(time.strptime(s, fmt))
+            except ValueError:
+                continue
+        return None
+
+    best = None
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        f = [c.strip() for c in line.split("|")]
+        if len(f) < 17:
+            continue
+        t0, t1 = _epoch(f[15]), _epoch(f[16])
+        if t0 is None or t0 > when or (t1 is not None and t1 <= when):
+            continue
+        best = {"net": f[0], "sta": f[1], "loc": f[2], "cha": f[3],
+                "lat": float(f[4]), "lon": float(f[5]), "elev": float(f[6]),
+                "instrument": f[10][:40], "scale": float(f[11]),
+                "scale_units": f[13], "rate": float(f[14]),
+                "meta_at": time.time()}
+    if best is None:
+        raise ValueError("no %s.%s.%s response epoch covering %s"
+                         % (HELI_NET, HELI_STA, HELI_CHA, _heli_iso(when)))
+    return best
+
+
+def _heli_end():
+    """The end of the window. Now, unless FT_HELICORDER_END pins it."""
+    s = os.environ.get("FT_HELICORDER_END", "").strip()
+    if not s:
+        return time.time()
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    import calendar
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return float(calendar.timegm(time.strptime(s, fmt)))
+        except ValueError:
+            continue
+    raise ValueError("cannot read a UTC time out of FT_HELICORDER_END=%r" % s)
+
+
+@product(HELI_PRODUCT, ttl=HELI_TTL, interval=HELI_INTERVAL,
+         description="NCEDC BK.BRK BHZ: six hours of raw vertical ground "
+                     "motion, 24 s min/max envelope")
+def _helicorder(cache_dir):
+    """Top up the six-hour envelope and rewrite it.
+
+    Takes `cache_dir` -- and is therefore flagged as a blob product below --
+    for one reason: it reads its own previous record so that a five-minute
+    fetch is a five-minute request. It writes no sidecar. The flag is the only
+    hook `fetch()` has for "this fetcher needs to know where the cache is".
+    """
+    import math
+
+    import numpy as np
+
+    end = _heli_end()
+    t1 = math.floor(end / HELI_BIN_S) * HELI_BIN_S
+    t0 = math.floor(t1 / 3600.0) * 3600.0 - (HELI_SPAN_H - 1) * 3600.0
+
+    lo = np.zeros(HELI_COLS, np.int32)
+    hi = np.zeros(HELI_COLS, np.int32)
+    have = np.zeros(HELI_COLS, bool)
+
+    prev = load(HELI_PRODUCT, cache_dir)
+    meta, filled_to = None, t0
+    if prev is not None:
+        p = prev[0] or {}
+        try:
+            shift = int(round((t0 - float(p["t0"])) / HELI_BIN_S))
+            if 0 <= shift < HELI_COLS and int(p.get("cols", 0)) == HELI_COLS:
+                keep = HELI_COLS - shift
+                plo = np.array([0 if v is None else v for v in p["lo"]], np.int32)
+                phi = np.array([0 if v is None else v for v in p["hi"]], np.int32)
+                phave = np.array([v is not None for v in p["lo"]], bool)
+                lo[:keep], hi[:keep] = plo[shift:], phi[shift:]
+                have[:keep] = phave[shift:]
+                filled_to = max(t0, min(t1, float(p.get("filled_to", t0))))
+            m = p.get("station") or {}
+            if m.get("scale") and time.time() - float(
+                    m.get("meta_at", 0)) < HELI_META_MAX_AGE:
+                meta = m
+        except Exception:                                    # noqa: BLE001
+            # A record from an older layout is not an error, it is a cold
+            # start: fall through and fetch the whole window.
+            lo[:], hi[:], have[:] = 0, 0, False
+            filled_to = t0
+
+    if meta is None:
+        meta = _heli_station_meta(t1)
+
+    # The source recorded is what was asked for on this pass, which on a
+    # top-up is a few minutes and not the six hours on the panel. When nothing
+    # was due the whole window is named instead, because "we asked for zero
+    # seconds of data" is a true statement that tells a reader nothing.
+    source = (_heli_window_url(filled_to, t1) if t1 - filled_to >= HELI_BIN_S
+              else _heli_window_url(t0, t1))
+    if t1 - filled_to >= HELI_BIN_S:
+        data = get(source, timeout=180 if t1 - filled_to > 3600 else 60)
+        segs, rate = _mseed_series(data)
+        got = _heli_bins(segs, rate, filled_to, t1)
+        if got is not None:
+            nlo, nhi, nhave = got
+            clo, chi = _heli_centre(nlo, nhi, nhave)
+            a = int(round((filled_to - t0) / HELI_BIN_S))
+            b = min(HELI_COLS, a + len(clo))
+            if b > a:
+                lo[a:b], hi[a:b] = clo[:b - a], chi[:b - a]
+                have[a:b] = nhave[:b - a]
+        filled_to = t1
+        meta["rate"] = float(rate)
+
+    p2p = (hi - lo)[have]
+    noise = float(np.median(p2p)) if len(p2p) else 0.0
+    peak, peak_t = 0.0, None
+    if have.any():
+        amp = np.maximum(np.abs(lo), np.abs(hi))
+        amp = np.where(have, amp, 0)
+        i = int(np.argmax(amp))
+        peak = float(amp[i])
+        peak_t = t0 + (i + 0.5) * HELI_BIN_S
+
+    km, bearing = _quake_km_bearing(meta["lat"], meta["lon"])
+    return {
+        "station": meta,
+        "site": [QUAKE_LAT, QUAKE_LON], "km": round(km, 1),
+        "bearing": round(bearing),
+        "t0": t0, "t1": t0 + HELI_COLS * HELI_BIN_S, "filled_to": filled_to,
+        "bin_s": HELI_BIN_S, "cols": HELI_COLS,
+        "trace_cols": HELI_TRACE_COLS, "span_h": HELI_SPAN_H,
+        "lo": [None if not h else int(v) for v, h in zip(lo, have)],
+        "hi": [None if not h else int(v) for v, h in zip(hi, have)],
+        "n_have": int(have.sum()),
+        "noise": round(noise, 1), "peak": round(peak, 1), "peak_t": peak_t,
+    }, source
+
+
+# The one thing this flag does in fetch() is pass cache_dir to the fetch
+# function; see _helicorder's docstring. No sidecar is written, so there is
+# nothing for prune_blobs() to sweep.
+PRODUCTS[HELI_PRODUCT]["blob"] = True
+
+
+# --------------------------------------------------------------------------
 # Orbital elements, from CelesTrak's GP service. sats.py propagates these.
 #
 # This is the slowest-moving product in the file and the fastest-moving demo,
