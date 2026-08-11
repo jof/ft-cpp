@@ -301,7 +301,10 @@ def synthetic(cache_dir, fetched_ago=60.0, noise=4000, burst=None,
                     "instrument": "STS-2,Velocity Sensor,STRECKEISEN",
                     "scale": SCALE_COUNTS, "scale_units": "M/S", "rate": 40.0,
                     "meta_at": time.time()},
-        "site": [37.7627, -122.3966], "km": 17.1, "bearing": 44,
+        # BRK from the wall: recomputed with ftdata._quake_km_bearing() when the
+        # site moved 273 m west, which is 0.2 km and half a degree of it.
+        "site": [37.7624929274026, -122.39969356310202],
+        "km": 17.3, "bearing": 45,
         "t0": t0, "t1": t0 + COLS * BIN_S,
         "filled_to": t0 + n_filled * BIN_S,
         "bin_s": BIN_S, "cols": COLS, "trace_cols": TRACE_COLS,
@@ -326,7 +329,8 @@ def write_quakes(cache_dir, events):
     """A quake-usgs record with just the fields helicorder.py reads."""
     rec = {"name": "quake-usgs", "fetched_at": time.time(), "source": "synthetic",
            "ttl": 3600,
-           "payload": {"site": [37.7627, -122.3966], "span_h": 168.0,
+           "payload": {"site": [37.7624929274026, -122.39969356310202],
+                       "span_h": 168.0,
                        "local": {"radius_km": 300.0, "n": len(events),
                                  "events": events},
                        "world": {"min_mag": 4.5, "n": 0, "events": []},

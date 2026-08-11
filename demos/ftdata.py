@@ -39,6 +39,12 @@ import sys
 import tempfile
 import time
 
+# The installation's own address, which three products here fetch for. Kept in
+# demos/site.json rather than written out once per product; see ftsite.py. It
+# imports nothing but the standard library, so this stays a cheap import and
+# load() still touches no network module.
+import ftsite
+
 CACHE_DIR = os.environ.get(
     "FT_DATA_CACHE", os.path.expanduser("~/.cache/ftdata"))
 
@@ -1620,7 +1626,7 @@ def _wind_bay():
 # Defaults, in the same spirit as tide.py's: somewhere real, so a checkout
 # draws a real panel, and overridable so it can be somewhere else. Set
 # FT_WX_SITES and FT_WX_STATIONS for your own address and nearest station.
-WX_LAT, WX_LON = 37.7627, -122.3966     # the Mission, San Francisco
+WX_LAT, WX_LON = ftsite.LAT, ftsite.LON  # Dogpatch/Potrero, San Francisco
 WX_STATION = "SFOC1"                    # San Francisco Downtown, 2.8 km away
 
 # met.no and NWS both want to know who is calling and how to reach them. This
@@ -1691,7 +1697,7 @@ def _wx_http_date(s):
 
 
 def _wx_site(lat, lon):
-    """The product-name suffix for a site: '37.7627_-122.3966'."""
+    """The product-name suffix for a site: '37.7625_-122.3997'."""
     return "%.4f_%.4f" % (float(lat), float(lon))
 
 
@@ -2006,9 +2012,9 @@ for _lat, _lon in _wx_sites:
 
 ADSB_URL = "https://api.airplanes.live/v2/point/%.4f/%.4f/%d"
 
-# The wall's own address, in the Mission. Everything on the panel is measured
-# from here, so this is the one number to change for another installation.
-ADSB_LAT, ADSB_LON = 37.7627, -122.3966
+# The wall's own address, in Dogpatch. Everything on the panel is measured from
+# here; it lives in demos/site.json now, which is the one place to change it.
+ADSB_LAT, ADSB_LON = ftsite.LAT, ftsite.LON
 
 # Nautical miles. Comfortably outside adsb.py's map crop, which reaches about
 # 32 nm at its far corner, so the panel is never showing the edge of the query
@@ -3532,8 +3538,8 @@ QUAKE_FEED = ("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/"
 QUAKE_FDSN = "https://earthquake.usgs.gov/fdsnws/event/1/query"
 
 # The wall's own address, the same one wx.py uses: Sequoia Fabrica, 1736 18th
-# Street. Every distance and bearing in the payload is from here.
-QUAKE_LAT, QUAKE_LON = 37.7627, -122.3966
+# Street, from demos/site.json. Every distance and bearing here is from it.
+QUAKE_LAT, QUAKE_LON = ftsite.LAT, ftsite.LON
 
 QUAKE_LOCAL_KM = 300.0          # "near here", generously drawn
 QUAKE_WORLD_MAG = 4.5           # the planet's week, the conventional threshold

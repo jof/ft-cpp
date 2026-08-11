@@ -170,7 +170,7 @@ def km_bearing(lat, lon):
 
 LANDMARKS = [
     # name, lat, lon, which tile it must land on
-    ("Sequoia Fabrica", 37.7627, -122.3966, "both"),
+    ("Sequoia Fabrica", 37.7624929274026, -122.39969356310202, "both"),
     ("Golden Gate Bridge", 37.8199, -122.4783, "both"),
     ("The Geysers", 38.7900, -122.7500, "both"),
     ("San Jose", 37.3382, -121.8863, "both"),

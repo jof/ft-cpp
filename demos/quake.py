@@ -126,15 +126,17 @@ import numpy as np
 import defcon
 import demoscene as ds
 import ftdata
+import ftsite
 
 f32 = np.float32
 
 PRODUCT = "quake-usgs"
 
-# The wall's own address, matching ftdata's QUAKE_LAT/QUAKE_LON and wx.py's:
-# Sequoia Fabrica, 1736 18th Street. It is drawn on both maps, because "how far
-# from here" is the only question anybody asks of an earthquake map.
-SITE_LAT, SITE_LON = 37.7627, -122.3966
+# The wall's own address, from demos/site.json -- the same file ftdata reads for
+# QUAKE_LAT/QUAKE_LON, so the ring drawn here and the distances computed in the
+# payload cannot drift apart. It is drawn on both maps, because "how far from
+# here" is the only question anybody asks of an earthquake map.
+SITE_LAT, SITE_LON = ftsite.LAT, ftsite.LON
 
 # lat0, lat1, lon0, lon1.
 #

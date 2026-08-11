@@ -303,7 +303,7 @@ LANDMARKS = [
     ("San Pablo Bay, off Richmond", 37.9200, -122.4000, True),
     ("SFO", 37.6189, -122.3750, False),
     ("Oakland airport", 37.7213, -122.2208, False),
-    ("the Mission, San Francisco", 37.7627, -122.3966, False),
+    ("Dogpatch, San Francisco", 37.7624929274026, -122.39969356310202, False),
     ("San Bruno Mountain", 37.6900, -122.4350, False),
     ("Livermore valley", 37.6934, -121.8700, False),
     ("Half Moon Bay airport", 37.5133, -122.5011, False),

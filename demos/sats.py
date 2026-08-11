@@ -120,13 +120,16 @@ import numpy as np
 import defcon
 import demoscene as ds
 import ftdata
+import ftsite
 
 f32 = np.float32
 
-# The wall's own address: Sequoia Fabrica, 1736 18th Street, San Francisco.
-# Everything on the bottom strip is relative to this point.
-SITE_LAT, SITE_LON = 37.7627, -122.3966
-SITE_NAME = "SF"
+# The wall's own address: Sequoia Fabrica, 1736 18th Street, San Francisco,
+# from demos/site.json. Everything on the bottom strip is relative to this
+# point. The label comes from the same file: two characters is all the world
+# map has room for, and an installation elsewhere should not be labelled SF.
+SITE_LAT, SITE_LON = ftsite.LAT, ftsite.LON
+SITE_NAME = ftsite.SHORT
 
 PRODUCT = "sats"
 

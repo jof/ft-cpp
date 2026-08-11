@@ -86,6 +86,7 @@ import numpy as np
 import defcon
 import demoscene as ds
 import ftdata
+import ftsite
 
 f32 = np.float32
 
@@ -98,7 +99,9 @@ PRODUCT = "adsb-bay"
 EXTENT = (37.47, 37.93, -122.94, -121.86)
 
 # The wall. Distances on the panel are from here, and it is drawn on the map.
-HOME = (37.7627, -122.3966)
+# demos/site.json, so this and ftdata's ADSB_LAT/ADSB_LON -- the centre of the
+# query that produced the aircraft -- are by construction the same point.
+HOME = ftsite.latlon()
 HOME_LABEL = "HERE"
 
 KNOT_MS = 0.5144                        # knots to metres per second
