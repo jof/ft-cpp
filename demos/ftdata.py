@@ -3491,6 +3491,366 @@ def _baywheels(cache_dir):
 PRODUCTS[BIKES_PRODUCT]["blob"] = True
 
 # --------------------------------------------------------------------------
+# The bike docks within a walk of the front door. docks.py draws this.
+#
+# **A different question from `baywheels`, off the same three feeds.** That
+# product is about the city: a flow field over twelve kilometres, differenced
+# between snapshots, replayed over half a day. This one is about the next sixty
+# seconds for somebody standing in the workshop -- is there a bike within a few
+# minutes' walk, is it an ebike, and coming the other way, is there a free dock
+# to put one in. Nothing here is differenced against anything and nothing here
+# accumulates: it is a snapshot of about forty docks, and when it is stale it is
+# simply wrong rather than incomplete, which is why the TTL is short and the
+# panel prints the age.
+#
+# It is a separate product rather than more fields on `baywheels` because the
+# two want opposite things from the fetcher. `baywheels` must not be sampled
+# faster than its ten-minute history bucket and must never be volatile, because
+# the accumulated half day is the only thing in it that cannot be re-fetched.
+# This one wants two minutes and is worth nothing after a reboot.
+#
+# **The docked ebike count is `num_ebikes_available`, and this is the one field
+# it is easy to get wrong.** GBFS 2.x also defines
+# `num_bikes_available_types`, which is the obvious place to look and which
+# Lyft's SF feed does not publish at all -- the key is absent from every one of
+# the 634 stations, so code that reads it gets zero everywhere and quietly
+# reports that San Francisco has no docked ebikes. It has plenty: 36 of the 100
+# docked bikes within a kilometre of the wall on the evening this was written.
+# `num_ebikes_available` is a *subset* of `num_bikes_available`, so the classic
+# count is the difference and the two add up to the total, which is how the
+# panel columns it.
+#
+# **The crop is a circle and not a bounding box.** `baywheels` takes a lat/lon
+# box because it wants a city; this wants "how far do I have to walk", so the
+# radius is a real distance from one point and the payload is sorted by it.
+# 1.5 km stored against the panel's default 1.0 km of drawing, so `--radius` can
+# be turned up on the wall without the fetcher having to agree.
+#
+# **Cost, and the one piece of caching in this file.** Three feeds are 795 kB:
+# station_information 348, station_status 243, free_bike_status 204. Taking all
+# three every two minutes would be 6.6 kB/s sustained, which is five times what
+# `baywheels` costs and more than this panel is worth. But station_information
+# is *near-static* -- names, coordinates and dock capacities, changing when a
+# station is installed or moved -- so the trimmed version of it (the forty-odd
+# stations inside the radius, about a kilobyte) is kept in the record and reused
+# for an hour. Steady state is then status plus free bikes, 447 kB every two
+# minutes, 3.7 kB/s, with one 348 kB request an hour on top. What that costs is
+# that a station installed inside the radius can take up to an hour to appear,
+# which for a thing that happens a few times a year is the right trade. Set
+# DOCKS_INFO_TTL to 0 to turn the cache off.
+# --------------------------------------------------------------------------
+
+DOCKS_PRODUCT = "docks-nearby"
+
+# The wall's own address: Sequoia Fabrica, Dogpatch, San Francisco, surveyed to
+# the building rather than to the block. Note that `adsb.py` and `quake.py` --
+# and QUAKE_LAT/QUAKE_LON above -- carry (37.7627, -122.3966), which is 273 m
+# north-east of this. At their scales (a 50 nautical mile radar picture, a
+# 300 km earthquake map) 273 m is a fifth of a pixel and not worth a change that
+# would touch three products; at this panel's scale it is seven pixels and the
+# difference between the nearest dock being Jackson Playground and being Rhode
+# Island St. So this product carries its own constant deliberately, and the two
+# should be reconciled on purpose rather than by one of them drifting.
+DOCKS_SITE = (37.7624929274026, -122.39969356310202)
+
+# How far out to collect, in metres of straight line. 1.5 km is 45 docks, 235
+# docked bikes and 851 free docks on a Monday evening -- comfortably more than
+# the panel draws, so `--radius` is a drawing decision and not a fetch one.
+DOCKS_RADIUS_M = 1500.0
+
+# Hard caps, so a feed that suddenly reports every station in the Bay at the
+# same coordinates cannot turn a 6 kB record into a 300 kB one. Both are well
+# clear of the live numbers (45 stations, 27 loose bikes inside 1.5 km).
+DOCKS_MAX = 64
+DOCKS_LOOSE_MAX = 48
+
+# Metres a minute on foot, for the walk times that are the panel's units.
+#
+# 75 m/min is 4.5 km/h, an ordinary adult pace, and it is applied to the
+# *straight-line* distance -- so these are optimistic by whatever the street
+# grid costs, which in Dogpatch is not much because the grid is a grid. The
+# number is here rather than in the demo because it is what makes `dist_m` mean
+# something to a person, and because the panel and this file must not be able to
+# disagree about it.
+DOCKS_WALK_M_PER_MIN = 75.0
+
+# Ten minutes. station_status is regenerated every minute; a record this old has
+# missed nine updates, which on a Friday evening is enough for a dock the panel
+# says has two bikes in it to have none. It still draws, with the age on it.
+DOCKS_TTL = 600
+
+# Two minutes. Fast enough to be worth calling a "right now" panel, slow enough
+# not to hammer a public feed: 30 requests an hour against a file regenerated 60
+# times an hour. Under FAST_INTERVAL, so the fast timer takes it.
+DOCKS_INTERVAL = 120
+
+# How long the trimmed station_information block is reused. See the cost note.
+DOCKS_INFO_TTL = 3600.0
+
+
+def _docks_metres(lat, lon, site=None):
+    """Straight-line metres from the wall. Equirectangular, plain Python.
+
+    Flat-earth over 1.5 km is wrong by well under a centimetre, and there are a
+    few hundred stations to test rather than a few hundred thousand, so this
+    stays out of numpy entirely -- the whole loop costs less than the import.
+    """
+    import math
+    la0, lo0 = site or DOCKS_SITE
+    kx = math.cos(math.radians(la0))
+    dy = (float(lat) - la0) * 111320.0
+    dx = (float(lon) - lo0) * 111320.0 * kx
+    return math.hypot(dx, dy)
+
+
+def _docks_walk_min(dist_m):
+    """Straight-line metres as whole minutes on foot. See DOCKS_WALK_M_PER_MIN."""
+    return int(round(float(dist_m) / DOCKS_WALK_M_PER_MIN))
+
+
+def _docks_site_elevation():
+    """Ground height at the wall, in metres, off the committed terrain bake.
+
+    There is no DEM in this tree, only `bikes-terrain.npz`, which is elevations
+    at the 634 dock locations -- so this is the height of the nearest *dock*,
+    which today is Jackson Playground 290 m away and 4 m lower than the shop
+    floor's true figure. That is fine for what it is used for, which is the sign
+    and rough size of the climb to each dock, and it is why the payload calls it
+    `approx`. Returns None rather than raising if the bake is missing: an
+    elevation is a nice-to-have and the dock counts are not.
+    """
+    try:
+        elev, _missing = _bikes_elevation(
+            ["__wall__"], [DOCKS_SITE[0]], [DOCKS_SITE[1]])
+        return float(elev[0])
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+def _docks_info(previous, radius_m):
+    """The trimmed station_information block: reused if young enough, else fetched.
+
+    Returns (info, fetched), where `info` is a dict of parallel lists over the
+    stations inside the radius and `fetched` says whether the 348 kB request
+    actually happened on this pass. Anything at all wrong with the cached block
+    -- missing, short, from a run with a different radius or a different site --
+    is treated as absent, because the alternative is pairing this pass's counts
+    with last hour's coordinates and there is no way to notice that on a wall.
+    """
+    keys = ("id", "name", "lat", "lon", "cap")
+    old = (previous or {}).get("info")
+    if DOCKS_INFO_TTL > 0 and isinstance(old, dict):
+        try:
+            fresh = time.time() - float(old["at"]) < DOCKS_INFO_TTL
+            same = (float(old["radius_m"]) == float(radius_m)
+                    and [round(v, 7) for v in old["site"]]
+                    == [round(v, 7) for v in DOCKS_SITE])
+            n = len(old["id"])
+            whole = all(isinstance(old.get(k), list) and len(old[k]) == n
+                        for k in keys)
+            if fresh and same and whole and n:
+                return old, False
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    doc = get_json(BIKES_INFO_URL, timeout=30)
+    info = {"at": time.time(), "radius_m": float(radius_m),
+            "site": list(DOCKS_SITE)}
+    for k in keys:
+        info[k] = []
+    for s in doc["data"]["stations"]:
+        try:
+            la, lo = float(s["lat"]), float(s["lon"])
+            sid = str(s["station_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if _docks_metres(la, lo) > radius_m:
+            continue
+        info["id"].append(sid)
+        # The published name, verbatim. Shortening "Rhode Island St at 17th St"
+        # into something that fits 22 characters of 3x5 type is a drawing
+        # decision and it lives in the demo, where it can be argued with.
+        info["name"].append(str(s.get("name") or "")[:48])
+        info["lat"].append(round(la, 5))
+        info["lon"].append(round(lo, 5))
+        info["cap"].append(int(s.get("capacity") or 0))
+    return info, True
+
+
+@product(DOCKS_PRODUCT, ttl=DOCKS_TTL, interval=DOCKS_INTERVAL, volatile=True,
+         description="Bay Wheels docks within a walk of the wall: "
+                     "bikes, ebikes and free docks, nearest first")
+def _docks_nearby(cache_dir):
+    """The docks inside DOCKS_RADIUS_M, sorted by how far they are to walk.
+
+    station_status is required. station_information is required the first time
+    and once an hour after that; in between its trimmed form comes out of the
+    previous record. free_bike_status is allowed to fail on its own -- a
+    free-floating ebike parked on the kerb is worth drawing and is not what the
+    panel is for, so losing that feed costs one line of the panel and not the
+    panel.
+    """
+    previous = load(DOCKS_PRODUCT, cache_dir)
+    prev_payload = previous[0] if previous else None
+    info, info_fetched = _docks_info(prev_payload, DOCKS_RADIUS_M)
+    status_doc = get_json(BIKES_STATUS_URL, timeout=30)
+
+    near = {}
+    for i, sid in enumerate(info["id"]):
+        near[sid] = i
+
+    rows = []
+    for s in status_doc["data"]["stations"]:
+        i = near.get(str(s.get("station_id")))
+        if i is None:
+            continue
+        # `is_installed` 0 is a dock pulled out of the ground for the season.
+        # It is not an empty station; there is nothing there to walk to.
+        if not int(s.get("is_installed") or 0):
+            continue
+        la, lo = info["lat"][i], info["lon"][i]
+        bikes = int(s.get("num_bikes_available") or 0)
+        # See the block comment: this field and not num_bikes_available_types,
+        # which Lyft's feed does not publish. Clamped because a subset that
+        # exceeds its superset would come out of the arithmetic as a negative
+        # number of classic bikes, and the panel would draw it.
+        ebikes = min(bikes, int(s.get("num_ebikes_available") or 0))
+        free = int(s.get("num_docks_available") or 0)
+        cap = info["cap"][i] or (bikes + free
+                                 + int(s.get("num_bikes_disabled") or 0)
+                                 + int(s.get("num_docks_disabled") or 0))
+        dist = _docks_metres(la, lo)
+        rows.append({
+            "d": dist, "sid": info["id"][i], "name": info["name"][i],
+            "lat": la, "lon": lo,
+            "bikes": bikes, "ebikes": ebikes, "free": free, "cap": int(cap),
+            # `is_renting` 0 with the dock installed is a station out of service
+            # -- construction, a street fair, a dead kiosk. Its bikes are real
+            # and you cannot have them, so it is kept and flagged rather than
+            # either counted or dropped. Same call baywheels makes.
+            "open": 1 if int(s.get("is_renting") or 0) else 0,
+            "ret": 1 if int(s.get("is_returning") or 0) else 0,
+        })
+
+    rows.sort(key=lambda r: r["d"])
+    del rows[DOCKS_MAX:]
+    if not rows:
+        raise ValueError("no Bay Wheels stations within %.0f m of the wall"
+                         % DOCKS_RADIUS_M)
+
+    site_elev = _docks_site_elevation()
+    try:
+        # Exact for every station in the bake, which is all of them today; one
+        # installed since takes the nearest baked station's height. Same helper
+        # and the same caveat as baywheels, which is the point of sharing it.
+        elev, _missing = _bikes_elevation(
+            [r["sid"] for r in rows],
+            [r["lat"] for r in rows], [r["lon"] for r in rows])
+        elev = [round(float(v), 1) for v in elev]
+    except Exception as e:                                   # noqa: BLE001
+        print("ftdata: docks-nearby elevation unavailable: %r" % e,
+              file=sys.stderr)
+        elev = [None] * len(rows)
+
+    loose = {"n": 0, "dist_m": [], "lat": [], "lon": [], "elec": [],
+             "unavailable": 0, "source": None}
+    try:
+        free_doc = get_json(BIKES_FREE_URL, timeout=30)
+        loose["source"] = BIKES_FREE_URL
+        found = []
+        for b in free_doc["data"]["bikes"]:
+            try:
+                la, lo = float(b["lat"]), float(b["lon"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            d = _docks_metres(la, lo)
+            if d > DOCKS_RADIUS_M:
+                continue
+            if int(b.get("is_disabled") or 0) or int(b.get("is_reserved") or 0):
+                loose["unavailable"] += 1
+                continue
+            found.append((d, la, lo,
+                          1 if str(b.get("type")) == "electric_bike" else 0))
+        found.sort()
+        # No identifier of any kind is read out of this feed, let alone stored.
+        # `baywheels` hashes the printed bike number because it needs to match
+        # one snapshot to the next; this product never compares two snapshots,
+        # so it has no use for identity and takes none. See the BIKES_TRACK_*
+        # block above for why that distinction is worth being explicit about.
+        del found[DOCKS_LOOSE_MAX:]
+        loose["n"] = len(found)
+        loose["dist_m"] = [int(round(d)) for d, _la, _lo, _e in found]
+        loose["lat"] = [round(la, 5) for _d, la, _lo, _e in found]
+        loose["lon"] = [round(lo, 5) for _d, _la, lo, _e in found]
+        loose["elec"] = [e for _d, _la, _lo, e in found]
+    except Exception as e:                                   # noqa: BLE001
+        print("ftdata: docks-nearby free_bike_status unavailable: %r" % e,
+              file=sys.stderr)
+
+    open_rows = [r for r in rows if r["open"]]
+    payload = {
+        # The feed's own stamp rather than ours: the panel's honesty about how
+        # old its counts are should not include our request latency, and should
+        # include the feed's own.
+        "as_of": float(status_doc.get("last_updated") or time.time()),
+        "site": list(DOCKS_SITE),
+        "site_name": "Sequoia Fabrica",
+        "site_elev_m": None if site_elev is None else round(site_elev, 1),
+        "radius_m": DOCKS_RADIUS_M,
+        "walk_m_per_min": DOCKS_WALK_M_PER_MIN,
+        "n": len(rows),
+        # Parallel arrays over the stations, ascending by distance. Everything
+        # the panel draws comes out of these; nothing is pre-binned, because how
+        # to bin them is a drawing decision.
+        "name": [r["name"] for r in rows],
+        "dist_m": [int(round(r["d"])) for r in rows],
+        "walk_min": [_docks_walk_min(r["d"]) for r in rows],
+        "lat": [r["lat"] for r in rows],
+        "lon": [r["lon"] for r in rows],
+        "bikes": [r["bikes"] for r in rows],
+        "ebikes": [r["ebikes"] for r in rows],
+        "free_docks": [r["free"] for r in rows],
+        "capacity": [r["cap"] for r in rows],
+        "elev_m": elev,
+        "open": [r["open"] for r in rows],
+        "returning": [r["ret"] for r in rows],
+        "loose": loose,
+        "totals": {
+            "stations": len(rows),
+            "closed": len(rows) - len(open_rows),
+            "bikes": sum(r["bikes"] for r in open_rows),
+            "ebikes": sum(r["ebikes"] for r in open_rows),
+            "free_docks": sum(r["free"] for r in open_rows),
+            "capacity": sum(r["cap"] for r in open_rows),
+            "empty": sum(1 for r in open_rows if r["bikes"] == 0),
+            "jammed": sum(1 for r in open_rows if r["free"] == 0),
+            "loose": loose["n"],
+        },
+        # Kept so the next pass can skip the 348 kB request. Not for drawing:
+        # `name`, `lat`, `lon` and `capacity` above are the same values in the
+        # order the panel wants them.
+        "info": info,
+        "info_fetched": bool(info_fetched),
+        "units": {"dist_m": "straight-line metres from the wall",
+                  "walk_min": "whole minutes at %.0f m/min, straight line"
+                              % DOCKS_WALK_M_PER_MIN,
+                  "elev_m": "metres above NAVD88, from bikes-terrain.npz",
+                  "site_elev_m": "approx: the nearest baked dock's elevation",
+                  "bikes": "docked bikes available, ebikes included",
+                  "ebikes": "of those, electric; classic is bikes - ebikes",
+                  "free_docks": "empty docks, i.e. places to leave one",
+                  "loose": "free-floating bikes, mostly electric, no docks"},
+        "sources": [BIKES_INFO_URL, BIKES_STATUS_URL, loose["source"]],
+    }
+    return payload, BIKES_STATUS_URL
+
+
+# Same reason as baywheels above, for half of it: this product reads its own
+# previous record, to reuse the trimmed station_information rather than fetch
+# 348 kB of it every two minutes. It writes no sidecar.
+PRODUCTS[DOCKS_PRODUCT]["blob"] = True
+
+# --------------------------------------------------------------------------
 # The ground under the building. quake.py draws this.
 #
 # **One feed, two scales, and a third request that is not a feed.** USGS
