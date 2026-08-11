@@ -3542,16 +3542,18 @@ PRODUCTS[BIKES_PRODUCT]["blob"] = True
 
 DOCKS_PRODUCT = "docks-nearby"
 
-# The wall's own address: Sequoia Fabrica, Dogpatch, San Francisco, surveyed to
-# the building rather than to the block. Note that `adsb.py` and `quake.py` --
-# and QUAKE_LAT/QUAKE_LON above -- carry (37.7627, -122.3966), which is 273 m
-# north-east of this. At their scales (a 50 nautical mile radar picture, a
-# 300 km earthquake map) 273 m is a fifth of a pixel and not worth a change that
-# would touch three products; at this panel's scale it is seven pixels and the
-# difference between the nearest dock being Jackson Playground and being Rhode
-# Island St. So this product carries its own constant deliberately, and the two
-# should be reconciled on purpose rather than by one of them drifting.
-DOCKS_SITE = (37.7624929274026, -122.39969356310202)
+# The wall's own address, from the site config -- Sequoia Fabrica, Dogpatch,
+# San Francisco, surveyed to the building rather than to the block.
+#
+# This product was written while `adsb.py`, `quake.py` and QUAKE_LAT/QUAKE_LON
+# still carried (37.7627, -122.3966), 273 m north-east, and it kept a private
+# constant rather than inherit an address it knew to be wrong. That conflict is
+# now resolved the other way: every one of them reads `ftsite`, so this reads it
+# too. Worth keeping the reason on record, because this is the panel where it
+# mattered -- at 39 m to the pixel, 273 m is seven pixels and the difference
+# between the nearest dock being Jackson Playground and being Rhode Island St,
+# where on a 50 nautical mile radar picture it is a fifth of one.
+DOCKS_SITE = (ftsite.LAT, ftsite.LON)
 
 # How far out to collect, in metres of straight line. 1.5 km is 45 docks, 235
 # docked bikes and 851 free docks on a Monday evening -- comfortably more than

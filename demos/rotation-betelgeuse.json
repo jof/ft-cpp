@@ -13,6 +13,17 @@
     },
     {
       "kind": "py",
+      "name": "docks",
+      "module": "docks",
+      "seconds": 24.0,
+      "fps": 20,
+      "ms": 1.5,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "fireworks",
       "module": "fireworks",
       "seconds": 45.0,
