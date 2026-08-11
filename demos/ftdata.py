@@ -4928,6 +4928,220 @@ PRODUCTS[HELI_PRODUCT]["blob"] = True
 
 
 # --------------------------------------------------------------------------
+# Particulates and visibility over the wall's own address. air.py draws these.
+#
+# **Why this is not `wx-air-<site>`.** That product already exists a thousand
+# lines up and it is the right shape for what wx.py wants: `current=` gives one
+# instant, five species, and a number to print in a corner. air.py wants the
+# opposite -- one species, forty-nine hours of it, half of them in the future --
+# because the panel is about a *trend arriving*, and the difference between a
+# clear September afternoon and the day a fire starts upwind is entirely in the
+# slope. Bolting `hourly=` onto the wx product would have made every wx fetch
+# forty times bigger for a number wx.py does not draw. So: a second record, the
+# same free keyless service, one more request an hour.
+#
+# **The window is now-24h to now+24h, forty-nine hourly slots.** `past_days` and
+# `forecast_days` are the only controls the API has and they snap to whole days,
+# so the request covers five days and everything outside the window is thrown
+# away here rather than stored. That is the point of the fetcher: 6 kB of JSON
+# over the wire becomes about 250 numbers on the flash card.
+#
+# **Times are asked for in UTC, deliberately.** Open-Meteo's default is GMT but
+# the documented default is not a promise, and `timezone=` also decides where
+# the `past_days` day boundaries fall. UTC is asked for explicitly, epochs are
+# stored, and air.py turns them into local hours for its labels the same way
+# caiso.py does. `forecast_days=3` rather than 2 because with UTC days the
+# window's right-hand end can otherwise fall up to an hour past the last
+# forecast hour, in the hour before UTC midnight.
+#
+# **Two endpoints, and the second one is allowed to fail.** The air-quality API
+# has the particulates; the ordinary forecast API has relative humidity and the
+# model's own visibility diagnostic. Both are needed because the panel draws
+# visibility, and *fog and smoke both destroy visibility while meaning opposite
+# things*. karl.py already owns fog; this panel has to be able to tell it apart
+# from smoke or it is lying twice a week in July. The split it uses is:
+#
+#     b_pm  = 3 * PM2.5 + 10        extinction from particles, Mm^-1
+#     b_tot = 3912 / visibility_km  extinction the model says there is
+#     b_fog = b_tot - b_pm          whatever is left, which is water
+#
+# -- the Koschmieder relation and the IMPROVE-style mass scattering efficiency,
+# both crude and both good enough to separate brown from white. That arithmetic
+# is air.py's, not this file's; what is stored is the three inputs, because
+# storing a derived number is how a panel ends up unable to say why.
+#
+# If the humidity request fails, `rh` and `vis_km` are stored as null and the
+# panel falls back to particulates alone, which loses the fog distinction and
+# nothing else. If the *air-quality* request fails the product fails, because
+# without PM2.5 there is no panel.
+#
+# **A surprise worth writing down: the two endpoints answer for different grid
+# cells.** The air-quality model is CAMS at about 11 km and it answered for
+# 37.80, -122.40 -- roughly Fisherman's Wharf, 4 km north of the building. The
+# forecast model is finer and answered for 37.763, -122.413, half a mile away.
+# Both are stored, as `grid` and `wx_grid`, because "modelled for a cell that
+# contains most of the northeast quadrant of the city" is the honest description
+# of this number and the panel is entitled to say so.
+#
+# **Aerosol optical depth rides along.** It is literally an opacity -- the
+# column integral of extinction, which is nearer to what the panel draws than a
+# surface concentration is -- and it costs one more series. It is not what the
+# picture is driven by, because AOD is a whole-column number and a smoke plume
+# aloft at 3 km darkens the sun without making the street any harder to breathe
+# in; PM2.5 is the number the health advice is written against and the one
+# somebody walking past is actually asking about. AOD is stored so the two can
+# be compared, and because the day they disagree is interesting.
+#
+# TTL three hours, interval one hour. The model is revised hourly at best, and
+# a curve fetched two hours ago is still very nearly the same curve; past three
+# the panel says STALE. Twenty-four passes a day at two requests each is about
+# as polite as a wall can be to a free service.
+# --------------------------------------------------------------------------
+
+# Both endpoints are already named in this file for the wx products; reusing the
+# constants rather than writing the hostnames out again is the same reasoning
+# that put the site coordinate in ftsite.py.
+AIR_LAT, AIR_LON = ftsite.LAT, ftsite.LON
+
+AIR_TTL = 3 * 3600
+AIR_INTERVAL = 3600
+
+# Hours either side of the present. Symmetric on purpose: the panel sweeps
+# through them at a constant rate and an asymmetric window would make the past
+# and the future run at different speeds across the same axis.
+AIR_PAST_H = 24
+AIR_AHEAD_H = 24
+
+
+def _air_hour_epoch(s):
+    """'2026-08-11T14:00' in UTC -> epoch seconds. Same shape as _iso_hour_epoch."""
+    import calendar
+    return float(calendar.timegm(time.strptime(str(s)[:16], "%Y-%m-%dT%H:%M")))
+
+
+def _air_url(base, fields, forecast_days=3):
+    from urllib.parse import urlencode
+    return base + "?" + urlencode({
+        "latitude": round(float(AIR_LAT), 4),
+        "longitude": round(float(AIR_LON), 4),
+        "hourly": fields,
+        "timezone": "UTC",
+        "past_days": 2,
+        "forecast_days": forecast_days,
+        "cell_selection": "nearest",
+    })
+
+
+def _air_series(hourly, key, places, want_int=False):
+    """One hourly column, rounded, with absent values kept as None.
+
+    Nulls are stored rather than dropped or zeroed. A gap in a PM2.5 series is
+    an hour the model declined to answer for, and both of the other options --
+    shortening the array, or calling it clean air -- are inventions the panel
+    would then draw with a straight face.
+    """
+    out = []
+    for v in hourly.get(key) or []:
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            out.append(None)
+        elif want_int:
+            out.append(int(round(float(v))))
+        else:
+            out.append(round(float(v), places))
+    return out
+
+
+@product("air", ttl=AIR_TTL, interval=AIR_INTERVAL,
+         description="Open-Meteo/CAMS PM2.5, AQI and visibility, "
+                     "%d h back and %d h ahead" % (AIR_PAST_H, AIR_AHEAD_H))
+def _air():
+    """Forty-nine hours of particulates over the wall, and why you cannot see.
+
+    The window is anchored on the *top of the current hour* rather than on the
+    fetch time, so two fetches inside the same hour produce records with the
+    same time axis and the panel does not shuffle a pixel sideways every quarter
+    of an hour for no reason.
+    """
+    doc = get_json(_air_url(OPENMETEO_AQ_URL,
+                            "pm2_5,pm10,us_aqi,aerosol_optical_depth"),
+                   timeout=40)
+    hourly = doc.get("hourly") or {}
+    stamps = hourly.get("time") or []
+    if not stamps:
+        raise ValueError("no hourly air quality returned for %s,%s"
+                         % (AIR_LAT, AIR_LON))
+
+    now = time.time()
+    t0 = (now // 3600.0) * 3600.0 - AIR_PAST_H * 3600.0
+    t1 = t0 + (AIR_PAST_H + AIR_AHEAD_H) * 3600.0
+    epochs = [_air_hour_epoch(s) for s in stamps]
+    keep = [i for i, t in enumerate(epochs) if t0 - 1.0 <= t <= t1 + 1.0]
+    if len(keep) < 12:
+        # The response did not straddle now at all. That is a clock problem or
+        # a model outage, and either way the honest answer is to fail the fetch
+        # and leave whatever was in the cache in place.
+        raise ValueError("air quality response covers %s..%s, not the window"
+                         % (stamps[0], stamps[-1]))
+    a, b = keep[0], keep[-1] + 1
+
+    def cut(key, places, want_int=False):
+        col = _air_series(hourly, key, places, want_int)
+        return col[a:b] if len(col) >= b else None
+
+    pm = cut("pm2_5", 1)
+    if not pm or all(v is None for v in pm):
+        raise ValueError("no usable PM2.5 in the window")
+
+    # The humidity half. Wrapped because it is an enrichment, not the product:
+    # losing it costs the fog/smoke distinction and leaves the panel drawing
+    # particulates alone, which is still the thing it is for.
+    rh = vis = None
+    wx_grid = None
+    wx_err = ""
+    try:
+        wx = get_json(_air_url(OPENMETEO_URL,
+                               "relative_humidity_2m,visibility"), timeout=40)
+        wh = wx.get("hourly") or {}
+        wstamps = wh.get("time") or []
+        # The two models are on the same hourly grid, but they are two separate
+        # services and the assumption is worth one line: the humidity column is
+        # aligned by *time*, not by index.
+        index = dict((_air_hour_epoch(s), i) for i, s in enumerate(wstamps))
+        rows = [index.get(t) for t in epochs[a:b]]
+        if any(i is None for i in rows):
+            raise ValueError("humidity series does not cover the window")
+        raw_rh = _air_series(wh, "relative_humidity_2m", 0, want_int=True)
+        raw_vis = _air_series(wh, "visibility", 0)
+        rh = [raw_rh[i] if i < len(raw_rh) else None for i in rows]
+        vis = [None if (i >= len(raw_vis) or raw_vis[i] is None)
+               else round(raw_vis[i] / 1000.0, 1) for i in rows]
+        wx_grid = [wx.get("latitude"), wx.get("longitude")]
+    except Exception as e:                                    # noqa: BLE001
+        wx_err = repr(e)[:120]
+        print("ftdata: air: no humidity/visibility (%s)" % wx_err,
+              file=sys.stderr)
+
+    return {
+        "site": [float(AIR_LAT), float(AIR_LON)], "name": ftsite.NAME,
+        "grid": [doc.get("latitude"), doc.get("longitude")],
+        "wx_grid": wx_grid, "wx_error": wx_err,
+        "t0": epochs[a], "step": 3600.0, "n": b - a,
+        "now": now, "past_h": AIR_PAST_H, "ahead_h": AIR_AHEAD_H,
+        "pm2_5": pm,
+        "pm10": cut("pm10", 1),
+        "us_aqi": cut("us_aqi", 0, want_int=True),
+        "aod": cut("aerosol_optical_depth", 2),
+        "rh": rh, "vis_km": vis,
+        "units": {"pm2_5": "ug/m3", "pm10": "ug/m3", "us_aqi": "US AQI",
+                  "aod": "dimensionless, 550 nm column",
+                  "rh": "%", "vis_km": "km"},
+        "model": "CAMS European/global via Open-Meteo; humidity and visibility "
+                 "from Open-Meteo best_match",
+        "label": "OPEN-METEO",
+    }, OPENMETEO_AQ_URL
+
+
+# --------------------------------------------------------------------------
 # Orbital elements, from CelesTrak's GP service. sats.py propagates these.
 #
 # This is the slowest-moving product in the file and the fastest-moving demo,
