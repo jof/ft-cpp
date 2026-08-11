@@ -51,7 +51,15 @@ import demoscene as ds
 
 f32 = ds.f32
 
-ART_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pixelart")
+ART_DIR = os.environ.get("FT_PIXELART_DIR") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "pixelart")
+
+# The most sprites one `--art` spec may name. The rotation's longest is eight
+# (`sew1..8`), so this is two orders of magnitude of headroom and still a bound.
+# It exists because `--art` is a string that arrives from the panel over HTTP,
+# and the number inside a string is the one part of an option that
+# `ftsched_opts.check` cannot clamp; see expand().
+MAX_SPRITES = 256
 
 # What the old tool called transparency: one colour in the artwork means "not
 # drawn" rather than "draw this". These sprites were authored on a flat
@@ -66,6 +74,18 @@ def expand(spec):
     meant naming the same file seven times and for the sewing machine meant
     eight paths of forty characters. Both are ranges, so let them be written
     as ranges.
+
+    Both range forms are bounded, and the reason is worth writing down. This
+    string arrives from the panel over HTTP, and the number inside it is the
+    one part of an option `ftsched_opts.check` cannot see: it clamps numbers,
+    and this is a str. Unbounded, `--art "sf-tree*100000000"` asks for about
+    eight hundred megabytes on a machine whose cgroup stops at 512 MB -- which
+    is not a MemoryError anybody can catch. The kernel kills the process,
+    systemd restarts it, and the option has already been persisted to
+    state.json, so it dies again on the way up and stays dead until somebody
+    edits JSON over SSH. A ValueError, by contrast, is a build that fails
+    cleanly, and the scheduler already switches an entry off when its build
+    fails.
     """
     out = []
     for item in spec.split(","):
@@ -74,15 +94,29 @@ def expand(spec):
             continue
         repeat = re.match(r"^(.*?)\*(\d+)$", item)
         if repeat:
-            out.extend([repeat.group(1)] * int(repeat.group(2)))
-            continue
-        span = re.match(r"^(.*?)(\d+)\.\.(\d+)$", item)
-        if span:
-            stem, lo, hi = span.group(1), int(span.group(2)), int(span.group(3))
-            step = 1 if hi >= lo else -1
-            out.extend("%s%d" % (stem, n) for n in range(lo, hi + step, step))
-            continue
-        out.append(item)
+            n = int(repeat.group(2))
+            if n > MAX_SPRITES:
+                raise ValueError("%r repeats %d times; the limit is %d"
+                                 % (item, n, MAX_SPRITES))
+            out.extend([repeat.group(1)] * n)
+        else:
+            span = re.match(r"^(.*?)(\d+)\.\.(\d+)$", item)
+            if span:
+                stem = span.group(1)
+                lo, hi = int(span.group(2)), int(span.group(3))
+                if abs(hi - lo) + 1 > MAX_SPRITES:
+                    raise ValueError("%r spans %d frames; the limit is %d"
+                                     % (item, abs(hi - lo) + 1, MAX_SPRITES))
+                step = 1 if hi >= lo else -1
+                out.extend("%s%d" % (stem, n)
+                           for n in range(lo, hi + step, step))
+            else:
+                out.append(item)
+        # Checked per item as well as per range: a comma list of individually
+        # legal ranges is still unbounded without this.
+        if len(out) > MAX_SPRITES:
+            raise ValueError("%r takes the sequence past %d sprites"
+                             % (item, MAX_SPRITES))
     return out
 
 
@@ -91,9 +125,22 @@ def load(name):
 
     PNG is what ships in pixelart/ -- the same pixels the JSON held, at a
     fifteenth of the size. JSON is still read so a checkout can be pointed
-    straight at an existing pixelart directory.
+    straight at an existing pixelart directory; that is what FT_PIXELART_DIR
+    is for, and it is deliberately an environment variable rather than an
+    option, because the environment belongs to whoever started the process and
+    an option can be set by anyone who can reach the panel.
+
+    Names are confined to ART_DIR. `--art` used to accept anything containing a
+    separator as a path of its own, which meant a request to the panel could
+    open any file this user can read and put it on the wall -- `json.load` on a
+    file of the caller's choosing, which is a worse primitive than the picture
+    suggests. Resolved with realpath so `..` and a symlink out of the tree are
+    both caught, rather than by string matching.
     """
-    path = name if os.path.sep in name else os.path.join(ART_DIR, name)
+    root = os.path.realpath(ART_DIR)
+    path = os.path.realpath(os.path.join(root, name))
+    if path != root and not path.startswith(root + os.path.sep):
+        raise ValueError("art %r is outside %s" % (name, root))
     if not os.path.splitext(path)[1]:
         for ext in (".png", ".json"):
             if os.path.exists(path + ext):
