@@ -2852,6 +2852,29 @@ BIKES_HIST_BUCKET = 600.0
 BIKES_HIST_HOURS = 12.0
 BIKES_HIST_MAX = 80
 
+# --------------------------------------------------------------------------
+# The calendar day, kept separately from the rolling twelve hours.
+#
+# `hist` is a *window*: twelve hours of forty-number flow vectors, capped at
+# eighty entries, which is what the swarm replay needs and is deliberately not
+# longer. A panel that draws today against a typical day needs something else
+# entirely -- every ten minutes since local midnight, whether that is one hour
+# ago or twenty-three -- and it needs almost nothing per slot: how much moved,
+# and over how many seconds that was measured.
+#
+# So this is 144 ten-minute slots from local midnight carrying two scalars
+# each, which is about 1.5 kB of JSON against the 20 kB the record already is,
+# and it is reset when the local date rolls over rather than rolling
+# continuously. Local midnight and not UTC: the thing being drawn is a *day* as
+# somebody who rides a bike experiences one, and the axis on the panel is
+# labelled in the time on their watch. `time.mktime` with `tm_isdst = -1`
+# resolves the two ambiguous hours a year the way the system zone says to.
+#
+# A slot is null until a pass lands in it. That is the whole cold-start story:
+# a wall that booted at three in the afternoon has 89 nulls in front of it and
+# the panel says where the trace starts instead of drawing a line from zero.
+BIKES_DAY_SLOTS = 144
+
 # Bands of distance from downtown, for the flow field and for the loose bikes.
 # Forty over twelve kilometres is a band every 300 m, which is eight columns of
 # a 320-wide panel and about ten docks. Finer would be storing noise: the median
@@ -3095,7 +3118,16 @@ def _bikes_flow(previous, sid, bikes, bins, as_of):
     # `mov` counts both ends of a move, so it is even for anything that stayed
     # inside the city and odd only where a bike joined or left the docked fleet.
     # Halving happens in the demo, where the caveat can be printed next to it.
-    return [int(v) for v in flow], int(mov) * 2, round(dt, 1), here
+    #
+    # This used to return `int(mov) * 2`, which was a plain bug: `mov` is
+    # already the sum of |change| over the stations and so already counts both
+    # ends, the record's own `units` block says "/2 is bikes moved", and the
+    # demo dutifully halved it -- so every bike-movement figure this product
+    # has ever produced was exactly twice the truth. Fixed here rather than
+    # compensated for in the demo, because the unit the record documents is the
+    # unit it should carry. Buckets written by the old code are twice as tall
+    # as they should be and age out of `hist` within twelve hours.
+    return [int(v) for v in flow], int(mov), round(dt, 1), here
 
 
 def _bikes_anon(name):
@@ -3249,6 +3281,52 @@ def _bikes_history(previous, sample, now):
     hist["bins"] = BIKES_FLOW_BINS
     hist["n"] = len(hist["t"])
     return hist
+
+
+def _bikes_day0(now):
+    """The epoch of the local midnight that starts the day containing `now`."""
+    lt = time.localtime(now)
+    return float(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                              0, 0, 0, 0, 0, -1)))
+
+
+def _bikes_today(previous, sample, now):
+    """The day so far, in 144 ten-minute slots from local midnight.
+
+    Two columns and no more: `mov`, the sum of |change| over the stations for
+    the difference that landed in this slot, and `dt`, the seconds that
+    difference actually covers. The second one is not redundant. A missed pass
+    makes the next difference forty minutes long instead of ten, and a rate
+    computed against the nominal slot would then draw a spike followed by three
+    holes; with `dt` in the record the demo can spread that one measurement
+    across the four slots it really describes, which is what it does.
+
+    Reset by date rather than rolled: if the stored `day0` is not the local
+    midnight of `now`, the arrays start empty. A record carried across a
+    reboot, a clock that jumps, and the ordinary passage of midnight are then
+    all the same code path. See BIKES_DAY_SLOTS.
+    """
+    n = BIKES_DAY_SLOTS
+    day0 = _bikes_day0(now)
+    mov = [None] * n
+    dt = [None] * n
+    old = (previous or {}).get("today")
+    if isinstance(old, dict):
+        try:
+            same = abs(float(old.get("day0")) - day0) < 1.0
+        except (TypeError, ValueError):
+            same = False
+        if same:
+            for key, dst in (("mov", mov), ("dt", dt)):
+                col = old.get(key)
+                if isinstance(col, list) and len(col) == n:
+                    dst[:] = [None if v is None else v for v in col]
+    slot = int((now - day0) // BIKES_HIST_BUCKET)
+    if 0 <= slot < n and sample.get("mov") is not None:
+        mov[slot] = int(sample["mov"])
+        dt[slot] = None if sample.get("dt") is None else float(sample["dt"])
+    return {"day0": day0, "bucket": BIKES_HIST_BUCKET, "n": n,
+            "mov": mov, "dt": dt}
 
 
 def _bikes_round(values, places=None):
@@ -3456,6 +3534,9 @@ def _baywheels(cache_dir):
                  "track_unit_m": 100.0},
         "interpolated": int(interpolated),
         "hist": _bikes_history(prev_payload, sample, now),
+        # The calendar day so far, which `hist` cannot answer: see
+        # BIKES_DAY_SLOTS. Two columns of 144 slots, reset at local midnight.
+        "today": _bikes_today(prev_payload, sample, now),
         # Not for drawing. These two are the snapshot the *next* pass
         # differences against, and they are the only things in this payload
         # that are state rather than observation. Kept in the record and not in
@@ -3475,7 +3556,10 @@ def _baywheels(cache_dir):
                               "in hundreds of metres from downtown",
                   "hist.seen": "free ebikes present in both snapshots",
                   "hist.gone": "free ebikes that vanished: docked or taken",
-                  "hist.came": "free ebikes that appeared: undocked or freed"},
+                  "hist.came": "free ebikes that appeared: undocked or freed",
+                  "today.day0": "epoch of the local midnight the slots start at",
+                  "today.mov": "as hist.mov, in 10 minute slots from midnight",
+                  "today.dt": "seconds the slot's difference covers"},
         "sources": [BIKES_INFO_URL, BIKES_STATUS_URL, free_url],
     }
     return payload, BIKES_STATUS_URL

@@ -1,120 +1,167 @@
 #!/usr/bin/env python3
-"""Bay Wheels, replayed: half a day of San Francisco's bikes moving, in half a minute.
+"""Today's bike traffic against the shape of a typical one, hour by hour.
 
-A **cross-section of the city along its commute axis**. Left edge is the Ferry
-Building at the foot of Market Street; right edge is twelve kilometres out, at
-Ocean Beach and the county line. Height is ground altitude, so the shape is the
-climb out of downtown -- sea level on the left, the ridge of Nob Hill and Buena
-Vista and Twin Peaks bulging in the middle, the low sandy flats of the Sunset
-falling away on the right. All 383 San Francisco docks are dots on it.
+One day, left to right: midnight to midnight across 320 columns. The dark blue
+silhouette is **what this weekday normally looks like** -- the two commute
+peaks, the midday trough between them, the long tail into the evening -- built
+from three months of Bay Wheels' own published trip records. The bright gold
+line drawn over it is **today, so far**. A lit vertical rule says where *now*
+is, and everything to the right of it is what the rest of the day usually does.
 
-Over that landscape runs the thing the panel is for: **bikes, moving.** It is a
-time lapse in the shape `goes.py` established -- one pass through the last
-twelve hours at an hour every 2.3 seconds, then a hold on the newest hour so
-the loop lands on now. In one rotation slot you watch a whole commute happen:
-the morning pull into the financial district, the midday lull, the evening
-scatter back out over the hills. Time of day is the entire story this data has,
-and a panel showing only the present moment would be a nearly still picture at
-nine in the evening.
+That is the whole idea, and it is the third design this panel has had. The
+first was a hillside of 383 docks coloured by occupancy, which showed *state*
+and not activity. The second replayed twelve hours of inferred flow over a
+distance-and-altitude cross-section, which was a good instrument and did not
+communicate anything in the two seconds somebody spends walking past. What was
+actually asked for was "the patterns of the day, and where we are in the
+cycle", and this is that question drawn literally: one familiar shape, and a
+line moving along it.
 
-Two things move over the landscape and they are **two different kinds of
-claim**, drawn differently on purpose.
+--------------------------------------------------------------------------
+THE HONESTY PROBLEM, WHICH IS THE WHOLE OF THE DESIGN
+--------------------------------------------------------------------------
 
-**The bright comets were watched happening.** GBFS rotates `bike_id` between
-rentals precisely so trips cannot be reconstructed -- across two snapshots
-thirty-six minutes apart not one of 634 tokens survived -- but it does not
-rotate `name`, the number printed on the physical bike, of which 585 of 620
-survived the same interval with a median displacement of 4.5 m. So for the
-**free-floating ebikes, and only for those**, a journey is an observation: the
-same bike at a new place. Those are the near-white marks with a coloured tail,
-the brightest thing on the panel, and the legend says how many of the roughly
-620 they are.
+**The silhouette is measured. Today's line is estimated.** They are not the
+same kind of number and this panel is arranged so that nobody can mistake one
+for the other.
 
-**The dim field is inferred, and the panel says so.** Docked bikes have no
-per-bike record in GBFS at all -- station_status is counts and nothing else --
-so for the other 2 700 the panel has only how the counts changed. The city is
-cut into forty bands of distance from downtown; the running sum of their net
-changes is the number of bikes that **had to** cross each distance, which is
-arithmetic rather than a model; and each dim dot is one bike of that net
-displacement carried from an emptying band to a filling one along the
-least-total-displacement matching. It is not a person and it is not a trip.
-The legend reads `REST FROM DOCK COUNTS - NOT TRIPS`, and the caption repeats
-`NET FLOW - NOT TRIPS` beside the number, forever.
+Bay Wheels publishes a monthly CSV of every trip taken -- start time, end time,
+which dock at each end -- and that is a *census*. The silhouette is built from
+it offline and committed as `bikes-typical.npz`; see `bake_typical()`.
 
-**What is deliberately not drawn.** In four minutes about nineteen ebikes
-vanish from the feed and thirteen appear. Vanishing usually means docked or
-picked up by a van; appearing means undocked or released. They are journey
-endpoints with one end unobservable, so they are counted in the record and
-never drawn -- a dot appearing out of nothing reads as a bike arriving from
-somewhere, which is exactly the claim that cannot be made.
+The live feed publishes no trips at all. GBFS is a snapshot: how many bikes are
+in each dock right now. Everything this panel knows about today comes from
+differencing those counts every ten minutes, which sees a **floor** on movement
+and not a trip count -- two riders swapping a dock inside one window cancel, a
+rebalancing van looks like fifteen riders, and the several hundred free-floating
+ebikes that never touch a dock are invisible to it entirely.
 
-**No bike number reaches this file, the record, or the wall.** The printed
-number is hashed in the fetcher the moment it is read; the tokens live in one
-snapshot that is overwritten every pass; nothing in the rolling twelve hours
-carries an identifier of any kind, so there is no trip history in the cache to
-obtain however long it has been running. The panel shows traffic, never a bike
-somebody could go and look for. See the BIKES_TRACK_* block in `ftdata.py`.
+So how do you put those two on one axis without lying? Three options were
+available and the third was chosen:
 
-**The headline is a floor.** It counts docked bikes that changed place: the sum
-of |change| over every station, halved, because a bike ridden from one dock to
-another is minus one at one end and plus one at the other. Roughly 800-1000 an
-hour at ten at night on the live feed, four figures in the peaks. It undercounts
-two riders who cancel inside one ten-minute window and a bike left loose at the
-kerb, and it cannot tell a rebalancing van from fifteen riders.
+  1. *Plot both in absolute trips and print a percentage difference.* Rejected.
+     It claims a commensurability that had not been established, and the
+     percentage would have been a made-up figure with two significant digits.
+  2. *Normalise both to their own peak and compare shape only.* Rejected, but
+     not easily: it is honest, and shape is most of what was asked for. It
+     fails on the mechanics -- today's own peak is not known until the day has
+     ended, so at nine in the morning the normalisation has nothing to divide
+     by, and any substitute for it reintroduces exactly the assumption it was
+     supposed to avoid.
+  3. **Calibrate the estimator against the archive, and disclose the
+     calibration on the panel.** Chosen.
 
-**Why this is not `winds.py` with bicycles.** `winds` is already a particle
-field over a map of this bay and a second one would be the worse mistake. Wind
-is smooth and continuous and is drawn as one -- a full-bleed colour wash with
-streaks; bike flow is discrete, sourced and sunk at fixed points, so this is
-near-black with a constellation of docks and marks that arrive in bursts.
-`winds` sweeps *forward* through a forecast; this sweeps *backward* through the
-observed past. `winds` colours by speed; this colours by a direction that means
-something socially. And a map would be wrong anyway: San Francisco's docks are
-a blob 11.9 by 12.4 km -- square -- so a map of them on a 5:1 panel spends
-three hundred columns saying the city is square. Distance from downtown is the
-one axis the data varies along, and it buys 37 m a column.
+**The calibration, and how it was measured.** The archive has both halves of
+the comparison in it. Every trip in it can be replayed as the two dock-count
+changes it would have caused -- minus one at the dock it left when it left,
+plus one at the dock it reached when it reached it -- so the estimator can be
+*run on the census*, ten-minute bucket by ten-minute bucket, and its output
+compared against the true number of trips in the same bucket. Over 92 days in
+May, June and July 2026 the ratio is:
 
-**Gravity is the other axis because gravity is the explanation.** Bikes roll
-downhill for free and have to be pedalled, or trucked, back up. The elevation
-is a committed bake, `bikes-terrain.npz`; the terrain band is the 25th to 75th
-percentile of dock height in each band, drawn rather than hidden, because at
-four kilometres out the city contains both the Mission flats and Buena Vista
-Park and one line would be a lie about that.
+    true trips / dock-count moves = 1.83   (median day; 1.72 to 1.94, p10-p90)
 
-**Restraint is a design decision here.** An earlier draft carried a ten-row bar
-chart of the last twelve hours along the bottom. It was a good instrument and
-the wrong thing to spend a sixth of the panel on -- the replay *is* the time
-axis. Taking it out gave the landscape 51 rows instead of 40. What is left is a
-header, one headline, one legend row and `goes`'s one-row scrub bar.
+and it varies with the hour of the day, from about 1.3 at four in the morning
+to about 2.2 at five in the afternoon -- busier hours cancel more inside a
+bucket, and the free-floating ebike share moves too. Today's line is the live
+estimator multiplied by that hour-of-day factor, and **the panel prints the
+factor**: `EST FROM DOCK COUNTS X1.9`. A viewer who reads that line knows
+exactly how much of the number is measurement and how much is arithmetic, which
+is a better disclosure than an error bar they cannot check.
 
-**Cold start is designed, and will be the first thing the wall shows.** The
-flow needs two snapshots. A wall that booted ten minutes ago has one, draws the
-city and its docks, and says `LEARNING FLOW` and when the first movement lands.
-As buckets accumulate the window grows with them -- `REPLAY OF LAST 40M`, then
-`2H`, then `12H` -- and the header prints `12/72` beside the age while the
-window is materially short, which is `goes`'s convention and its threshold.
+**What the calibration does not cover, and why there is no percentage on the
+panel.** It was measured by simulating the estimator on the archive, not by
+comparing live GBFS against the archive -- nobody has months of paired
+snapshots, so that comparison cannot be made today. The live estimator sees
+things the simulation cannot: vans, bikes going out of service, a one-minute
+feed sampled every ten. So 5.9% is the *measured* spread of the calibration and
+a floor on its real error, not the error.
 
-**Three honest failures.** Past its half-hour TTL the panel still draws with
-`STALE` and the age. Past `--max-age` (six hours) it is refused: a confident
-swarm of this morning under an evening clock is the one lie it could tell. No
-record at all gets the same card and the command that fixes it.
+Against that, the day-to-day spread of the real thing is remarkably small: the
+middle half of thirteen Mondays' daily totals is within about 3% of the median.
+The estimator's uncertainty is therefore roughly twice the signal that a
+percentage would be reporting. Printing "+12% vs a typical Monday" would be
+reporting noise to two digits. So the panel prints no percentage. It prints a
+**verdict word** -- `BUSIER THAN USUAL`, `QUIETER THAN USUAL`, `USUAL FOR A
+MONDAY` -- and it only leaves the middle verdict when today is outside the
+typical range *widened by the calibration's own uncertainty*. On an ordinary
+day it says the ordinary thing, which is the correct output.
 
-**Frame budget.** Landscape, docks, header, legend and all twelve captions are
-rasterised once in `build()`. `render()` copies one frame, blits the caption
-box for the step, and advances the two swarms through five passes of about
-fifteen numpy calls each on arrays of a few hundred. On the wall's Pi a numpy
-call costs tens of microseconds whatever the array size, so the call count is
-the budget and not the pixel count. Measured here over a full loop: see the
-README.
+--------------------------------------------------------------------------
+WHY IT LOOKS LIKE THIS AND NOT LIKE CAISO
+--------------------------------------------------------------------------
+
+`caiso.py` is also one day across 320 columns with now marked, so the two had
+to be told apart from across a room, and they are, three ways. caiso is
+**full-bleed**: a stacked area of five saturated fuels that fills the panel edge
+to edge and top to bottom, and its subject is the *composition* of a total.
+This one is **mostly black**: a single dark blue silhouette that touches the top
+of the chart for about twenty minutes a day, one gold line, and nothing else --
+its subject is *one quantity against its own history*. caiso's palette is five
+hues at once; this is two, and one of them is nearly the background. And caiso
+is a picture of a single day, where this one draws two days at the same time,
+which is what the silhouette-plus-line form exists to do.
+
+The `p10`-to-`p90` crust along the top of the silhouette is the one piece of
+statistical furniture. It is drawn a shade brighter than the fill and it is
+where the day-to-day variation actually lives: two rows wide at the morning
+peak, six in the middle of the afternoon, which says something true about when
+this city is predictable and when it is not.
+
+--------------------------------------------------------------------------
+FOUR STATES, ALL DELIBERATE
+--------------------------------------------------------------------------
+
+**Cold start is the interesting one, and it is designed rather than tolerated.**
+The silhouette is baked, so it is on the panel in the first frame after a fresh
+install -- there is no version of this demo that shows an empty rectangle.
+Today's line is the opposite: it begins at local midnight with nothing and
+fills in as the day goes, and on the day the fetcher is first started it begins
+only from when it started. The record carries one slot per ten minutes with a
+null in every slot that was never fetched, so the panel knows the difference
+between "nothing happened" and "nobody was looking", draws the line only where
+it was looking, and changes the headline from `TRIPS TODAY` to `TRIPS SINCE
+3:10P`. The comparison follows it: today's estimate is only ever compared
+against the typical day *over the same slots*, so a panel that has been up for
+two hours makes a two-hour comparison and says so.
+
+**Stale.** Past the half-hour TTL the header says `STALE` with the age, and the
+gold line simply stops where the data stopped while the now-rule keeps moving,
+so the gap between the two is visible on the panel. That is deliberately not a
+refusal: this chart's whole shape is the day so far, and a day so far that ends
+an hour early is still true.
+
+**Yesterday.** A record whose day does not match the local date gets no line at
+all -- a day-shaped picture of the wrong day is the one lie this panel could
+tell -- and the headline says which day it is from.
+
+**Absent.** No live record, but the asset is there: the silhouette and the
+now-rule are drawn, the headline says `NO LIVE DATA` and the command that fixes
+it, and there is no gold line to mistake for one. Only a missing *asset* gets
+the plain no-data card.
+
+--------------------------------------------------------------------------
+FRAME BUDGET
+--------------------------------------------------------------------------
+
+Everything is rasterised once per cache read: the silhouette, the crust, the
+gold line, the gridlines, the axis labels, the header and all five strings of
+the headline strip. `render()` copies one frame, writes a comet of two dozen
+pixels along the gold line, and draws the now-rule and the pulse running up it
+-- about seven numpy calls on top of the copy. On the wall's Pi a numpy call
+costs tens of microseconds whatever the array size, so the call count is the
+budget and not the pixel count. Measured here over a full loop: see the README.
 
 Run:  python3 ftdata.py --once --only baywheels   # twice, ten minutes apart
       python3 bikes.py --host 127.0.0.1
-      python3 bikes.py --no-seen --hours 6        # inferred field only
-      FT_DATA_CACHE=/tmp/empty python3 bikes.py   # the no-data card
+      python3 bikes.py --at '2026-08-10 08:40'    # pretend it is the peak
+      FT_DATA_CACHE=/tmp/empty python3 bikes.py   # the typical day alone
       python3 scripts/test-bikes.py
+      python3 bikes.py --bake-typical 202605 202606 202607   # offline, once
 """
 
 import math
+import os
 import sys
 import time
 
@@ -128,17 +175,22 @@ f32 = np.float32
 
 PRODUCT = "baywheels"
 
+# The committed archive bake. Three months of Bay Wheels' published trip
+# records reduced to two matrices per weekday; see bake_typical() at the bottom
+# of this file for what is in it and how it was made.
+ASSET = "bikes-typical.npz"
+
 # --------------------------------------------------------------------------
 # Type. defcon.py's 3x5 font, the same one caiso, tide, propagation and sort
 # draw with: five rows a glyph, each row an octal digit whose three bits are
 # the three columns. Anything from a real typeface is mush at five pixels, and
 # the Pi does not have the same faces installed as the machine this was
-# written on. One glyph is added, for the sign this panel needs and a map of a
-# nuclear exchange does not.
+# written on. Two glyphs are added, for the two signs a meter needs and a map
+# of a nuclear exchange does not.
 # --------------------------------------------------------------------------
 
 _FONT = dict(defcon._FONT)
-_FONT.update({"+": "02720"})
+_FONT.update({"%": "51245", "+": "02720"})
 
 _GLYPHS = {}
 for _ch, _rows in _FONT.items():
@@ -178,14 +230,10 @@ def blit_text(dst, y, x, s, rgb, scale=1, halo=0.0):
     """Draw a string at (y, x), clipped to `dst`. Returns the width drawn.
 
     `halo` darkens the one-pixel border around every stroke by that factor
-    before the stroke is drawn, and it is what lets the caption sit over the
-    landscape instead of being dropped whenever the two would meet. The first
-    version of this panel checked the terrain under each line and gave way; on
-    a city whose upper quartile of dock heights is thirty metres at four
-    kilometres out, that meant the caveat vanished on exactly the days the
-    panel was busiest. A halo keeps the text legible over the dim terrain band
-    and leaves no rectangle behind it -- the darkening follows the letterforms,
-    so on the black sky where most of it lands it is invisible.
+    before the stroke is drawn. It is what lets the axis labels and the scale
+    tick sit over the silhouette instead of having to dodge it: the darkening
+    follows the letterforms rather than leaving a rectangle behind them, so on
+    the black sky where most of the type lands it is invisible.
     """
     m = text_mask(s, scale)
     gh, gw = m.shape
@@ -194,9 +242,6 @@ def blit_text(dst, y, x, s, rgb, scale=1, halo=0.0):
     if y1 <= y0 or x1 <= x0:
         return gw
     if halo > 0.0:
-        # A one-pixel dilation, done as four shifted ors into a padded copy.
-        # These are 5-by-40 arrays and this runs a dozen times a replay, not a
-        # dozen times a frame, so the shape of it is chosen for legibility.
         pad = np.zeros((gh + 2, gw + 2), bool)
         pad[1:-1, 1:-1] = m
         grow = (pad[:-2, 1:-1] | pad[2:, 1:-1] | pad[1:-1, :-2]
@@ -209,116 +254,97 @@ def blit_text(dst, y, x, s, rgb, scale=1, halo=0.0):
     return gw
 
 
+def fit(dst, y, x_right, forms, rgb, scale=1, halo=0.0, floor=0):
+    """Draw the first of `forms` that fits, right-aligned at `x_right`.
+
+    tide.py's ladder-of-shorter-forms, which every panel in this tree that has
+    to put a sentence on a 320 pixel row ends up needing. Returns the left edge
+    it drew at, or None if even the shortest form would collide with `floor`.
+    """
+    for s in forms:
+        if not s:
+            continue
+        x = x_right - text_width(s, scale)
+        if x >= floor:
+            blit_text(dst, y, x, s, rgb, scale, halo)
+            return x
+    return None
+
+
 # --------------------------------------------------------------------------
 # Colour.
 #
-# Two ramps, and they are kept apart on purpose because they mean unrelated
-# things. **Direction is green and violet**: green runs towards downtown,
-# violet runs away from it, and both are named in a legend on the panel because
-# neither is a convention anybody arrives already knowing. **Occupancy is amber
-# and blue**, which every dock-status map in the world uses and which was not
-# worth being clever about -- but it is now only spent on the two *failures*, a
-# dock with nothing to unlock and a dock with nowhere to leave one. The healthy
-# majority is a dim slate dot. The previous version of this panel put the whole
-# diverging ramp on every dock; on a panel that now has a swarm moving over it,
-# three hundred coloured dots competed with the thing you are meant to watch,
-# and the ramp's own principle -- that the quiet middle should be the dimmest
-# thing on it -- taken to its limit says to draw the middle as nearly nothing.
+# Two colours carry meaning and everything else is furniture. **Blue is the
+# past**: the silhouette of a typical weekday, dark enough that it reads as
+# ground rather than as data, with the day-to-day spread a shade brighter along
+# its top edge. **Gold is today**, and it is the only warm thing on the panel,
+# which is what makes it findable from across a room without a legend.
+#
+# The silhouette is deliberately dim. It is context, it covers a third of the
+# panel, and the failure mode of a chart like this is that the background
+# competes with the line drawn over it. C_BAND at (26,34,52) is about a tenth
+# of full brightness -- visible as a shape, never as a subject.
 # --------------------------------------------------------------------------
 
-C_IN = (128, 246, 132)           # flowing towards downtown
-C_OUT = (196, 130, 255)          # ...and away from it
-C_FLAT = (150, 160, 180)         # net flow too small to have a direction
-
-C_DRY = (255, 132, 52)           # a dock with nothing to unlock
-C_FULL = (150, 196, 255)         # ...and one with nowhere to leave one
-C_DOCK = (58, 70, 88)            # every other dock: present, quiet
-C_CLOSED = (34, 38, 46)          # out of service: no colour, no claim
-
-C_ROCK = (16, 20, 26)            # under the lowest quartile of dock heights
-C_BAND = (28, 34, 44)            # the 25th-to-75th spread of dock heights
-C_RIDGE = (46, 56, 70)           # the median: the line the swarm rides
-C_LOOSE = (40, 34, 58)           # undocked ebikes, stippled on the floor
-
-# Observed journeys. A near-white head over a tail in the direction hue: the
-# brightest thing on the panel, because it is the only thing on it that was
-# actually watched happening.
-C_SEEN = (255, 250, 232)
+C_BAND = (26, 34, 52)            # a typical day for this weekday, filled
+C_CRUST = (54, 72, 106)          # ...and the 10th-to-90th spread on top of it
+C_TODAY = (255, 186, 66)         # today, so far
+C_TODAY_HALO = (86, 60, 18)      # one row either side, so the line has body
+C_TODAY_HEAD = (255, 242, 208)   # the leading edge of the line
 
 C_TEXT = (198, 210, 222)
 C_DIM = (86, 98, 112)
 C_FAINT = (44, 52, 64)
-C_GRID = (24, 30, 38)
-C_GRID_HI = (46, 56, 68)
+C_GRID = (22, 28, 36)
+C_GRID_HI = (38, 46, 58)
 C_SEP = (14, 18, 24)
 C_WARN = (255, 96, 72)
 C_NOW = (255, 246, 214)
-C_NOW_DIM = (96, 92, 78)
-C_TRACK = (62, 74, 88)          # goes.py's scrub bar, filled behind the head
+C_NOW_DIM = (120, 112, 88)
+C_BUSY = (255, 206, 96)          # busier than usual: the gold, brightened
+C_QUIET = (128, 176, 232)        # quieter than usual: cool, never a rebuke
 
-# How many brightness steps a particle fades through at each end of its
-# journey, and what fraction of the journey each fade takes. Step 0 is black
-# and is also what an inactive particle gets, which is what makes the swarm
-# branch-free: see render().
-FADE_LEVELS = 8
-FADE_FRAC = 0.16
-
-# Of each replay step, the fraction spent launching particles and the fraction
-# one particle spends in flight. They overlap: bikes leave over the first third
-# of the step and each takes two thirds of it to arrive, so the step reads as a
-# shower rather than as a parade. The discreteness is deliberate -- the data
-# really does arrive in buckets, and pretending otherwise is what a smooth
-# continuous field would do.
-LAUNCH_FRAC = 0.34
-TRAVEL_FRAC = 0.62
-
-# How far the one-pixel border around each caption stroke is darkened. Enough
-# that white text reads over the terrain band, little enough that the halo is
-# invisible against the black sky where most of the caption lands.
+# How far the one-pixel border around each stroke is darkened where text lands
+# on the silhouette.
 HALO = 0.72
 
-# Rows of sky kept above the highest dock, and rows of plinth kept below the
-# lowest. The plinth is what stops downtown -- which is at three metres and is
-# where most of the flow is -- being drawn on the bottom row of the map with
-# nowhere for the swarm to fly.
-MAP_SKY = 2
-MAP_PLINTH = 6
+# The comet that runs along today's line, in samples and in seconds a pass.
+# It exists because a panel between two animated demos that holds one frame
+# reads as a crash, and because a light travelling along the line is the one
+# animation that says what the line *is* -- the day, moving. Twenty-six samples
+# at four and a half minutes a column is about two hours of city.
+COMET_LEN = 26
+COMET_S = 3.6
 
-# Where each layer flies relative to the terrain median under it, in rows.
-# The observed journeys ride higher than the inferred field and are drawn over
-# it, which is the point: the two are separated in space as well as in colour
-# and in size, so that nobody has to read a legend to see that the bright fast
-# things and the dim numerous things are different claims.
-SWARM_LIFT = 2
-SWARM_BAND = 5
-OBS_LIFT = 11
-OBS_BAND = 5
+# How fast the pulse runs up the now-rule, in hertz. The same trick and the
+# same reason as caiso.py's: it is the only thing on the panel guaranteed to
+# move in every single frame.
+PULSE_HZ = 1.3
 
-# A comet is a head and two tail samples, spaced by this much of its journey.
-# Two, not four: there are a handful of these against a couple of hundred of
-# the other kind, and what makes them read is brightness and size rather than
-# length.
-OBS_TRAIL = (0.0, 0.045, 0.09)
-OBS_TRAIL_K = (1.0, 0.55, 0.28)
+# Ten-minute slots in a day. The record's own resolution and the archive's.
+SLOTS = 144
 
-# The inferred field gets a shorter, dimmer trail of its own. A field of
-# single pixels reads as confetti; two pixels with a gradient between them
-# read as something going somewhere, and a couple of hundred of those read as
-# a current. It is one extra pass over arrays of a few hundred, which is the
-# cheapest thing on this panel that changes how it looks.
-FLOW_TRAIL = (0.0, 0.05)
-FLOW_TRAIL_K = (1.0, 0.42)
+# Hours to rule and label. Six, not three: on a panel that is mostly black,
+# eight vertical lines is furniture competing with the two things that matter.
+HOUR_RULES = (0, 6, 12, 18)
 
-# Distances to rule and label, in kilometres. Two is roughly the edge of the
-# dense downtown grid, six is the crest of the hills, ten is the avenues.
-DIST_RULES = (2, 6, 10)
+# The least coverage a headline will call "today" rather than naming the hour
+# it starts at, and the least it will name an hour for rather than admitting to
+# holes. A missed pass or two out of a hundred and forty-four is an ordinary
+# day; a third of the day missing is a different claim.
+COVER_FULL = 0.85
+COVER_PART = 0.70
 
-# The least a replay step can claim to be. Below this the interval is mostly
-# quantisation -- see BIKES_FLOW_MIN_DT in ftdata.py, which refuses to compute
-# it in the first place.
-MIN_STEP_S = 600.0
+# The verdict never fires on less than this many hours of covered day. Two
+# hours of a Monday morning is a hundred and fifty trips and the difference
+# between a busy day and a quiet one is not visible in it yet.
+VERDICT_MIN_H = 2.0
 
-MIN_STATIONS = 20
+# ...and never on a difference smaller than this, whatever the arithmetic says.
+# The calibration's own measured spread is 5.9% and the day-to-day spread of
+# the real thing is about 3%, so anything under ten per cent is the estimator
+# talking about itself. See the docstring.
+VERDICT_FLOOR = 0.10
 
 
 # --------------------------------------------------------------------------
@@ -363,277 +389,311 @@ def hhmm(epoch, ampm=True):
     return "%d:%02d%s" % (h, lt.tm_min, "A" if lt.tm_hour < 12 else "P")
 
 
-def describe_span(seconds):
-    """A window length as somebody would say it: '40M', '2H', '12H'."""
-    if seconds < 5400:
-        return "%dM" % int(round(seconds / 60.0))
-    return "%dH" % int(round(seconds / 3600.0))
+def hour_label(hour, ampm=True):
+    """An axis tick: '12A', '6A', '12P', '6P'."""
+    if not ampm:
+        return "%02d" % (hour % 24)
+    h = hour % 24
+    return "%d%s" % (h % 12 or 12, "A" if h < 12 else "P")
+
+
+def day0_of(now):
+    """The epoch of the local midnight that starts the day containing `now`.
+
+    Identical to the fetcher's `_bikes_day0`, and it has to be: the record's
+    slots are indexed from it and the panel's axis is drawn from it, and the
+    two disagreeing by an hour twice a year would put the whole day one
+    thirteenth of a panel out of place.
+    """
+    lt = time.localtime(now)
+    return float(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                              0, 0, 0, 0, 0, -1)))
+
+
+WEEKDAY = ("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY",
+           "SATURDAY", "SUNDAY")
+WEEKDAY_SHORT = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+
+
+# --------------------------------------------------------------------------
+# The archive bake.
+#
+# `bikes-typical.npz` holds, per weekday, two matrices of one row per date and
+# 144 ten-minute columns: `t<wd>` is the trips that actually happened, and
+# `e<wd>` is what the dock-count estimator *would have reported* for the same
+# bucket had it been running. Everything the panel needs is derived from those
+# two here rather than baked, because the derivation is a dozen operations on
+# arrays of thirteen by a hundred and forty-four and because keeping the raw
+# counts in the asset is what makes the numbers on the panel checkable.
+# --------------------------------------------------------------------------
+
+def asset_path(name=None):
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        name or ASSET)
+
+
+def read_typical(path=None):
+    """The baked archive, or (None, problem). numpy only; never touches a net."""
+    path = asset_path(path)
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            out = {"months": [str(m) for m in z["months"]],
+                   "span": [str(s) for s in z["span"]],
+                   "bucket": float(z["bucket"][0])}
+            for wd in range(7):
+                t = z["t%d" % wd].astype(f32)
+                e = z["e%d" % wd].astype(f32)
+                if t.shape != e.shape or t.shape[1] != SLOTS or not len(t):
+                    return None, "bikes-typical.npz has no usable weekday %d" % wd
+                out["t%d" % wd], out["e%d" % wd] = t, e
+    except Exception as exc:                                 # noqa: BLE001
+        return None, "cannot read %s (%r)" % (os.path.basename(path), exc)
+    return out, None
+
+
+def smooth(rows, width=3):
+    """A centred moving mean along the slot axis, edges held.
+
+    Half an hour, applied to each *date* before the percentiles are taken. A
+    single ten-minute bucket of a single Monday is a couple of hundred trips at
+    the peak and a dozen at four in the morning, so its sampling noise is
+    comparable to the day-to-day variation the band is supposed to be showing;
+    smoothing first is what stops the band being mostly Poisson. It costs the
+    morning peak about two per cent of its height, which is a smaller lie than
+    a band twice as wide as the truth.
+    """
+    if width <= 1:
+        return rows
+    k = np.ones(width, f32) / float(width)
+    pad = width // 2
+    wide = np.concatenate([np.repeat(rows[:, :1], pad, axis=1), rows,
+                           np.repeat(rows[:, -1:], pad, axis=1)], axis=1)
+    out = np.empty_like(rows)
+    for i in range(len(rows)):
+        out[i] = np.convolve(wide[i], k, mode="valid")
+    return out
+
+
+def profile(z, wd, span=(10.0, 50.0, 90.0)):
+    """(lo, med, hi) trips per hour for weekday `wd`, over 144 slots.
+
+    Percentiles across the dates of that weekday, after each date has been
+    smoothed. Ten and ninety rather than the quartiles, and that is a drawing
+    decision as much as a statistical one: the middle half of thirteen Mondays
+    is within about three per cent of the median at the morning peak, which on
+    a forty row chart is a band one pixel high and reads as a rendering
+    artefact. The tenth to ninetieth is two rows there and six in the middle of
+    the afternoon, which is both visible and a true statement about when this
+    city is predictable.
+    """
+    t = smooth(z["t%d" % wd])
+    lo, med, hi = np.percentile(t, span, axis=0)
+    scale = 3600.0 / (z["bucket"] or 600.0)
+    return (lo.astype(f32) * scale, med.astype(f32) * scale,
+            hi.astype(f32) * scale)
+
+
+def calibration(z, wd):
+    """(k_by_hour, spread) -- trips per unit of dock-count movement.
+
+    The estimator run on the census, hour by hour: how many trips really
+    happened for every one unit of `sum |change| / 2` the dock counts would
+    have shown. Pooled over weekdays and weekends separately rather than over
+    the seven days individually, because thirteen dates is thin for a
+    twenty-four point curve and a Tuesday and a Wednesday have no reason to
+    differ; a Saturday and a Tuesday plainly do.
+
+    `spread` is the half-width of the tenth-to-ninetieth of the *daily* ratio
+    across every date in the bake, relative to its median -- the measured
+    day-to-day instability of the calibration itself, and the number the
+    verdict threshold is built out of.
+    """
+    group = range(5) if wd < 5 else (5, 6)
+    t = np.concatenate([z["t%d" % d] for d in group])
+    e = np.concatenate([z["e%d" % d] for d in group])
+    hours = t.shape[1] // 24
+    th = t.reshape(len(t), 24, hours).sum(axis=(0, 2))
+    eh = e.reshape(len(e), 24, hours).sum(axis=(0, 2))
+    k = np.where(eh > 0, th / np.maximum(eh, 1e-6), 1.0).astype(f32)
+
+    every_t = np.concatenate([z["t%d" % d].sum(1) for d in range(7)])
+    every_e = np.concatenate([z["e%d" % d].sum(1) for d in range(7)])
+    daily = every_t / np.maximum(every_e, 1e-6)
+    p10, p50, p90 = np.percentile(daily, (10.0, 50.0, 90.0))
+    return k, float((p90 - p10) * 0.5 / max(p50, 1e-6))
 
 
 # --------------------------------------------------------------------------
 # Reading what ftdata left behind.
 #
 # `load()` hands back a payload and an age and never raises, so everything that
-# can still be wrong is wrong about *content* and is caught here. The arrays
-# have to be the same length as each other and long enough to be a city; the
-# flow history is optional, and a record with none of it still draws a city.
+# can still be wrong is wrong about *content* and is caught here. What this
+# panel wants out of the record is small: the day the slots belong to, and two
+# columns of 144 numbers. Everything else in the baywheels record -- the
+# stations, the flow field, the rolling twelve hours -- belongs to a question
+# this panel is not asking.
 # --------------------------------------------------------------------------
 
-def read_bikes(cache_dir):
+def read_today(cache_dir):
     """(record, age, problem). `record` is None if there is nothing drawable."""
     got = ftdata.load(PRODUCT, cache_dir)
     if got is None:
         return None, None, "no cached bay wheels record"
     payload, age = got
+    day = payload.get("today")
+    if not isinstance(day, dict):
+        return None, age, "record has no day slots - fetcher is out of date"
     try:
-        dist = np.asarray(payload["dist_m"], f32)
-        elev = np.asarray(payload["elev_m"], f32)
-        fill = np.asarray(payload["fill_pct"], f32) / 100.0
-        free = np.asarray(payload["free_docks"], f32)
-        openm = np.asarray(payload["open"], np.int8).astype(bool)
-        loose_bins = np.asarray(payload.get("loose_bins") or [], f32)
-        totals = dict(payload["totals"])
-        alt = dict(payload["altitude_m"])
-        flow_meta = dict(payload.get("flow") or {})
-    except Exception:                                        # noqa: BLE001
-        return None, age, "bay wheels record is malformed"
+        day0 = float(day["day0"])
+        bucket = float(day.get("bucket") or 600.0)
+        mov = day["mov"]
+        dt = day["dt"]
+    except (KeyError, TypeError, ValueError):
+        return None, age, "day slots are malformed"
+    if not (isinstance(mov, list) and isinstance(dt, list)
+            and len(mov) == len(dt) == SLOTS):
+        return None, age, "day slots are the wrong length"
 
-    n = len(dist)
-    if n < MIN_STATIONS or not (len(elev) == len(fill) == len(free)
-                                == len(openm) == n):
-        return None, age, "bay wheels record has no usable stations"
-    # Sorted ascending by distance is the record's contract and every index
-    # here relies on it. Cheap to check and impossible to see if it is wrong:
-    # an unsorted array draws a plausible, meaningless landscape.
-    if np.any(np.diff(dist) < -1.0):
-        return None, age, "bay wheels stations are not sorted by distance"
-
-    km_max = float(flow_meta.get("km") or 12.0)
-    bins = int(flow_meta.get("bins") or 40)
-    hist = read_hist(payload.get("hist"), bins,
-                     float(flow_meta.get("track_unit_m") or 100.0))
-
-    return {"dist": dist, "elev": elev, "fill": fill, "free": free,
-            "open": openm, "loose_bins": loose_bins, "totals": totals,
-            "alt": alt, "hist": hist, "age": age, "n": n,
-            "km_max": km_max, "bins": bins,
-            "as_of": float(payload.get("as_of") or 0.0)}, age, None
+    # None means "no pass landed in this slot" all the way through, and NaN is
+    # how that survives arithmetic without a branch at every step.
+    m = np.array([np.nan if v is None else float(v) for v in mov], f32)
+    d = np.array([np.nan if v is None else float(v) for v in dt], f32)
+    # A slot with a movement and no interval cannot be turned into a rate, and
+    # a slot with an interval outside what the fetcher will difference is one
+    # the fetcher itself refused; both are absences and not zeroes.
+    bad = ~np.isfinite(d) | (d <= 0.0)
+    m[bad] = np.nan
+    d[bad] = np.nan
+    return {"day0": day0, "bucket": bucket, "mov": m, "dt": d,
+            "age": age, "as_of": float(payload.get("as_of") or 0.0),
+            "totals": dict(payload.get("totals") or {})}, age, None
 
 
-def read_hist(h, bins, unit=100.0):
-    """The rolling series, or None. Rows with no difference in them are dropped.
+def estimate(rec, k_hour):
+    """Today's slots turned into an estimated trip rate. The one inference.
 
-    A bucket exists in the record whether or not a difference could be computed
-    for it -- a restart, a doubled pass and a clock jump all leave one with
-    nulls in it -- and this is where that distinction is turned into what the
-    panel needs. `want` is how many buckets a full window would hold, kept so
-    the panel can print `12/72` on a short one exactly as `goes` does.
+    Returns a dict with, over the 144 slots:
 
-    `trk` is the observed half and is allowed to be absent on a bucket that has
-    a flow, because free_bike_status is permitted to fail on its own while
-    station_status succeeds. A bucket with a flow and no tracks draws the
-    inferred field and no comets, which is the truth about that ten minutes.
+      rate     estimated trips per hour, NaN where nothing was measured
+      cover    seconds of each slot a measurement actually spans
+      seen     boolean: cover > 0, for drawing
+      trips    estimated trips *in* the slot, for the cumulative total
+      secs     seconds of the day actually covered
+
+    **Coverage is counted in seconds and not in slots**, which is not a detail.
+    A difference is as long as the gap between the two passes that made it, and
+    that is only ten minutes if the fetcher is on its ten minute timer -- run it
+    every five and each slot is half measured. Marking the whole slot as seen
+    and then comparing today's five minutes against the archive's ten is a
+    silent halving of the headline, and it is exactly what the first version of
+    this function did; it showed up as a live estimate landing at 0.83 of the
+    archive when the arithmetic said it should land near 1.6.
+
+    Two things happen here and both matter.
+
+    **A measurement is spread over the interval it covers, not over the slot it
+    was written into.** The fetcher writes each difference into the slot the
+    pass landed in, along with the seconds that difference actually spans. A
+    missed pass makes the next one forty minutes long instead of ten; charging
+    that to a single slot would draw a spike with three holes beside it, when
+    what was measured is a flat rate over forty minutes. So the rate goes into
+    every slot the interval touches, and those slots count as covered -- which
+    they are.
+
+    **The rate is multiplied by the hour's calibration factor.** `mov` is the
+    sum of |change| over the stations, so `mov / 2` is docked bikes that
+    changed place; times 3600/dt is an hourly rate; times k is the estimated
+    *trips*, including the free-floating ebike traffic that never touches a
+    dock. See the module docstring for where k comes from and what it does not
+    cover.
     """
-    if not isinstance(h, dict) or not isinstance(h.get("t"), list):
-        return None
-    try:
-        n = len(h["t"])
-        cols = [h[k] for k in ("mov", "dt", "flow")]
-        if not all(isinstance(c, list) and len(c) == n for c in cols):
-            return None
-        trk_col = h.get("trk") if isinstance(h.get("trk"), list) else None
-        if trk_col is not None and len(trk_col) != n:
-            trk_col = None
-
-        def col(name):
-            v = h.get(name)
-            return v if isinstance(v, list) and len(v) == n else None
-
-        seen_col, gone_col, came_col = col("seen"), col("gone"), col("came")
-        t, mov, dt, flow, trk, seen, gone, came = [], [], [], [], [], [], [], []
-        for i in range(n):
-            f, m, d = h["flow"][i], h["mov"][i], h["dt"][i]
-            if not isinstance(f, list) or len(f) != bins:
-                continue
-            if m is None or d is None or float(d) <= 0.0:
-                continue
-            t.append(float(h["t"][i]))
-            mov.append(float(m))
-            dt.append(float(d))
-            flow.append([float(v) for v in f])
-            raw = trk_col[i] if trk_col is not None else None
-            if isinstance(raw, list) and len(raw) >= 2:
-                # Even length only: a truncated pair is a track with one end,
-                # which is the one thing this panel must not draw.
-                trk.append([int(v) for v in raw[:len(raw) // 2 * 2]])
-            else:
-                trk.append([])
-            seen.append(int(seen_col[i] or 0) if seen_col else 0)
-            gone.append(int(gone_col[i] or 0) if gone_col else 0)
-            came.append(int(came_col[i] or 0) if came_col else 0)
-
-        bucket = float(h.get("bucket") or 600.0)
-        hours = float(h.get("hours") or 12.0)
-        want = max(1, int(round(hours * 3600.0 / max(bucket, 1.0))))
-        out = {"bucket": bucket, "hours": hours, "want": want,
-               "t": np.asarray(t, np.float64),
-               "mov": np.asarray(mov, f32), "dt": np.asarray(dt, f32),
-               "flow": (np.asarray(flow, f32) if flow
-                        else np.zeros((0, bins), f32)),
-               "trk": trk,
-               "seen": np.asarray(seen, np.int64),
-               "gone": np.asarray(gone, np.int64),
-               "came": np.asarray(came, np.int64),
-               "unit": float(unit)}
-        return out
-    except Exception:                                        # noqa: BLE001
-        return None
+    rate = np.full(SLOTS, np.nan, f32)
+    trips = np.zeros(SLOTS, f32)
+    cover = np.zeros(SLOTS, f32)
+    bucket = rec["bucket"] or 600.0
+    edge = np.arange(SLOTS + 1, dtype=f32) * bucket
+    idx = np.flatnonzero(np.isfinite(rec["mov"]))
+    for i in idx:
+        dt = float(rec["dt"][i])
+        moved = float(rec["mov"][i]) * 0.5
+        # The interval ends at the end of the slot it was written into and
+        # reaches back `dt` seconds. Clipped at midnight: a difference that
+        # straddles it describes yesterday as much as today, and yesterday is
+        # not on this axis.
+        t1 = (i + 1) * bucket
+        t0 = max(0.0, t1 - dt)
+        a = int(t0 // bucket)
+        b = min(SLOTS, int(math.ceil(t1 / bucket)))
+        if b <= a:
+            continue
+        hour = min(23, int((t0 + t1) * 0.5 // 3600.0))
+        est = moved * float(k_hour[hour])
+        span = max(t1 - t0, 1.0)
+        rate[a:b] = est * 3600.0 / span
+        # How much of each slot this interval really spans. Whole slots in the
+        # middle, part slots at either end.
+        cover[a:b] += np.maximum(np.minimum(edge[a + 1:b + 1], t1)
+                                 - np.maximum(edge[a:b], t0), 0.0)
+        # The cumulative is the estimate itself and not the rate integrated
+        # over the slots it was painted into, so that a forty minute interval
+        # contributes what it measured exactly once. It is booked to the first
+        # slot of its own span; the intervals tile rather than overlap, because
+        # each difference starts where the previous one ended.
+        trips[a] += est
+    np.minimum(cover, bucket, out=cover)
+    return {"rate": rate, "seen": cover > 0.0, "cover": cover,
+            "trips": trips, "secs": float(cover.sum()), "bucket": bucket}
 
 
-def anomaly(rec):
-    """Metres the fleet sits below (negative) or above its own docks."""
-    fleet, docks = rec["alt"].get("fleet"), rec["alt"].get("docks")
-    if fleet is None or docks is None:
-        return None
-    return float(fleet) - float(docks)
+def coverage(est, now_slot):
+    """(first, last, fraction) of the elapsed day the estimate actually covers.
 
-
-# --------------------------------------------------------------------------
-# The flow, and the one inference this panel makes.
-#
-# Given `net`, the change in docked bikes in each of K bands of distance from
-# downtown over some interval, the running sum `cumsum(net)` is exactly the
-# number of bikes that crossed each band boundary heading inward. That much is
-# arithmetic: whatever the inner bands gained, something had to carry.
-#
-# Turning a flux into *journeys* needs one more step, and it is the only place
-# here where a choice is made. Sources (bands that lost bikes) are matched to
-# sinks (bands that gained them) in sorted order along the axis, by cumulative
-# mass -- the classic one-dimensional optimal transport coupling, which is the
-# **least total displacement** consistent with the observations. It never
-# claims a bike went further than it had to. Matching them at random instead
-# would produce the same flux and a great deal more apparent traffic, and the
-# extra would be invention.
-#
-# Before any of that, the imbalance is removed. The docked fleet is not closed:
-# bikes leave it for the kerb as loose ebikes, for a van, for a workshop, and
-# come back the same ways, so `sum(net)` is rarely zero and a flux that does
-# not return to zero at the city limit is not a flow. The imbalance is spread
-# over the bands in proportion to how many docks each has, which is an
-# assumption, is stated here, and is small: it is a couple of bikes a band on a
-# typical ten minutes.
-# --------------------------------------------------------------------------
-
-def balance(net, weight):
-    """Net change per band with the docked fleet's own gain/loss removed."""
-    # Float64 throughout, and not the f32 everything else here uses: the
-    # correction is a small number subtracted from every band and the test
-    # that the flux returns to zero at the city limit is a sum of forty of
-    # them, which in single precision leaves a residual of a few hundredths
-    # of a bike -- harmless on the panel and enough to fail an exact check.
-    net = np.asarray(net, np.float64)
-    total = float(net.sum())
-    w = np.asarray(weight, np.float64)
-    s = float(w.sum())
-    if s <= 0:
-        return net - total / max(len(net), 1)
-    return net - (total * w / s)
-
-
-def transport(net, count):
-    """`count` unit journeys from the emptying bands to the filling ones.
-
-    Returns (from_band, to_band) as float arrays in band units, plus the total
-    mass moved. Stratified sampling of the monotone coupling: particle p takes
-    the source and the sink at the same point of their cumulative mass, which
-    is that coupling by definition and is two searchsorted calls rather than a
-    Python merge loop.
+    The fraction is of *seconds*, not of slots: a fetcher on a five minute timer
+    covers every slot and half of each one, and calling that a fully observed
+    morning would make the headline half what it should be.
     """
-    src = np.maximum(-net, 0.0)
-    snk = np.maximum(net, 0.0)
-    mass = min(float(src.sum()), float(snk.sum()))
-    if mass <= 0.0 or count <= 0:
-        return np.zeros(0, f32), np.zeros(0, f32), 0.0
-    cs = np.cumsum(src)
-    ck = np.cumsum(snk)
-    u = (np.arange(count, dtype=f32) + 0.5) * (mass / count)
-    a = np.searchsorted(cs, u, side="right")
-    b = np.searchsorted(ck, u, side="right")
-    k = len(net) - 1
-    return np.clip(a, 0, k).astype(f32), np.clip(b, 0, k).astype(f32), mass
+    seen = np.flatnonzero(est["seen"][:max(1, now_slot + 1)])
+    if not len(seen):
+        return None, None, 0.0
+    first, last = int(seen[0]), int(seen[-1])
+    elapsed = max(1, now_slot + 1 - first) * est["bucket"]
+    return first, last, min(1.0, float(est["cover"][first:now_slot + 1].sum())
+                            / elapsed)
 
 
-def steps_of(hist, now, window, step_s):
-    """Chop the usable history into replay steps. Returns a list of dicts.
+def verdict(est, prof_rows, k_spread, now_slot):
+    """(word, colour) for how today compares with the typical day so far.
 
-    The window is anchored on the newest bucket the record actually has rather
-    than on the wall clock, so a fetcher that stopped an hour ago replays the
-    twelve hours it *did* see instead of eleven hours of blank followed by an
-    hour of data. The strip underneath is anchored on `now`, which is what
-    makes that difference visible instead of hidden.
+    Compared over exactly the slots that were measured, never over the elapsed
+    day: two hours of coverage makes a two-hour comparison. `prof_rows` is the
+    per-date matrix for this weekday so the typical total over an arbitrary set
+    of slots is a real sum over real days rather than a sum of medians.
+
+    The threshold is the typical spread and the calibration's spread added
+    together, floored at ten per cent -- see VERDICT_FLOOR. It is not a
+    confidence interval and is not claimed as one; it is the smallest
+    difference this instrument can see, and below it the panel says the day is
+    ordinary because that is what it knows.
     """
-    if hist is None or not len(hist["t"]):
-        return []
-    t_hi = float(hist["t"].max()) + hist["bucket"]
-    t_lo = max(float(hist["t"].min()), t_hi - window)
-    span = max(t_hi - t_lo, step_s)
-    nsteps = max(1, int(round(span / step_s)))
-    step = span / nsteps
-    out = []
-    for i in range(nsteps):
-        a = t_lo + i * step
-        sel = (hist["t"] >= a) & (hist["t"] < a + step)
-        out.append({"t0": a, "t1": a + step, "sel": sel,
-                    "n": int(sel.sum())})
-    return out
-
-
-def step_flow(hist, s, weight):
-    """One replay step reduced to what the swarm and the headline need.
-
-    `rate` is docked bikes changing place per hour: `mov` counts both ends of
-    every move, so it is halved, and it is divided by the seconds the
-    differences actually covered rather than by the nominal step, because a
-    missed pass makes those two different and the nominal one would understate.
-    """
-    if not s["n"]:
-        return {"rate": None, "net": None, "mass": 0.0, "pull": 0.0,
-                "trk": np.zeros((0, 2), f32), "seen": 0, "gone": 0, "came": 0}
-    sel = s["sel"]
-    secs = float(hist["dt"][sel].sum())
-    mov = float(hist["mov"][sel].sum())
-    net = hist["flow"][sel].sum(axis=0)
-    net = balance(net, weight)
-    flux = np.cumsum(net)
-    mass = float(np.maximum(net, 0.0).sum())
-    # The observed half: every free-ebike journey seen inside this step, in
-    # metres from downtown. Concatenated across the step's buckets rather than
-    # summed -- these are events, not a field, and two of them are two.
-    pairs = []
-    for i in np.flatnonzero(sel):
-        raw = hist["trk"][i]
-        for j in range(0, len(raw), 2):
-            pairs.append((raw[j] * hist["unit"], raw[j + 1] * hist["unit"]))
-    trk = (np.asarray(pairs, f32) if pairs else np.zeros((0, 2), f32))
-    return {"rate": (mov * 0.5) * 3600.0 / secs if secs > 0 else None,
-            "net": net, "flux": flux, "mass": mass, "secs": secs,
-            "trk": trk,
-            "seen": int(hist["seen"][sel].max()) if sel.any() else 0,
-            "gone": int(hist["gone"][sel].sum()),
-            "came": int(hist["came"][sel].sum()),
-            # Mean bands travelled inward per bike moved. Positive is towards
-            # downtown. It is a signed average and not a count, so a step where
-            # as much went out as came in reads as balanced rather than as
-            # whichever direction happened to have the larger total.
-            "pull": float(flux.sum()) / mass if mass > 0 else 0.0}
-
-
-def direction_word(pull, threshold=0.4):
-    if pull > threshold:
-        return "INBOUND", C_IN
-    if pull < -threshold:
-        return "OUTBOUND", C_OUT
-    return "BALANCED", C_FLAT
+    frac = est["cover"] / max(est["bucket"], 1.0)
+    frac[now_slot + 1:] = 0.0
+    sel = frac > 0.0
+    if float(est["cover"][sel].sum()) < VERDICT_MIN_H * 3600.0:
+        return "TOO EARLY TO SAY", C_DIM
+    mine = float(est["trips"][sel].sum())
+    # Weighted by how much of each slot was actually watched, so that half an
+    # hour of coverage is compared against half an hour of history and not
+    # against the hour it sits inside.
+    theirs = (prof_rows[:, sel] * frac[sel]).sum(axis=1)   # one per past date
+    p10, p50, p90 = np.percentile(theirs, (10.0, 50.0, 90.0))
+    if p50 <= 0:
+        return "TOO EARLY TO SAY", C_DIM
+    tol = max(VERDICT_FLOOR, (p90 - p10) * 0.5 / p50 + k_spread)
+    if mine > p50 * (1.0 + tol):
+        return "BUSIER THAN USUAL", C_BUSY
+    if mine < p50 * (1.0 - tol):
+        return "QUIETER THAN USUAL", C_QUIET
+    return None, C_DIM                              # "usual", said by the caller
 
 
 # --------------------------------------------------------------------------
@@ -643,25 +703,18 @@ def direction_word(pull, threshold=0.4):
 def add_arguments(ap):
     ap.add_argument("--cache-dir", default=None,
                     help="ftdata cache to read (default: ftdata's own)")
-    ap.add_argument("--max-age", type=float, default=6 * 3600.0,
-                    help="refuse a record older than this many seconds")
-    ap.add_argument("--hours", type=float, default=12.0,
-                    help="hours of history to replay")
-    ap.add_argument("--step", type=float, default=3600.0,
-                    help="seconds of city per replay step")
-    ap.add_argument("--cycle", type=float, default=28.0,
-                    help="seconds for one replay of the whole window")
-    ap.add_argument("--hold", type=float, default=5.0,
-                    help="seconds held on the newest step at the end of each "
-                         "pass, so the loop lands on now")
-    ap.add_argument("--no-seen", action="store_true",
-                    help="leave the observed ebike journeys off")
-    ap.add_argument("--particles", type=int, default=440,
-                    help="most dots in flight in one step")
-    ap.add_argument("--density", type=float, default=1.6,
-                    help="dots per bike of net displacement")
-    ap.add_argument("--no-loose", action="store_true",
-                    help="leave the undocked ebikes off the floor")
+    ap.add_argument("--asset", default=None,
+                    help="the baked archive to draw the typical day from")
+    ap.add_argument("--peak", type=float, default=0.0,
+                    help="full scale in trips per hour (0 = fit the day)")
+    ap.add_argument("--weekday", type=int, default=-1,
+                    help="draw this weekday's typical day (0=Mon, -1=today)")
+    ap.add_argument("--reveal", type=float, default=1.6,
+                    help="seconds today's line takes to draw itself in "
+                         "(0 = off)")
+    ap.add_argument("--comet", type=float, default=COMET_S,
+                    help="seconds for the light to run along today's line "
+                         "(0 = off)")
     ap.add_argument("--24h", dest="h24", action="store_true", help="24 hour clock")
     ap.add_argument("--at", default="now",
                     help="pretend the present moment is this (epoch or "
@@ -673,341 +726,238 @@ def add_arguments(ap):
 
 
 # --------------------------------------------------------------------------
-# Layout. Four regions down a 64-row panel. What gives way first on a shorter
-# one is the legend row, then the strip, then the header -- the cross-section
-# and its swarm are the demo and they are the last thing to go.
+# Layout. Four regions down a 64 row panel, and the order they give way in on a
+# shorter one is: the axis labels, then the second line of the headline strip,
+# then the header. The chart is the demo and it is the last thing to go.
 # --------------------------------------------------------------------------
 
 class Layout(object):
-    """Header, landscape, caption, scrub bar. In that order and no more.
-
-    An earlier draft of this panel also carried a ten-row bar chart of the
-    last twelve hours along the bottom, which was a good instrument and the
-    wrong thing to spend a sixth of the panel on: the replay *is* the time
-    axis, and the commute surges in the swarm itself. Taking it out gave the
-    landscape 51 rows instead of 40, which is the difference between a chart
-    with dots on it and a place with weather in it.
-    """
 
     def __init__(self, w, h):
         self.w, self.h = w, h
-        self.th = text_height()
-        self.head_h = self.th + 1 if h >= 24 else 0
-        self.tick_h = 1 if h >= 40 else 0
-        self.leg_h = self.th if (h >= 52 and w >= 220) else 0
-        self.tick_y = h - self.tick_h if self.tick_h else h
-        self.leg_y = self.tick_y - self.leg_h if self.leg_h else self.tick_y
-        self.map_y = self.head_h
-        self.map_bot = max(self.map_y + 7,
-                           (self.leg_y - 2) if self.leg_h else self.tick_y - 1)
-        self.map_bot = min(self.map_bot, h - 1)
-        self.map_h = self.map_bot - self.map_y + 1
+        th = text_height()
+        self.head_h = th + 1 if h >= 30 else 0          # header row + separator
+        self.strip_h = text_height(2) + 1 if h >= 44 else 0
+        self.axis_h = th + 2 if h >= 24 else 0          # rule + labels
+        self.strip_y = self.head_h
+        self.chart_y = self.strip_y + self.strip_h
+        self.axis_y = h - self.axis_h if self.axis_h else h
+        self.chart_bot = self.axis_y - 1
+        self.chart_h = self.chart_bot - self.chart_y + 1
+        while self.chart_h < 10 and (self.strip_h or self.head_h):
+            if self.strip_h:
+                self.strip_h = 0
+            else:
+                self.head_h = 0
+            self.strip_y = self.head_h
+            self.chart_y = self.strip_y + self.strip_h
+            self.chart_bot = self.axis_y - 1
+            self.chart_h = self.chart_bot - self.chart_y + 1
+        self.chart_h = max(2, self.chart_h)
 
-    @property
-    def alt_bot(self):
-        """The row zero metres sits on: the top of the plinth."""
-        return self.map_bot - min(MAP_PLINTH, max(0, self.map_h - 6))
-
-    @property
-    def alt_top(self):
-        return self.map_y + min(MAP_SKY, max(0, self.map_h - 6))
+    def col_of(self, seconds_into_day):
+        return int(np.clip(seconds_into_day / 86400.0 * self.w, 0, self.w - 1))
 
 
 # --------------------------------------------------------------------------
 # Baking the picture. All of this happens once per cache read.
 # --------------------------------------------------------------------------
 
-def band_profile(rec, bins):
-    """(p25, p50, p75) of dock altitude in each distance band, in metres.
+def slot_to_col(values, w):
+    """A 144 slot series onto `w` panel columns, at column centres."""
+    xs = (np.arange(w, dtype=f32) + 0.5) * (SLOTS / float(w))
+    return np.interp(xs, np.arange(SLOTS, dtype=f32) + 0.5,
+                     values).astype(f32)
 
-    Bands with no docks in them -- the city has a couple, over the water east
-    of the Embarcadero and out past the zoo -- inherit their neighbours by
-    interpolation rather than dropping to zero, which would draw a canyon where
-    there is only an absence of bike racks.
+
+def rows_of(values, lay, scale):
+    """Trips per hour to panel rows, clipped into the chart."""
+    f = np.clip(np.asarray(values, f32) / max(scale, 1.0), 0.0, 1.0)
+    return np.round(lay.chart_bot - f * (lay.chart_h - 1)).astype(np.int32)
+
+
+def fill_between(dst, lay, top, bot, mask, rgb):
+    """One vectorised pass over the chart region between two row arrays.
+
+    A Python loop over three hundred and twenty columns is a tenth of a second
+    on the wall's Pi even once, and this runs again on every cache read.
     """
-    idx = np.clip((rec["dist"] / max(rec["km_max"] * 1000.0, 1.0)
-                   * bins).astype(int), 0, bins - 1)
-    lo = np.full(bins, np.nan, f32)
-    mid = np.full(bins, np.nan, f32)
-    hi = np.full(bins, np.nan, f32)
-    for k in range(bins):
-        sel = idx == k
-        if sel.any():
-            e = rec["elev"][sel]
-            lo[k], mid[k], hi[k] = np.percentile(e, (25.0, 50.0, 75.0))
-    have = np.isfinite(mid)
-    if not have.any():
-        return np.zeros(bins, f32), np.zeros(bins, f32), np.zeros(bins, f32)
-    xs = np.arange(bins, dtype=f32)
-    out = []
-    for a in (lo, mid, hi):
-        out.append(np.interp(xs, xs[have], a[have]).astype(f32))
-    counts = np.bincount(idx, minlength=bins).astype(f32)
-    return out[0], out[1], out[2], counts
+    reg = dst[lay.chart_y:lay.chart_bot + 1]
+    rows = np.arange(lay.chart_h)[:, None] + lay.chart_y
+    sel = (rows >= top[None, :]) & (rows <= bot[None, :]) & mask[None, :]
+    reg[sel] = rgb
 
 
-def bake_city(dst, lay, rec, prof, alt_top, args):
-    """The cross-section: rock, spread band, ridge, loose bikes, docks.
+def bake_furniture(dst, lay, h24, scale, tick):
+    """Gridlines, the scale tick and the hour labels: everything that is
+    there whether or not any data arrived."""
+    w = lay.w
+    for hour in HOUR_RULES:
+        c = int(hour / 24.0 * w)
+        if 0 <= c < w:
+            dst[lay.chart_y:lay.chart_bot + 1, c] = (
+                C_GRID_HI if hour == 12 else C_GRID)
 
-    One vectorised pass over the map region rather than a loop over columns:
-    three hundred and twenty iterations of Python is a tenth of a second on the
-    wall's Pi even once, and this runs again on every cache read. Returns the
-    ridge row per column, which is the line the swarm rides.
+    # One horizontal rule, at a round number of trips an hour, labelled. A
+    # chart with no unit on it anywhere is a shape and not a measurement; a
+    # chart with four labelled rules is furniture. Drawn before the silhouette
+    # so that where the two meet the data is on top.
+    if tick > 0:
+        r = int(rows_of(np.array([tick]), lay, scale)[0])
+        if lay.chart_y < r < lay.chart_bot:
+            dst[r] = np.maximum(dst[r], np.array(C_GRID_HI, np.uint8))
+            blit_text(dst, r - text_height() - 1, 2, "%d/H" % tick, C_DIM)
+
+    if not lay.axis_h:
+        return
+    y = lay.axis_y + 2
+    dst[lay.axis_y] = C_SEP
+    for hour in HOUR_RULES + (24,):
+        s = hour_label(hour, not h24)
+        c = int(hour / 24.0 * w)
+        x = c + 2 if hour < 24 else w - text_width(s) - 1
+        if hour == 0:
+            x = 1
+        if 0 <= x <= w - text_width(s):
+            # C_DIM and not C_FAINT. The axis is the calibration of the whole
+            # picture and C_FAINT peaks at 64 of 255, which is under what a
+            # 3x5 glyph needs to survive being looked at from ten feet away.
+            blit_text(dst, y, x, s, C_DIM)
+
+
+def bake_typical_day(dst, lay, lo, med, hi, scale):
+    """The silhouette and its crust: what this weekday normally does.
+
+    Filled to the median rather than drawn as a line, because a filled shape
+    reads as ground at a glance and a line reads as a second data series -- and
+    there is only one data series on this panel that is about today. The crust
+    between the tenth and ninetieth percentile then sits on the skyline where
+    it is legible, instead of being a shaded region a bright line has to be
+    picked out of.
     """
     w = lay.w
-    lo, mid, hi = prof
-    bins = len(mid)
-
-    def row_of(metres):
-        f = np.clip(np.asarray(metres, f32) / max(alt_top, 1.0), 0.0, 1.0)
-        return np.round(lay.alt_bot - f * (lay.alt_bot - lay.alt_top)
-                        ).astype(int)
-
-    # Band centres to columns, then one interpolation to panel resolution. The
-    # bands are 300 m of city and eight columns of panel, so drawing them as
-    # eight-wide steps would put a visible staircase on a landscape.
-    bx = (np.arange(bins, dtype=f32) + 0.5) / bins * w
-    cols = np.arange(w, dtype=f32)
-    r_lo = row_of(np.interp(cols, bx, lo))
-    r_mid = row_of(np.interp(cols, bx, mid))
-    r_hi = row_of(np.interp(cols, bx, hi))
-
-    reg = dst[lay.map_y:lay.map_bot + 1]
-    rows = np.arange(lay.map_h)[:, None] + lay.map_y
-
-    # Distance rules, drawn first so the rock buries what is underground --
-    # which is what makes them read as marks on a landscape rather than as a
-    # grid floating over it.
-    for km in DIST_RULES:
-        if km >= rec["km_max"]:
-            continue
-        c = int(km / rec["km_max"] * (w - 1))
-        if 0 <= c < w:
-            dst[lay.map_y:lay.map_bot + 1, c] = np.maximum(
-                dst[lay.map_y:lay.map_bot + 1, c], np.array(C_GRID, np.uint8))
-
-    reg[rows > r_lo[None, :]] = C_ROCK
-    reg[(rows <= r_lo[None, :]) & (rows >= r_hi[None, :])] = C_BAND
-    dst[r_mid, np.arange(w)] = C_RIDGE
-
-    # The undocked ebikes: several hundred of them lying at the kerb, which is
-    # a genuinely different population -- nobody rebalances them and they are
-    # invisible to the flow, because a bike that leaves a dock and becomes one
-    # of these is a departure with no arrival anywhere. They are drawn as a
-    # stipple along the plinth, under the landscape rather than on it, so they
-    # read as sediment and never as part of the terrain or the swarm.
-    if not args.no_loose and len(rec["loose_bins"]):
-        lb = rec["loose_bins"].astype(f32)
-        peak = float(lb.max())
-        if peak > 0 and lay.map_bot - lay.alt_bot >= 2:
-            deep = lay.map_bot - lay.alt_bot
-            per = np.clip(np.round(np.interp(cols, bx[:len(lb)], lb)
-                                   / peak * deep), 0, deep).astype(int)
-            floor = np.full(w, lay.map_bot)
-            haze = ((rows > (floor - per)[None, :])
-                    & (rows <= floor[None, :]))
-            stip = ((rows + np.arange(w)[None, :]) % 2) == 0
-            reg[haze & stip] = C_LOOSE
-
-    # The docks. Drawn quiet first and loud last, so a dry dock is never buried
-    # under the neighbour that is merely fine.
-    dc = np.clip((rec["dist"] / max(rec["km_max"] * 1000.0, 1.0)
-                  * (w - 1)).astype(int), 0, w - 1)
-    dr = row_of(rec["elev"])
-    dry = (rec["fill"] <= 0.0) & rec["open"]
-    jam = (rec["free"] <= 0.0) & rec["open"]
-    ok = rec["open"] & ~dry & ~jam
-    dst[dr[~rec["open"]], dc[~rec["open"]]] = C_CLOSED
-    dst[dr[ok], dc[ok]] = C_DOCK
-    if jam.any():
-        dst[dr[jam], dc[jam]] = C_FULL
-    if dry.any():
-        # Two pixels, which at this scale is the smallest mark that survives
-        # being looked at from ten feet away, and the only place on the panel
-        # where amber is spent.
-        dst[dr[dry], dc[dry]] = C_DRY
-        up = np.clip(dr[dry] - 1, lay.map_y, lay.map_bot)
-        dst[up, dc[dry]] = C_DRY
-    # The ridge is what the swarm rides; the skyline is the top of the spread
-    # band, and it is what the caption has to keep clear of. Checking the
-    # caption against the *median* instead would let it sit on top of the
-    # quarter of the city that is higher than the median, which at four
-    # kilometres out is Buena Vista Park and is a lot of pixels.
-    return r_mid, r_hi
+    mask = np.ones(w, bool)
+    r_med = rows_of(slot_to_col(med, w), lay, scale)
+    r_lo = rows_of(slot_to_col(lo, w), lay, scale)
+    r_hi = rows_of(slot_to_col(hi, w), lay, scale)
+    fill_between(dst, lay, r_med, np.full(w, lay.chart_bot), mask, C_BAND)
+    fill_between(dst, lay, r_hi, r_lo, mask, C_CRUST)
+    return r_med
 
 
-def bake_map_labels(dst, lay, rec):
-    """Where the two ends of the axis are, said in words on the floor.
+def bake_today(dst, lay, rate, seen, scale):
+    """Today's line, and the flat pixel indices the comet runs along.
 
-    Words rather than tick numbers: `DOWNTOWN` on the left and `11KM OUT` on
-    the right is readable in the two seconds somebody spends walking past, and
-    a row of kilometre figures is not. The rules themselves are drawn; this
-    labels the ones that fit.
+    Two rows of halo either side of a one row core: a single lit row of gold
+    over a dark blue field is legible up close and disappears at ten feet,
+    which is the distance this panel is actually read from. The halo is dark
+    enough that the line still reads as one pixel wide.
+
+    Gaps in coverage are gaps in the line. The alternative -- interpolating
+    across a missed pass -- draws a measurement that was not made, and this
+    panel's entire argument is about not doing that.
     """
-    y = lay.map_bot - text_height() + 1
-    if y < lay.map_y:
+    w = lay.w
+    col_rate = slot_to_col(np.nan_to_num(rate, nan=0.0), w)
+    col_seen = slot_to_col(seen.astype(f32), w) > 0.5
+    if not col_seen.any():
+        return np.zeros(0, np.int64), None
+    r = rows_of(col_rate, lay, scale)
+    prev = np.concatenate([r[:1], r[:-1]])
+    joined = col_seen & np.concatenate([col_seen[:1], col_seen[:-1]])
+    top = np.where(joined, np.minimum(r, prev), r)
+    bot = np.where(joined, np.maximum(r, prev), r)
+    fill_between(dst, lay, np.maximum(top - 1, lay.chart_y),
+                 np.minimum(bot + 1, lay.chart_bot), col_seen, C_TODAY_HALO)
+    fill_between(dst, lay, top, bot, col_seen, C_TODAY)
+    cols = np.flatnonzero(col_seen)
+    flat = (r[cols].astype(np.int64) * w + cols).astype(np.int64)
+    return flat, int(cols[-1])
+
+
+def bake_now_label(dst, lay, col):
+    """`NOW` on the axis row, under the rule. The word and not the time.
+
+    A clock here would be baked with everything else and would therefore be up
+    to one reload interval behind the wall -- five minutes of saying 5:50 at
+    5:55, which is a small lie told by the one mark on the panel whose whole
+    job is to be trustworthy. `NOW` is three characters and is always true.
+    """
+    if not lay.axis_h:
         return
-    blit_text(dst, y, 2, "DOWNTOWN", C_DIM, halo=HALO)
-    right = "%dKM OUT" % int(round(rec["km_max"]))
-    x = lay.w - text_width(right) - 2
-    if x > 2 + text_width("DOWNTOWN") + 8:
-        blit_text(dst, y, x, right, C_DIM, halo=HALO)
-    for km in DIST_RULES:
-        if km >= rec["km_max"]:
-            continue
-        c = int(km / rec["km_max"] * (lay.w - 1))
-        s = "%dK" % km
-        if 2 + text_width("DOWNTOWN") + 6 < c < x - text_width(s) - 6:
-            blit_text(dst, y, c + 2, s, C_DIM, halo=HALO)
+    y = lay.axis_y + 2
+    s = "NOW"
+    x = int(np.clip(col - text_width(s) // 2, 1, lay.w - text_width(s) - 1))
+    # Cleared wide enough to take a whole hour label out either side. The first
+    # version cleared two pixels of margin, and at ten to six the panel read
+    # `NOW P` -- the tail of the 6P tick surviving next to the word that had
+    # replaced it.
+    dst[y - 1:y + text_height() + 1,
+        max(0, x - 14):x + text_width(s) + 14] = 0
+    blit_text(dst, y, x, s, C_NOW)
 
 
-def header_fields(rec, stale, w, have=0, want=0):
-    """The header, and the one place the age of the fetch is claimed.
-
-    A materially short window prints `12/72` in front of the age, which is
-    `goes.py`'s convention to the letter including its ninety per cent
-    threshold: one or two missed passes out of seventy is an ordinary day and
-    is not worth a number on the wall, and a cold start is a short window by
-    definition and is worth saying out loud. It is an either/or with STALE,
-    also as in goes -- a stale record's age is the more urgent of the two.
-    """
-    t = rec["totals"]
-    age = ftdata.describe_age(rec["age"])
-    if stale:
-        right = "STALE " + age
-    elif want and have * 10 < want * 9:
-        right = "%d/%d  %s" % (have, want, age)
-    else:
-        right = age
-    rungs = [
-        [("BAY WHEELS SF", C_DIM), ("%d BIKES" % t.get("bikes", 0), C_TEXT),
-         ("%d DRY" % t.get("empty", 0), C_DRY)],
-        [("%d BIKES" % t.get("bikes", 0), C_TEXT),
-         ("%d DRY" % t.get("empty", 0), C_DRY)],
-        [("%d BIKES" % t.get("bikes", 0), C_TEXT)],
-    ]
-    for fields in rungs:
-        need = sum(text_width(s) for s, _c in fields) + 6 * (len(fields) - 1)
-        if need + 4 + text_width(right) <= w:
-            return fields, right
-    return [(str(t.get("bikes", 0)), C_TEXT)], ""
-
-
-def bake_header(dst, lay, rec, stale, have=0, want=0):
-    fields, right = header_fields(rec, stale, lay.w, have, want)
-    x = 1
-    for s, c in fields:
-        x += blit_text(dst, 0, x, s, c) + 6
-    if right:
-        blit_text(dst, 0, lay.w - text_width(right) - 1, right,
+def bake_header(dst, lay, rec, stale, wd, w):
+    if not lay.head_h:
+        return
+    # The weekday is deliberately *not* here. It is already on the panel twice
+    # -- in the verdict and in the line that says what the shaded shape is --
+    # and a header that says MONDAY over a strip that says USUAL FOR A MONDAY
+    # over a note that says 13 RECENT MONDAYS is three sentences spending rows
+    # to agree with each other.
+    for form in ("BAY WHEELS SF", "BAY WHEELS", "SF BIKES"):
+        if text_width(form) + 40 <= w:
+            blit_text(dst, 0, 1, form, C_DIM)
+            break
+    if rec is not None:
+        age = ftdata.describe_age(rec["age"])
+        right = ("STALE " + age) if stale else (age + " AGO")
+        blit_text(dst, 0, w - text_width(right) - 1, right,
                   C_WARN if stale else C_DIM)
     dst[lay.head_h - 1] = C_SEP
 
 
-def bake_legend(dst, lay, obs, loose):
-    """One row: three swatches, what the bright ones are, what the rest are.
+def bake_strip(dst, lay, lines):
+    """The headline strip: a big number, two captions, two right-hand notes.
 
-    This is the whole of the panel's apparatus and it is deliberately the
-    whole of it. The brief for this rewrite was a compelling picture of real
-    data rather than an instrument, so everything that could be said in a
-    label and is already said by the animation has been taken out. What is
-    left is the three things a viewer cannot infer by looking: which way green
-    goes, which way violet goes, and that the bright marks are 620 free ebikes
-    actually watched moving while the rest is arithmetic on dock counts.
+    `lines` is (big, big_colour, left_top, left_bot, right_top, right_colour,
+    right_bot). Everything on it is a ladder of shorter forms, because what
+    falls off the end of a clipped line here is the part that says the number
+    is an estimate.
     """
-    if not lay.leg_h:
+    if not lay.strip_h:
         return
-    y = lay.leg_y
-    sw = text_width("IN") + text_width("OUT") + 2 * (2 + 5 + 5)
-
-    def swatch(x, word, rgb):
-        blit_text(dst, y, x, word, rgb)
-        x += text_width(word) + 2
-        dst[y + 1:y + 4, x:x + 5] = rgb
-        return x + 5 + 5
-
-    # Each swatch sits beside the sentence it belongs to rather than all three
-    # in a row followed by two sentences: SEEN and its coverage on the left,
-    # the two directions and their caveat on the right. A viewer reads left to
-    # right and gets "these bright ones are ebikes actually seen to move, the
-    # rest is arithmetic on dock counts". Both halves shorten independently,
-    # and neither is allowed to grow into the other -- the first draft checked
-    # each against the panel width instead of against its neighbour and
-    # printed `FREE EBIKIN OUT` across the middle of the row.
-    left = swatch(2, "SEEN", C_SEEN)
-    for said in ("%d OF %d FREE EBIKES" % (obs, loose),
-                 "%d OF %d EBIKES" % (obs, loose), "%d EBIKES" % loose, ""):
-        if not said:
-            break
-        if left + text_width(said) <= lay.w // 2:
-            blit_text(dst, y, left, said, C_DIM)
-            left += text_width(said)
-            break
-    for said in ("REST INFERRED FROM DOCK COUNTS - NOT TRIPS",
-                 "REST FROM DOCK COUNTS - NOT TRIPS",
-                 "FROM DOCK COUNTS - NOT TRIPS", "NOT TRIPS"):
-        wid = text_width(said)
-        gx = lay.w - 2 - wid - sw
-        if gx >= left + 6:
-            gx = swatch(gx, "IN", C_IN)
-            swatch(gx, "OUT", C_OUT)
-            # C_DIM and not C_FAINT: the first draft used the faintest colour
-            # on the panel for this line, on the grounds that it is small
-            # print. It peaks at 64 of 255, which is under what is legible
-            # across a workshop. The caveat is small print that has to be
-            # readable.
-            blit_text(dst, y, lay.w - 2 - wid, said, C_DIM)
-            break
-
-
-def bake_sky(dst, top, bot, skyline, lines, clock=None):
-    """The caption, in the sky over downtown, one line at a time.
-
-    The landscape is the data and the caption is not, so on a panel shape or a
-    day where the two would collide it is the caption that gives way -- quietly,
-    from the bottom up. Downtown is at three metres and the sky above it is
-    twenty rows deep, so the two-line caption fits with room; the check is what
-    keeps that true on a 32-row panel, and on the day the operator parks the
-    whole fleet on Telegraph Hill.
-
-    The clock rides in the top right instead of under the caption because the
-    sky is deepest at both ends of this axis -- downtown is at sea level and so
-    is Ocean Beach -- and shallowest over the hills in the middle, which is the
-    one place nothing can be written at all.
-
-    Every line is drawn with a halo, so `skyline` is only asked whether there
-    is *room* on the panel, not whether the terrain is in the way. What the
-    caption still gives way to is the rock: text over a hill reads, text buried
-    under one does not.
-    """
-    w = dst.shape[1]
-
-    def clear(y, height, x0, x1):
-        x0, x1 = max(0, x0), min(w, max(x0 + 1, x1))
-        return (y >= top and y + height <= bot
-                and y + height < int(skyline[x0:x1].max()))
-
-    if clock:
-        cw = text_width(clock)
-        cx = w - cw - 2
-        if clear(top + 1, text_height(), cx, cx + cw):
-            blit_text(dst, top + 1, cx, clock, C_DIM, halo=HALO)
-
-    y = top + 1
-    for text, rgb, scale, tail in lines:
-        gh = text_height(scale)
-        gw = text_width(text, scale)
-        if not clear(y, gh, 2, 2 + gw):
-            return
-        blit_text(dst, y, 2, text, rgb, scale, halo=HALO)
-        if tail and 2 + gw + 6 + text_width(tail[0]) <= w:
-            blit_text(dst, y + gh - text_height(), 2 + gw + 6, tail[0],
-                      tail[1], halo=HALO)
-        y += gh + 2
+    big, big_rgb, lt, lb, rt, rt_rgb, rb = lines
+    y0 = lay.strip_y
+    y1 = y0 + text_height(2) - text_height()
+    x = 1
+    if big:
+        x += blit_text(dst, y0, 1, big, big_rgb, 2) + 5
+    left_end = x
+    if lt:
+        left_end = max(left_end, x + text_width(lt))
+        blit_text(dst, y0, x, lt, C_TEXT)
+    if lb:
+        for form in ([lb] if isinstance(lb, str) else lb):
+            if x + text_width(form) <= lay.w - 2:
+                blit_text(dst, y1, x, form, C_DIM)
+                left_end = max(left_end, x + text_width(form))
+                break
+    if rt:
+        fit(dst, y0, lay.w - 1, ([rt] if isinstance(rt, str) else rt),
+            rt_rgb, floor=left_end + 6)
+    if rb:
+        # C_DIM and not C_FAINT: this is the line that says what the shaded
+        # shape is, and the first draft drew it in the faintest colour on the
+        # panel on the grounds that it is small print. C_FAINT peaks at 64 of
+        # 255, which is under what is legible across a workshop. Small print
+        # that has to be read is still print.
+        fit(dst, y1, lay.w - 1, ([rb] if isinstance(rb, str) else rb),
+            C_DIM, floor=left_end + 6)
 
 
 def draw_nodata(dst, lay, lines):
-    """The honest panel. No landscape, no swarm, no implied movement."""
+    """The honest panel, for when there is not even an archive to draw."""
     dst[:] = (6, 6, 8)
     scale = 2 if lay.h >= 32 and lay.w >= 200 else 1
     y = max(0, lay.h // 2 - (len(lines) * (text_height(scale) + 2)) // 2)
@@ -1019,6 +969,22 @@ def draw_nodata(dst, lay, lines):
     return dst
 
 
+def full_scale(hi, rate, want=0.0):
+    """Trips per hour at the top of the chart, rounded to a round number.
+
+    Rounded up to a whole 250 an hour so the one labelled rule lands somewhere
+    sayable, and so the axis does not creep by half a row every time the peak
+    nudges -- an axis that rescales itself every ten minutes makes the morning
+    look different at teatime for no reason.
+    """
+    if want > 0:
+        return float(want)
+    top = float(np.nanmax(hi)) if len(hi) else 0.0
+    if rate is not None and len(rate) and np.isfinite(rate).any():
+        top = max(top, float(np.nanmax(rate)))
+    return max(500.0, math.ceil(top / 250.0) * 250.0)
+
+
 # --------------------------------------------------------------------------
 # build()
 # --------------------------------------------------------------------------
@@ -1028,319 +994,192 @@ def build(args):
     lay = Layout(w, h)
     cache = args.cache_dir
     now_of = clock(parse_when(args.at), args.rate)
-    window = max(3600.0, float(args.hours) * 3600.0)
-    step_s = max(MIN_STEP_S, float(args.step))
-    cycle = max(2.0, float(args.cycle))
-    npmax = max(8, int(args.particles))
 
     frame = np.zeros((h, w, 3), np.uint8)
     static = np.zeros((h, w, 3), np.uint8)
+    base = np.zeros((h, w, 3), np.uint8)       # the same, with no gold on it
 
-    # Scratch for the swarm, allocated once at its largest and used as views.
-    # Every per-particle operation is then one numpy call on a slice, and on
-    # the Pi the call is most of the cost whatever its size.
-    s_u = np.empty(npmax, f32)
-    s_e = np.empty(npmax, f32)
-    s_x = np.empty(npmax, f32)
-    s_xi = np.empty(npmax, np.int32)
-    s_flat = np.empty(npmax, np.int32)
-    s_lvl = np.empty(npmax, np.int32)
+    z, asset_problem = read_typical(args.asset)
 
-    # The colour table: two directions by FADE_LEVELS brightnesses, with level
-    # zero black in both. A particle that has not launched or has already
-    # landed comes out of the envelope at level zero, so it needs no mask of
-    # its own -- see render(), where its target is redirected instead.
-    def levels(rgb):
-        k = np.linspace(0.0, 1.0, FADE_LEVELS, dtype=f32)[:, None]
-        return (np.array(rgb, f32)[None, :] * k)
-    # Four blocks of FADE_LEVELS: inferred inbound, inferred outbound, observed
-    # inbound, observed outbound. Index zero of every block is black, which is
-    # also what an unlaunched or landed particle gets, so the whole swarm is one
-    # unmasked scatter. The observed blocks are the direction hue lifted
-    # two-thirds of the way to white, so a comet's tail still says which way it
-    # went while its head is unmistakably a different kind of mark.
-    def bright(rgb):
-        return tuple(int(c + (s2 - c) * 0.62)
-                     for c, s2 in zip(rgb, C_SEEN))
-    palette = np.concatenate([levels(C_IN), levels(C_OUT),
-                              levels(bright(C_IN)), levels(bright(C_OUT))]
-                             ).clip(0, 255).astype(np.uint8)
+    # The comet's colours, baked: a ramp from the line's own gold up to white
+    # at the head, so it reads as a light travelling *along* the line rather
+    # than as a separate object crossing it.
+    ramp = np.linspace(0.0, 1.0, COMET_LEN, dtype=f32)[:, None] ** 2
+    comet_pal = (np.array(C_TODAY, f32)[None, :] * (1.0 - ramp)
+                 + np.array(C_TODAY_HEAD, f32)[None, :] * ramp
+                 ).clip(0, 255).astype(np.uint8)
 
-    rec_km_max = [12.0]
-    cell = {"rec": None, "problem": None, "loaded": -1e18, "stale": False,
-            "steps": [], "ridge": None, "strip": None, "cur": -1,
-            "chrome": None, "chrome_box": None, "span": 0.0, "cold": True,
-            "skyline": None}
-
-    def journey(out, key, x0, x1, rng, lift, band, pal_base):
-        """Bake one set of journeys into the arrays render() advances.
-
-        Shared by the two layers because they animate identically -- a launch
-        delay, a straight run and a fade at each end. What differs is where
-        they fly, how bright they are and how many pixels each of them is, and
-        all three of those are arguments.
-        """
-        n = len(x0)
-        if not n:
-            return
-        out[key] = {
-            "x0": x0.astype(f32), "dx": (x1 - x0).astype(f32),
-            "launch": (rng.random(n, dtype=f32) * LAUNCH_FRAC).astype(f32),
-            "yj": ((rng.random(n, dtype=f32) * band).astype(np.int32) + lift),
-            "ci": np.where(x1 < x0, pal_base,
-                           pal_base + FADE_LEVELS).astype(np.int32),
-        }
-
-    def bake_step(hist, s, weight, ridge, rng):
-        """Everything one replay step needs, computed once."""
-        info = step_flow(hist, s, weight)
-        out = {"rate": info["rate"], "pull": info["pull"], "n": s["n"],
-               "t0": s["t0"], "t1": s["t1"], "mass": info["mass"],
-               "seen": info["seen"], "gone": info["gone"], "came": info["came"],
-               "tracks": len(info["trk"]), "flow": None, "obs": None}
-
-        # The observed layer, first because it is the one that is *seen*.
-        # Positions come out of the record in metres from downtown; the only
-        # transform here is the same metres-to-column one the docks get.
-        if len(info["trk"]):
-            km = max(rec_km_max[0] * 1000.0, 1.0)
-            tx = np.clip(info["trk"] / km, 0.0, 1.0) * (w - 1)
-            keep = np.abs(tx[:, 1] - tx[:, 0]) >= 2.0
-            journey(out, "obs", tx[keep, 0], tx[keep, 1], rng,
-                    OBS_LIFT, OBS_BAND, 2 * FADE_LEVELS)
-
-        if info["net"] is None:
-            return out
-        bins = len(info["net"])
-        # At least one dot whenever anything moved at all. Rounding a mass of
-        # 0.4 bikes to zero particles is right arithmetically and wrong on a
-        # wall: it makes "almost nothing happened" and "the feed is broken"
-        # look identical.
-        count = int(min(npmax, round(info["mass"] * max(args.density, 0.0))))
-        if info["mass"] > 0.0:
-            count = max(1, count)
-        a, b, mass = transport(info["net"], count)
-        if not len(a):
-            return out
-        # A jitter inside the band, so that ten bikes leaving the same 300 m of
-        # city do not leave from the same pixel. Baked, not drawn per frame, so
-        # render stays a pure function of t.
-        ja = rng.random(len(a), dtype=f32)
-        jb = rng.random(len(b), dtype=f32)
-        x0 = (a + ja) / bins * (w - 1)
-        x1 = (b + jb) / bins * (w - 1)
-        keep = np.abs(x1 - x0) >= 3.0
-        journey(out, "flow", x0[keep], x1[keep], rng,
-                SWARM_LIFT, SWARM_BAND, 0)
-        return out
+    cell = {"rec": None, "problem": asset_problem, "loaded": -1e18,
+            "stale": False, "flat": np.zeros(0, np.int64), "head_col": None,
+            "now_col": 0, "wd": 0, "scale": 500.0}
 
     def reload_data(now):
-        rec, age, problem = read_bikes(cache)
-        if rec is not None and args.max_age > 0 and age is not None \
-                and age > args.max_age:
-            # Not merely stale. A six-hour-old record is a picture of this
-            # morning's flow, drawn under an evening clock, and there is no way
-            # to look at it and tell.
-            problem = "RECORD IS %s OLD" % ftdata.describe_age(age).upper()
+        rec, age, problem = read_today(cache)
+        day0 = day0_of(now)
+        wd = args.weekday if 0 <= args.weekday <= 6 \
+            else time.localtime(now).tm_wday
+        cell["wd"] = wd
+        cell["loaded"] = now
+
+        if z is None:
+            cell["rec"], cell["problem"] = None, asset_problem
+            return
+
+        # A record whose slots belong to another day is not stale, it is
+        # *wrong*: this axis is midnight to midnight and yesterday's line drawn
+        # under today's clock puts the evening peak where the morning goes.
+        wrong_day = None
+        if rec is not None and abs(rec["day0"] - day0) > 1.0:
+            wrong_day = time.strftime("%-m/%-d", time.localtime(rec["day0"]))
+            problem = "LAST DATA %s" % wrong_day
             rec = None
-        cell["rec"], cell["problem"], cell["loaded"] = rec, problem, now
-        if rec is None:
-            cell["stale"] = False
-            cell["steps"], cell["ridge"] = [], None
-            cell["skyline"] = None
-            return
 
-        cell["stale"] = not ftdata.is_fresh(PRODUCT, age)
-        rec_km_max[0] = rec["km_max"]
-        hist = rec["hist"]
-        bins = rec["bins"]
-        prof = band_profile(rec, bins)
-        weight = prof[3]
-        alt_top = max(60.0, math.ceil(float(rec["elev"].max()) / 20.0) * 20.0)
+        cell["rec"] = rec
+        cell["problem"] = problem
+        cell["stale"] = rec is not None and not ftdata.is_fresh(PRODUCT, age)
 
-        have = len(hist["t"]) if hist is not None else 0
-        want = hist["want"] if hist is not None else 0
-        static[:] = 0
-        if lay.head_h:
-            bake_header(static, lay, rec, cell["stale"], have, want)
-        ridge, skyline = bake_city(static, lay, rec, prof[:3], alt_top, args)
-        bake_map_labels(static, lay, rec)
-        cell["ridge"], cell["skyline"] = ridge, skyline
+        lo, med, hi = profile(z, wd)
+        k_hour, k_spread = calibration(z, wd)
+        est = estimate(rec, k_hour) if rec is not None else None
+        now_slot = int(np.clip((now - day0) // 600.0, 0, SLOTS - 1))
+        cell["now_col"] = lay.col_of(now - day0)
 
-        raw = steps_of(hist, now, window, step_s)
-        rng = np.random.default_rng(0xB1CE5)
-        cell["steps"] = [bake_step(hist, s, weight, ridge, rng) for s in raw]
-        cell["span"] = (raw[-1]["t1"] - raw[0]["t0"]) if raw else 0.0
-        cell["cold"] = not any(s["n"] for s in raw)
-        bake_legend(static, lay, sum(x["tracks"] for x in cell["steps"]),
-                    int(rec["totals"].get("loose", 0)))
+        scale = full_scale(hi, est["rate"] if est else None, args.peak)
+        cell["scale"] = scale
+        tick = int(round(scale * 0.6 / 250.0) * 250)
 
-        # Every step's caption is rasterised here and not in the frame loop,
-        # which is goes.py's rule and for goes.py's reason: a caption belongs
-        # to the moment it describes, so there are only twelve of them and
-        # they can all be made once. Doing it on the step change instead cost
-        # a 0.3 ms spike twelve times a cycle -- nothing here, six times the
-        # mean on the Pi, and exactly the kind of thing that shows up as a
-        # dropped frame in a transition. Twelve boxes of 19 by 320 is 219 kB.
-        bh = min(lay.map_h - 1, text_height(2) + 2 * text_height() + 6)
-        cell["chrome_box"] = (lay.map_y, lay.map_y + bh)
-        cell["chrome"] = [np.empty((bh, w, 3), np.uint8)
-                          for _ in range(max(1, len(cell["steps"])))]
-
-        if cell["cold"]:
-            # Nothing has been differenced yet: one fetch has landed, or the
-            # clock jumped, or the wall booted ten minutes ago. Say which and
-            # say when the swarm arrives, rather than drawing an empty sky.
-            wait = ftdata.describe_age(
-                max(0.0, ftdata.PRODUCTS[PRODUCT]["interval"] - (age or 0.0)))
-            cell["cold_lines"] = [
-                ("LEARNING FLOW", C_TEXT, 2, None),
-                ("NO MOVEMENT YET", C_DIM, 1,
-                 ("NEEDS TWO FETCHES - FIRST IN %s" % wait, C_DIM)),
-            ]
-        for i in range(len(cell["chrome"])):
-            draw_chrome(i)
-
-    def draw_chrome(k):
-        """The headline, the direction and the replay clock for step `k`."""
-        y0, y1 = cell["chrome_box"]
-        box = cell["chrome"][k]
-        np.copyto(box, static[y0:y1])
-        sky = cell["skyline"] - y0
-
-        if cell["cold"]:
-            bake_sky(box, 0, y1 - y0 - 1, sky, cell["cold_lines"],
-                     "NO REPLAY YET")
-            return
-        s = cell["steps"][k]
-        if s["rate"] is None:
-            lines = [("NO DATA", C_DIM, 2, None),
-                     ("THIS STEP WAS NEVER FETCHED", C_DIM, 1, None)]
+        base[:] = 0
+        bake_furniture(base, lay, args.h24, scale, tick)
+        bake_typical_day(base, lay, lo, med, hi, scale)
+        bake_now_label(base, lay, cell["now_col"])
+        bake_header(base, lay, rec, cell["stale"], wd, w)
+        bake_strip(base, lay, strip_lines(rec, est, z, wd, k_hour, k_spread,
+                                          now_slot, wrong_day))
+        static[:] = base
+        if est is not None:
+            flat, head = bake_today(static, lay, est["rate"], est["seen"],
+                                    scale)
+            cell["flat"], cell["head_col"] = flat, head
         else:
-            word, rgb = direction_word(s["pull"])
-            lines = [("%d BIKES/H" % int(round(s["rate"])), rgb, 2, None),
-                     (word, rgb, 1, ("NET FLOW - NOT TRIPS", C_DIM))]
-            # The observed layer gets its own line, in its own colour, saying
-            # the one thing the inferred layer cannot: these were watched.
-            # `SEEN` and `MOVED` rather than `TRIPS` or `RIDES`, because what
-            # was observed is a vehicle at a new place and not a journey a
-            # person took.
-            if s["tracks"]:
-                lines.append(("%d EBIKES SEEN TO MOVE" % s["tracks"],
-                              C_SEEN, 1, None))
-        bake_sky(box, 0, y1 - y0 - 1, sky, lines,
-                 "%s  REPLAY OF LAST %s" % (hhmm(s["t0"], not args.h24),
-                                            describe_span(cell["span"])))
+            cell["flat"], cell["head_col"] = np.zeros(0, np.int64), None
+        cell["est"] = est
+
+    def strip_lines(rec, est, z, wd, k_hour, k_spread, now_slot, wrong_day):
+        """Every string on the headline strip, chosen once per cache read.
+
+        Formatting is not free -- caiso measured a third of a millisecond a
+        frame doing exactly this, which is thirty on the Pi -- and none of it
+        can change between cache reads, so all of it happens here.
+        """
+        # No equals sign anywhere: defcon.py's 3x5 font has no glyph for one
+        # and silently draws a space, so the first render of this line read
+        # `SHADED   13 RECENT MONDAYS` and looked like a typesetting fault. The
+        # punctuation on this panel is hyphens by necessity, as it is on every
+        # other panel in this tree that uses this font.
+        short = WEEKDAY_SHORT[wd]
+        nmon = len(z["t%d" % wd])
+        shade = ["SHADED - %d RECENT %sS" % (nmon, WEEKDAY[wd]),
+                 "%d RECENT %sS" % (nmon, WEEKDAY[wd]),
+                 "%d %sS" % (nmon, short)]
+        if rec is None or est is None:
+            said = wrong_day and ("LAST DATA %s" % wrong_day) or \
+                "RUN  PYTHON3 FTDATA.PY --LOOP 600"
+            return ("NO LIVE DATA", C_WARN, None, None,
+                    [said, "NO LIVE DATA"], C_DIM, shade)
+
+        first, last, frac = coverage(est, now_slot)
+        total = int(round(float(est["trips"].sum())))
+        if first is None:
+            return ("WAITING", C_DIM, None,
+                    ["NEEDS TWO FETCHES TEN MINUTES APART", "NO MOVEMENT YET"],
+                    ["THE DAY STARTS HERE"], C_DIM, shade)
+
+        if first <= 3 and frac >= COVER_FULL:
+            what = "TRIPS TODAY"
+        elif frac >= COVER_PART:
+            what = "TRIPS SINCE %s" % hhmm(
+                rec["day0"] + first * 600.0, not args.h24)
+        else:
+            what = "TRIPS IN %dH SEEN" % max(1, int(round(est["secs"] / 3600.0)))
+
+        # The calibration, printed. The effective factor over the slots that
+        # were actually measured, which is what was applied to the number to
+        # its left -- not the day's average, which would be a different number
+        # on a panel that has only seen the morning.
+        sel = est["seen"].copy()
+        sel[now_slot + 1:] = False
+        hours = np.minimum(np.arange(SLOTS) // 6, 23)
+        eff = float(np.mean(k_hour[hours[sel]])) if sel.any() else 0.0
+        note = ["EST FROM DOCK COUNTS X%.1f" % eff,
+                "FROM DOCK COUNTS X%.1f" % eff,
+                "DOCK COUNTS X%.1f" % eff, "EST"]
+
+        word, rgb = verdict(est, smooth(z["t%d" % wd]), k_spread, now_slot)
+        if word is None:
+            words = ["USUAL FOR A %s" % WEEKDAY[wd],
+                     "USUAL FOR A %s" % short, "AS USUAL"]
+        else:
+            words = [word]
+        return ("%d" % total, C_TODAY, what, note, words, rgb, shade)
 
     def render(t, i):
         now = now_of()
         if args.reload and now - cell["loaded"] >= args.reload:
             reload_data(now)
 
-        if cell["rec"] is None:
-            lines = [("NO BIKE DATA", C_WARN),
-                     ("RUN  PYTHON3 FTDATA.PY --LOOP 600", C_TEXT)]
-            if cell["problem"]:
-                lines.append((str(cell["problem"]).upper()[:52], C_DIM))
-            return draw_nodata(frame, lay, lines)
+        if z is None:
+            return draw_nodata(frame, lay, [
+                ("NO BIKE ARCHIVE", C_WARN),
+                ("RUN  PYTHON3 BIKES.PY --BAKE-TYPICAL", C_TEXT),
+                (str(cell["problem"] or "").upper()[:52], C_DIM)])
 
         frame[:] = static
+        flat = cell["flat"]
+        n = len(flat)
 
-        # Where in the loop, in goes.py's shape: one pass through the window
-        # at a fixed rate, then a hold on the newest step so that the loop
-        # *lands on now* rather than snapping back from the middle of this
-        # morning. Unlike goes the hold is not a frozen frame -- the newest
-        # hour keeps replaying under it, because a still panel for five seconds
-        # reads as a crash and the swarm is the demo.
-        steps = cell["steps"]
-        nst = max(1, len(steps))
-        per = cycle / nst
-        total = cycle + max(0.0, args.hold)
-        u = t % total if total > 0 else 0.0
-        if u >= cycle:
-            k, local = nst - 1, ((u - cycle) / per) % 1.0
-        else:
-            x = u / per
-            k = min(nst - 1, int(x))
-            local = x - k
-        cell["cur"] = k
-        y0, y1 = cell["chrome_box"]
-        frame[y0:y1] = cell["chrome"][min(k, len(cell["chrome"]) - 1)]
+        # The reveal, and then the comet. Two slice copies rather than a mask:
+        # the part of today that has not been drawn in yet is restored from
+        # `base`, which already carries the silhouette, so the gold line wipes
+        # in over a chart rather than over a black hole.
+        drawn = n
+        if args.reveal > 0 and t < args.reveal and n:
+            drawn = int(n * (t / args.reveal))
+            col = int(flat[min(drawn, n - 1)] % w)
+            frame[lay.chart_y:lay.chart_bot + 1, col:] = \
+                base[lay.chart_y:lay.chart_bot + 1, col:]
+        elif args.comet > 0 and n:
+            phase = ((t - args.reveal) / args.comet) % 1.0
+            head = int(phase * (n + COMET_LEN)) - COMET_LEN
+            a, b = max(0, head), min(n, head + COMET_LEN)
+            if b > a:
+                frame.reshape(-1, 3)[flat[a:b]] = \
+                    comet_pal[a - head:b - head]
 
-        mv = frame.reshape(-1, 3)
-
-        def fly(g, shift, gain):
-            """One layer, at one point of its own trail. All of the frame cost.
-
-            `shift` steps the whole set back in its journey, which is what
-            draws a comet: the same arrays sampled at three phases. `gain`
-            dims the sample, so the tail is darker than the head.
-            """
-            n = len(g["x0"])
-            u, e = s_u[:n], s_e[:n]
-            # Where each particle is in its own journey, and how bright that
-            # makes it. Outside [0, 1] the envelope clips to zero, which is
-            # black in the palette -- so an unlaunched or landed particle needs
-            # no branch, only somewhere harmless to write. See below.
-            np.subtract(local - shift, g["launch"], out=u)
-            np.multiply(u, f32(1.0 / TRAVEL_FRAC), out=u)
-            np.subtract(1.0, u, out=e)
-            np.minimum(e, u, out=e)
-            np.multiply(e, f32((FADE_LEVELS - 1) * gain / FADE_FRAC), out=e)
-            np.clip(e, 0.0, FADE_LEVELS - 1, out=e)
-            lvl = s_lvl[:n]
-            np.copyto(lvl, e, casting="unsafe")
-
-            x = s_x[:n]
-            np.clip(u, 0.0, 1.0, out=u)
-            np.multiply(g["dx"], u, out=x)
-            np.add(x, g["x0"], out=x)
-            xi = s_xi[:n]
-            np.copyto(xi, x, casting="unsafe")
-            row = np.take(cell["ridge"], xi)
-            np.subtract(row, g["yj"], out=row)
-            np.clip(row, lay.map_y, lay.map_bot, out=row)
-            flat = s_flat[:n]
-            np.multiply(row, w, out=flat)
-            np.add(flat, xi, out=flat)
-            # Pixel zero is the top-left corner of the header, which is black
-            # and stays black: the text starts at column one. Parking every
-            # particle that is not in flight there is what lets the whole swarm
-            # be one unmasked scatter of a colour that happens to be black.
-            np.multiply(flat, lvl > 0, out=flat)
-            np.add(lvl, g["ci"], out=lvl)
-            mv[flat] = palette[lvl]
-
-        s = steps[k] if steps else None
-        if s is not None:
-            # The inferred field first and the observed journeys over it, so
-            # that where the two meet the thing that was actually watched
-            # happening is the thing you see. The comet is drawn tail first for
-            # the same reason.
-            if s["flow"] is not None:
-                for shift, gain in zip(FLOW_TRAIL[::-1], FLOW_TRAIL_K[::-1]):
-                    fly(s["flow"], shift, gain)
-            if s["obs"] is not None and not args.no_seen:
-                for shift, gain in zip(OBS_TRAIL[::-1], OBS_TRAIL_K[::-1]):
-                    fly(s["obs"], shift, gain)
-
-        # goes.py's scrub bar, on the last row of the panel: filled behind the
-        # playhead, dim in front of it, a lit head. It is the only thing left
-        # on the panel that says at a glance that this is a loop of the last
-        # half day and not a live feed, which is the single most important
-        # thing a viewer has to understand about it -- and one row is the whole
-        # cost of saying it.
-        #
-        # It also guarantees the panel is never still. Half the hours of a real
-        # day move so few bikes that the swarm is nearly empty, and an earlier
-        # draft held one identical frame for the whole of a quiet three in the
-        # morning, which on a wall is indistinguishable from a crashed demo.
-        if lay.tick_h:
-            done = (k + local) / nst if nst > 1 else local
-            head = int(np.clip(done * (w - 1), 0, w - 1))
-            frame[lay.tick_y, :head + 1] = C_TRACK
-            frame[lay.tick_y, head + 1:] = C_GRID
-            frame[lay.tick_y, max(0, head - 1):head + 1] = C_NOW
+        # The now-rule last, over everything. It breathes, and a short bright
+        # pulse runs up it, which is the only thing on the panel guaranteed to
+        # move in every frame. Both are driven by the segment's own `t` and not
+        # by the wall clock, so the animation is the same under a test harness
+        # rendering a hundred frames in a millisecond as it is on the wall.
+        col = cell["now_col"]
+        if col < w:
+            top, bot = lay.chart_y, lay.chart_bot + 1
+            # A shallower breath than caiso's, which swings between 10 and 100
+            # per cent. This rule is already the dimmest deliberate mark on the
+            # panel, and at caiso's depth it spends a third of every cycle
+            # under what is legible across a workshop -- the mark whose whole
+            # job is to say where now is should never be the one that
+            # disappears.
+            blink = 0.78 + 0.22 * math.sin(t * 2.0)
+            frame[top:bot, col] = tuple(int(c * blink) for c in C_NOW_DIM)
+            py = top + int(((t * PULSE_HZ) % 1.0) * (bot - top))
+            frame[max(top, py - 1):py + 2, col] = C_NOW
+            # The head of the line, where today stops. On a fresh record that
+            # is the now-rule; on a stale one it is behind it, and the gap is
+            # the panel saying so.
+            if cell["head_col"] is not None and drawn >= n:
+                hc = cell["head_col"]
+                hr = int(flat[-1] // w)
+                frame[max(top, hr - 1):min(bot, hr + 2), hc] = C_TODAY_HEAD
         return frame
 
     reload_data(now_of())
@@ -1348,14 +1187,224 @@ def build(args):
     render.layout = lay
     render.clock = now_of
     render.static = static
-    render.palette = palette
+    render.typical = z
     return render
 
 
+# --------------------------------------------------------------------------
+# Baking `bikes-typical.npz` out of Bay Wheels' published trip archive.
+#
+# An offline tool that never runs on the wall: it wants sixty megabytes of zip,
+# csv, zipfile and about ten seconds. It lives in this file rather than in a
+# script of its own so that the asset and the code that reads it cannot drift
+# apart, which is the rule stringline.py's --bake-lines set.
+#
+#     $ python3 bikes.py --bake-typical                    # last 3 whole months
+#     $ python3 bikes.py --bake-typical 202605 202606 202607
+#
+# The source is `https://s3.amazonaws.com/baywheels-data/YYYYMM-baywheels-
+# tripdata.csv.zip`: one row per trip, keyless, published monthly, with the
+# start and end time, the dock at each end where there was one, and coordinates
+# rounded to two decimals for the free-floating ebikes. Some months are
+# published as `-tripdata.zip` instead, so both are tried.
+#
+# **It is cropped to San Francisco**, by the start coordinate, against the same
+# box `ftdata.py` crops the live feed with. Bay Wheels is one system covering
+# four separated cities and San Jose's commute is not this wall's.
+#
+# Two matrices come out per weekday, one row per date and 144 ten-minute
+# columns:
+#
+#   t<wd>   trips that started in the box in that bucket. The census.
+#   e<wd>   what the dock-count estimator would have reported for the same
+#           bucket: every trip replayed as minus one at the dock it left when
+#           it left and plus one at the dock it reached when it reached it,
+#           then the sum of |change| over the docks, halved. Only endpoints
+#           inside the box count, which is the same blindness the live
+#           estimator has. Trips on free-floating ebikes have no dock at either
+#           end and so contribute nothing to it -- which is exactly why the
+#           ratio of the two matrices is bigger than one.
+#
+# Both are kept raw rather than reduced to a median and a spread, because the
+# derivation is cheap, because the panel needs sums over arbitrary subsets of
+# the day for a cold-started comparison, and because a committed asset that
+# carries the counts can be argued with and one that carries percentiles
+# cannot.
+#
+# **What is left in on purpose.** Public holidays, Bay to Breakers, rain and
+# Muni strikes are all in there and are not removed. Thirteen dates a weekday
+# is too few to identify outliers without also removing real variety, and the
+# tenth-to-ninetieth band is exactly the right instrument for absorbing one odd
+# Monday in thirteen.
+# --------------------------------------------------------------------------
+
+ARCHIVE = "https://s3.amazonaws.com/baywheels-data/%s-baywheels-tripdata%s"
+
+# The same crop as ftdata's BIKES_BBOX, repeated here rather than imported
+# because the bake is an offline tool and the whole point of the split is that
+# this file never reaches into the fetcher's internals at run time. If one
+# moves, both move; the asset records the box it was made with.
+BAKE_BBOX = (37.700, 37.840, -122.530, -122.350)
+
+
+def _recent_months(n=3, now=None):
+    """The last `n` complete calendar months, newest last."""
+    lt = time.localtime(now if now is not None else time.time())
+    y, m = lt.tm_year, lt.tm_mon
+    out = []
+    for _ in range(n):
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+        out.append("%04d%02d" % (y, m))
+    return list(reversed(out))
+
+
+def _fetch_month(month, cache_dir):
+    """The month's zip on disk, downloading it if it is not there already."""
+    import urllib.request
+    path = os.path.join(cache_dir, "%s.zip" % month)
+    if os.path.exists(path) and os.path.getsize(path) > 1 << 20:
+        return path
+    last = None
+    for suffix in (".csv.zip", ".zip"):
+        url = ARCHIVE % (month, suffix)
+        try:
+            with urllib.request.urlopen(url, timeout=300) as resp:
+                blob = resp.read()
+        except Exception as exc:                             # noqa: BLE001
+            last = exc
+            continue
+        with open(path, "wb") as fh:
+            fh.write(blob)
+        print("  %s  %.1f MB  %s" % (month, len(blob) / 1e6, url))
+        return path
+    raise IOError("cannot fetch %s (%r)" % (month, last))
+
+
+def _read_month(path):
+    """(trips, net) counters keyed by (date, slot). Streaming, one pass."""
+    import collections
+    import csv
+    import io
+    import zipfile
+
+    zf = zipfile.ZipFile(path)
+    name = [n for n in zf.namelist()
+            if n.lower().endswith(".csv") and not n.startswith("__")][0]
+    lat0, lat1, lon0, lon1 = BAKE_BBOX
+    trips = collections.Counter()
+    net = collections.defaultdict(collections.Counter)
+
+    def slot_of(stamp):
+        # 'YYYY-MM-DD HH:MM:SS.mmm', local time, sliced rather than parsed:
+        # strptime on a million rows is forty seconds and this is one.
+        return (int(stamp[11:13]) * 6 + int(stamp[14:16]) // 10)
+
+    with zf.open(name) as fh:
+        r = csv.reader(io.TextIOWrapper(fh, "utf-8-sig"))
+        ix = {k: i for i, k in enumerate(next(r))}
+        i_sa, i_ea = ix["started_at"], ix["ended_at"]
+        i_ss, i_es = ix["start_station_id"], ix["end_station_id"]
+        i_sla, i_slo = ix["start_lat"], ix["start_lng"]
+        i_ela, i_elo = ix["end_lat"], ix["end_lng"]
+        for row in r:
+            sa = row[i_sa]
+            try:
+                s = slot_of(sa)
+                la, lo = float(row[i_sla]), float(row[i_slo])
+            except (ValueError, IndexError):
+                continue
+            if lat0 <= la <= lat1 and lon0 <= lo <= lon1:
+                trips[(sa[:10], s)] += 1
+                if row[i_ss]:
+                    net[(sa[:10], s)][row[i_ss]] -= 1
+            if not row[i_es]:
+                continue
+            try:
+                ela, elo = float(row[i_ela]), float(row[i_elo])
+                e = slot_of(row[i_ea])
+            except (ValueError, IndexError):
+                continue
+            if lat0 <= ela <= lat1 and lon0 <= elo <= lon1:
+                net[(row[i_ea][:10], e)][row[i_es]] += 1
+    return trips, net
+
+
+def bake_typical(months=None, out=None, cache_dir=None):
+    """Read the monthly trip archive and write the committed asset."""
+    import collections
+    import datetime
+
+    months = list(months) or _recent_months(3)
+    out = out or asset_path()
+    cache_dir = cache_dir or os.path.join(
+        os.environ.get("TMPDIR", "/tmp"), "baywheels-archive")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    trips = collections.Counter()
+    net = collections.defaultdict(collections.Counter)
+    for month in months:
+        t0 = time.time()
+        path = _fetch_month(month, cache_dir)
+        tr, nt = _read_month(path)
+        trips.update(tr)
+        for key, counter in nt.items():
+            net[key].update(counter)
+        print("  %s  %d SF trips  %.1fs"
+              % (month, sum(tr.values()), time.time() - t0))
+
+    # Only the dates wholly inside the months asked for. A file's first day
+    # collects arrivals from trips that started in the previous month and its
+    # last day loses the ones that end in the next, and a partial day drawn as
+    # a whole one would drag every percentile down.
+    keep = set(months)
+    dates = sorted(d for d, _s in trips if d.replace("-", "")[:6] in keep)
+    dates = sorted(set(dates))
+    if len(dates) < 14:
+        raise ValueError("only %d dates parsed; that is not a typical day"
+                         % len(dates))
+
+    by_wd = collections.defaultdict(list)
+    for d in dates:
+        y, m, dd = (int(x) for x in d.split("-"))
+        by_wd[datetime.date(y, m, dd).weekday()].append(d)
+
+    arrays = {}
+    for wd in range(7):
+        days = by_wd[wd]
+        t = np.zeros((len(days), SLOTS), np.float32)
+        e = np.zeros((len(days), SLOTS), np.float32)
+        for i, d in enumerate(days):
+            for s in range(SLOTS):
+                t[i, s] = trips.get((d, s), 0)
+                counter = net.get((d, s))
+                if counter:
+                    e[i, s] = sum(abs(v) for v in counter.values()) * 0.5
+        arrays["t%d" % wd] = t
+        arrays["e%d" % wd] = e
+        print("  %s  %2d dates  median %6d trips/day  k=%.2f"
+              % (WEEKDAY_SHORT[wd], len(days), int(np.median(t.sum(1))),
+                 t.sum() / max(e.sum(), 1.0)))
+
+    arrays["months"] = np.array(months)
+    arrays["span"] = np.array([dates[0], dates[-1]])
+    arrays["bbox"] = np.array(BAKE_BBOX, np.float64)
+    arrays["bucket"] = np.array([86400 // SLOTS], np.int32)
+    np.savez_compressed(out, **arrays)
+    print("wrote %s  (%d dates, %s to %s, %.1f kB)"
+          % (out, len(dates), dates[0], dates[-1],
+             os.path.getsize(out) / 1024.0))
+
+
 def main():
-    ds.standalone(sys.modules[__name__],
-                  "Bay Wheels: net bike flow across San Francisco, replayed",
-                  fps=20)
+    # The bake is not a demo option: it has to happen instead of a frame loop,
+    # not inside one, and megademo must never see it in add_arguments().
+    if "--bake-typical" in sys.argv:
+        i = sys.argv.index("--bake-typical")
+        bake_typical(sys.argv[i + 1:])
+        return
+    ds.standalone(sys.modules[__name__], __doc__.split("\n", 1)[0], fps=20)
 
 
 if __name__ == "__main__":
