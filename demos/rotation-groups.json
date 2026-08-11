@@ -46,7 +46,11 @@
         "stringline",
         "bikes",
         "bgp",
-        "sfmix"
+        "sfmix",
+        "sun",
+        "air",
+        "wateryear",
+        "cityline"
       ]
     },
     {
@@ -109,7 +113,8 @@
         "helicorder",
         "stringline",
         "bikes",
-        "sfmix"
+        "sfmix",
+        "cityline"
       ]
     },
     {

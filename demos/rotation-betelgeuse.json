@@ -37,6 +37,17 @@
     },
     {
       "kind": "py",
+      "name": "wateryear",
+      "module": "wateryear",
+      "seconds": 40.0,
+      "fps": 20,
+      "ms": 4.7,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "wopr",
       "module": "wopr",
       "seconds": 45.0,
@@ -212,6 +223,17 @@
       "options": {
         "coarse": true
       }
+    },
+    {
+      "kind": "py",
+      "name": "cityline",
+      "module": "cityline",
+      "seconds": 30.0,
+      "fps": 20,
+      "ms": 0.4,
+      "enabled": true,
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
@@ -402,6 +424,17 @@
       "seconds": 45.0,
       "fps": 60,
       "ms": 9.4,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "sun",
+      "module": "sun",
+      "seconds": 30.0,
+      "fps": 20,
+      "ms": 0.8,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -810,6 +843,17 @@
       "ms": 69.3,
       "enabled": true,
       "solo": true,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "air",
+      "module": "air",
+      "seconds": 40.0,
+      "fps": 20,
+      "ms": 16.2,
+      "enabled": true,
+      "solo": false,
       "options": {}
     },
     {

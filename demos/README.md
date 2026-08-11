@@ -4780,6 +4780,660 @@ still true and only "now" has gone soft. With no record at all, a no-data card.
     FT_DATA_CACHE=/tmp/empty python3 sfmix.py     # the no-data card
     python3 scripts/test-sfmix.py
 
+### sun
+
+![sun](screenshots/sun.png)
+
+The last day of the Sun's corona, in the 193 Å channel of SDO/AIA, on a
+fourteen-second loop that has no seam in it. Forty-eight half-hourly frames
+from NASA's Solar Dynamics Observatory play left to right while a playhead
+sweeps the last twenty-four hours of GOES X-ray flux beside them, so the
+picture and the number are the same day at the same instant. It is the only
+panel on the wall that is a photograph of another object in space —
+`propagation` and `sats` are numbers and geometry about space, which is not the
+same thing — and it is there because a picture of the star is legible to
+somebody who knows nothing about any of the rest of it.
+
+**Why 193 Å.** AIA takes the Sun in ten channels and they are pictures of ten
+different things, not ten filters on one picture. 193 Å is Fe XII/XXIV at about
+1.2 million kelvin, which puts the *corona* on screen instead of the surface,
+and it is the channel where the magnetic field becomes visible: active regions
+as bright knots, the loops arcing between them, and coronal holes as the black
+bays where the field opens and the solar wind gets out. 4500 Å — the bland
+yellow disk everyone pictures — has nothing happening in it at 60 pixels.
+`FT_SDO_WAVE` will fetch 0171 or 0304 instead; the stored colour ramp is 193's
+and would want re-measuring for another channel.
+
+**The loop is the hard part, and it is measured rather than eyeballed.** A day
+does not join up. The Sun turns 13.2° in it, so cutting from now back to
+yesterday is a jerk once a cycle — the kind of fault a passer-by registers as
+"that looks cheap" without being able to say why. Holding on the newest frame,
+which is what `goes.py` does and is right for weather, is wrong here: the point
+of this panel is the turning, and a hold puts a stutter exactly where the motion
+should be. So the loop **overlaps itself**. The last six frames are
+cross-dissolved into the first six and the period is shortened by exactly that
+overlap, which puts the seam in the middle of a dissolve where there is nothing
+to see.
+
+That it works is a number, not an opinion. Taking the mean absolute difference
+between consecutive loop frames, the step across the wrap is **14.7× a typical
+interior step with the overlap off, and 2.16× with it on** — 1.7 levels out of
+255, which is under what the panel can show. `scripts/test-sun.py` asserts both,
+including the control: a test that only checked the blended loop would pass
+against a broken implementation that blended nothing.
+
+The honest cost is that the dissolve is a genuine double exposure of two moments
+three hours apart. At 13.2° a day they are close enough that it reads as a soft
+blur rather than a ghost. The other cost is subtler and was a bug before it was
+a feature: the overlap **consumes** the newest frames, so the loop's last
+unblended frame is three hours short of the ring's newest. The axis originally
+ran to the newest frame anyway, and the playhead stopped a thirteenth short of
+the right edge every cycle. The trace and the window label now describe exactly
+the interval the playhead sweeps; how stale the imagery is stays a separate
+claim, made separately in the corner.
+
+**The X-ray trace is the same day, not a second instrument.** GOES' 1–8 Å flux
+is already fetched for `propagation`, so it costs no network at all, and drawn
+on the *same* time axis as the time lapse it stops being a second panel and
+becomes a caption for the first: the playhead crossing a spike is the same
+instant the disk flares. The scale is logarithmic from **B to X rather than the
+conventional A to X**, because most days are quiet — the Sun was B4 the day this
+was written — and four decades flattens a quiet day onto the floor where it
+reads as no data at all. Three and a half decades keeps a quiet day a visible
+ripple and still leaves an X-flare at the ceiling. The C and M rules are named,
+because otherwise the empty two thirds above the trace is just black when what
+it actually says is "there is room here for a flare two hundred times bigger and
+there has not been one". Sub-C columns are drawn cold blue-grey rather than
+`propagation`'s green: the disk is the only warm thing on this panel by design,
+so heat should be the thing that *appears* when a flare does. The trace is a
+garnish and never a dependency — with no flux record the Sun draws alone.
+
+**One channel is stored, not three, and that is lossless here.** The browse JPEG
+is already false colour: 193 Å is drawn through a fixed one-dimensional bronze
+colormap, so G and B are functions of R rather than independent information.
+Binning a real frame confirms it — at a given intensity the spread in the other
+two channels is one to five levels, which is JPEG ringing. So the fetcher keeps a
+single 8-bit intensity plane and the demo maps it back through its own copy of
+that ramp, measured off a real frame rather than guessed. That thirds the
+sidecar and, more usefully, puts the contrast curve under the panel's control
+instead of NASA's, which matters on an LED wall whose dark end is compressed.
+The index is `(R+G+B)/3` and not R alone because R saturates first, and the
+pixels where it saturates are exactly the flare cores worth keeping apart from
+merely bright.
+
+**The limb was found, not assumed.** On the 512 px browse image the Sun is
+centred on (255.5, 255.5) with a photospheric radius of about 203 px, measured
+off the radial profile — which peaks sharply at r=200 where the limb brightens
+and has fallen to a tenth by r=250. Cropping tight to that gets the biggest
+possible disk and looks wrong, because the corona is still bright where the
+square ends: the Sun ends up in a luminous box, bright at the middle of each
+edge and black only in the corners. The crop is 248 px of half-width instead and
+the demo fades the last of the corona to black with a vignette that starts at
+the limb, so **no photospheric pixel is touched** and the disk sits in a halo
+rather than a border. It costs disk diameter — 52 px rather than 60 — and buys a
+star instead of a photograph of one. The crop also throws away the caption GSFC
+burns into the bottom of every browse frame, which would otherwise arrive as
+unreadable smeared type along the panel.
+
+**Fetching is a ring, and the expensive endpoint is only used to repair.** This
+is where most of the work went. Frames live in a per-day Apache directory index
+which is **1.2 MB of HTML, served uncompressed** — no gzip, and `Range` requests
+are ignored outright, returning all 1.2 MB with a 200. The filenames cannot be
+predicted either, which is what makes the listing necessary at all: `goes.py`
+gets away with naming tomorrow's files because its scans are exactly on a
+five-minute grid, but AIA's wander (00:07, 00:17, 00:27, 00:37, 00:48, 00:57)
+with seconds only ever on a twelve-second grid, and there are holes. Pulling the
+listing every pass would cost **57 MB a day** to learn the name of one new file.
+
+What saves it is that `latest_512_0193.jpg` is the newest frame at a fixed URL,
+44 kB, with a `Last-Modified` that dates publication rather than the fetch. So
+the ring is topped up from `latest` and nothing else in the ordinary case, and
+the listing is fetched only when there is a hole older than an hour — a cold
+start, or a fetcher that has been down. **Steady state is about 2 MB a day**
+against 57. `Last-Modified` is not the observation time and the difference is
+stored rather than ignored: a frame shot at 17:38:05 UT appeared with
+`Last-Modified` 17:43:06, so publication trails the shutter by very close to
+five minutes and `SDO_PUBLISH_LAG` backs that out. Backfilled frames get their
+exact time from the filename, so the two paths agree to a few minutes on a
+twenty-four hour axis — under a pixel.
+
+Half-hourly is as fine as the panel can resolve, which is why the ring is 48 and
+not 144: half an hour of rotation moves a feature about a tenth of a pixel on a
+52-pixel disk, so a ten-minute ring would triple the fetching to show the same
+picture. What half-hourly still catches is what actually moves at this scale —
+an active region brightening, a flare, a coronal hole changing shape. The record
+is 436 bytes and the sidecar about 150 kB.
+
+**Playback is an index and one blend.** Everything — the resample, the vignette,
+the colour ramp, the loop overlap, the flux trace, the type — is baked in
+`build()`, which takes 3.8 ms. A frame on the wall copies a prepared background,
+blends two tiles into the disk box with the integer blend `goes.py` uses, and
+moves a playhead: about eight numpy calls, **0.014 ms mean and 0.017 ms p95** on
+a desktop over a full loop. It is deliberately the cheapest thing it can be,
+because the corona is doing the work.
+
+**Missing, partial and stale are three different things and it says which.** No
+cache, no sidecar or an unreadable one gets the no-data card with the fetcher's
+command on it. A ring shorter than a day plays anyway and says how much of a day
+it has — a cold start is a short ring by definition, and eight hours of the Sun
+turning beats a card that says wait. A ring whose newest frame has gone stale
+keeps playing with the age in red, because yesterday's corona is still worth
+looking at as long as nobody can mistake it for now.
+
+### air
+
+![air](screenshots/air.png)
+
+What is in the air outside, drawn as how far you can see through it. The wall
+already had the weather, the fog, the wind and a satellite's view of the cloud
+over the Bay, and not one of them said anything about particulates — which in
+this city is the most visible environmental fact of the year. The difference
+between a clear September afternoon and a smoke day is the thing everybody in
+the shop notices, talks about and changes their plans for, and until this panel
+it was the one thing the wall could not tell them.
+
+So it is not a gauge. It is the view north from the roof, redrawn at the
+visibility the current PM2.5 implies: the Marin hills behind, the downtown
+towers, Potrero and the near warehouses, and a rooftop in the foreground with a
+chimney and a water tank on it. On a clean day the whole depth of it stands out
+crisp against a blue sky and the tower windows are lit. As the number climbs
+the far layers dissolve into the airlight one after another and the panel goes
+warm — tan, then amber, then the orange-brown that anybody who was here in 2020
+recognises before they have read a single character. Somebody walking past
+reads *the air is bad today* off the colour and off how much of the city is
+missing, which is how they read it out of a real window.
+
+**The extinction is arithmetic, not a mood.** Two lines do all of it:
+
+    b_pm = 3 * PM2.5 + 10        extinction from particles, Mm^-1
+    T(d) = exp(-b * d)           contrast a target keeps at d kilometres
+
+The first is the IMPROVE mass scattering efficiency for fine particles — the
+number every regulatory visibility calculation in the US is built on — plus a
+Rayleigh floor for the air itself, which is why a perfectly clean day has a
+visual range of 391 km and not infinity. The second is Beer's law; inverting it
+through Koschmieder's 3912/b is where the meteorologists' "visual range" comes
+from. Each depth plane sits at its real-ish distance and is drawn as `body*T +
+airlight*(1-T)`, and that is the entire renderer. At 8 µg/m³ the Marin ridge
+keeps 39% of its contrast and the towers 83%; at 150 the ridge is gone, the
+towers are at 8% and the rooftop is still at 89%. None of that was tuned to
+look right. It looks right because it is what the atmosphere does.
+
+The four distances are the one place where a free parameter was spent
+deliberately: 28 km, 5.5 km, 1.6 km and 250 m are roughly a factor of four
+apart so that each plane drops out at a different, useful concentration. The
+ridge goes at about 25 µg/m³, the towers at 137, Potrero at 477 and the rooftop
+never. That gives four steps of legible bad instead of one binary, and it
+guarantees the panel is never an empty rectangle.
+
+**Fog is not smoke, and this is the panel where that had to hold.** `karl`
+already owns fog, and a 6 µg/m³ foggy morning drawn orange would be the wall
+claiming a fire, twice a week in July. Water scatters neutrally and looks white
+and cool; smoke absorbs blue and looks orange and warm. So the fetcher stores
+the model's own visibility diagnostic and the relative humidity beside the
+particulates, and the demo splits the extinction in two: `b_fog = 3912/vis_km −
+b_pm`, whatever is stopping the light that the particles cannot account for.
+The airlight colour is then mixed between a cool grey and a PM2.5-driven ramp
+in proportion, and the caption says FOG, SMOKE, HAZE or CLEAR. A foggy morning
+and a smoke afternoon can hide the towers equally well and are 135 levels apart
+in red-minus-blue, which is not a distinction anybody has to squint at.
+
+Two things had to be done to the fog term to make it usable. It is **capped**,
+at about 4 km of visual range from water alone: the model emits isolated hours
+of 100 m visibility, which as extinction is 39 000 Mm⁻¹ and renders a uniform
+white rectangle. And it is **smoothed over three hours and gated on humidity**,
+because those isolated hours flashing past mid-sweep read as a rendering fault,
+and because a 200 m visibility at 52% relative humidity is the diagnostic
+having an opinion rather than fog. Both are compromises and both are in the
+code with the reasoning next to them.
+
+**It sweeps, because the trend is the point.** A number tells you the air is
+bad; the shape tells you whether it is arriving or leaving. The panel dwells on
+the present moment, runs back to 24 hours ago, sweeps forward through now into
+tomorrow's forecast, and returns — and the headline follows the cursor,
+labelled `-8H`, `NOW`, `+13H`. A big number over a picture of another hour
+would be the worst thing this panel could do, so the label is drawn above the
+age rather than below it and the sweep starts and ends on the present, which
+means a segment cut short has still shown somebody today's number. The strip
+along the bottom is the whole 48 hours at once: bar heights are hourly PM2.5,
+colours are the six official US AQI categories, the forecast half is drawn
+dimmer than the measured half, and the present moment is a bright rule.
+
+**The AQI lags the PM2.5 and that is not a bug in either.** The US index is
+defined on a 24-hour average, so the service's hourly `us_aqi` column is a
+running quantity. Over a real day here it moved 54 to 60 while the hourly PM2.5
+moved 8 to 16 — correlation 0.15 against the hourly figure and 0.90 against a
+24-hour trailing mean of it. Both the headline and the strip's colour are
+driven by the index so that they agree with each other and with every other air
+quality map anybody has seen; the bar *heights* are the hourly mass, because
+that is the thing with an hourly shape. When a plume arrives the bars rise
+before the colour does. That is the index, not the panel.
+
+**No day and night.** The scene is lit as daytime at 3 am as much as at 3 pm.
+Adding a diurnal cycle would put a second and much stronger brightness signal
+on the one axis the panel exists to carry, and "dark" would be read as "bad" by
+everybody who did not stop to think about it. This is a diagram of visibility,
+not a webcam.
+
+**The data.** Open-Meteo, free and keyless, two endpoints an hour: the
+air-quality API for `pm2_5, pm10, us_aqi, aerosol_optical_depth` and the
+ordinary forecast API for `relative_humidity_2m, visibility`. One request each
+gets the past and the forecast together, so the whole 49-hour window is two
+round trips. `past_days` and `forecast_days` snap to whole days, so the request
+covers five and the fetcher throws away everything outside now±24 h: about 6 kB
+over the wire becomes a 2.2 kB record of roughly 250 numbers. Times are asked
+for in UTC explicitly — the documented default is GMT but a default is not a
+promise, and `timezone=` also decides where the day boundaries fall. The
+coordinate comes from `ftsite`, never from the source. TTL three hours,
+interval one hour; the model is revised hourly at best and a curve fetched two
+hours ago is still very nearly the curve.
+
+A surprise worth writing down: the two endpoints answer for **different grid
+cells**. The chemistry model is CAMS at about 11 km and answered for 37.80,
+−122.40 — Fisherman's Wharf, 4 km north of the building — while the forecast
+model answered for 37.763, −122.413, half a mile away. Both are stored, because
+"modelled for a cell containing most of the northeast quadrant of the city" is
+the honest description of this number.
+
+There is already a `wx-air-<site>` product a thousand lines up in `ftdata.py`
+and this is deliberately not it. That one asks for `current=`: one instant,
+five species, a number for `wx` to print in a corner. This one wants one
+species and forty-nine hours of it, half in the future, because the panel is
+about a trend arriving. Bolting `hourly=` onto the wx product would have made
+every `wx` fetch forty times bigger for a series `wx` does not draw.
+
+**Frame budget.** Every pixel's colour depends only on which depth plane is
+visible there, which row it is on, and how its edge is antialiased — so
+`build()` bakes one int32 index image and `render()` builds a small
+(bodies × bodies × coverage × rows) colour table for the current extinction and
+pulls the entire panel out of it with a single `np.take`. The table is 32 k
+floats and a dozen numpy calls on tiny arrays; the frame is the gather, one add
+of the drifting murk and the dither, and one store. Five whole-panel passes,
+about twenty numpy calls. Quantising the edge coverage to four steps is what
+collapsed two gathers and a blend into one; four steps on a one-pixel silhouette
+is finer than the panel's own gamma can show. The tower lights and the aviation
+beacon cost nothing per frame at all, because they are simply two more rows of
+the same table at the towers' own distance — which is why they are swallowed by
+the smoke along with the towers, rather than shining through it.
+
+Measured over a full sweep on the desktop: **mean 0.27 ms, p95 0.46 ms, worst
+frame 0.55 ms**, with `build()` at 3 ms. Against the calibration figure in this
+tree — a demo at 0.3 ms here measuring 44 ms on the Pi while it was throttled to
+600 MHz, call it 20 ms now that the clock is fixed — that scales to roughly
+**18 ms mean on the wall's Pi 3**, inside the 20 ms target at 20 fps but not by
+much. The p95 tracks the mean, so there is no periodic spike to be surprised
+by. If it turns out marginal, the first thing to give up is the four-step edge
+antialiasing, which halves the table and costs one silhouette pixel of
+smoothness.
+
+The murk drifts across at 23 columns a second and its amplitude follows the
+extinction, so a clean day is still and crisp and a smoke day visibly moves.
+The floor under that amplitude is not decoration: the drift is what guarantees
+no two consecutive frames are identical while the sweep is dwelling on the
+present, and a panel that holds one frame for half a second on a wall between
+two animated demos reads as a crash. `caiso` learned the same lesson the same
+way.
+
+Records past the three-hour TTL still draw — a curve from breakfast is still
+breakfast's curve — with the age and `STALE` on the panel. A record whose
+window has *ended* is refused outright and says so, because a 49-hour picture
+of the wrong 49 hours is worse than an empty rectangle. No record at all gets
+the no-data card and the command that fixes it.
+
+    python3 ftdata.py --once --only air
+    python3 air.py --host 127.0.0.1
+    python3 air.py --sweep 8              # hurry the sweep along
+    python3 scripts/test-air.py           # 83 checks
+    python3 scripts/test-air.py --shot-smoke /tmp/smoke.png   # a day to come
+
+That last one matters. A panel whose entire point is what it looks like when
+the air is bad cannot be reviewed on a clear afternoon, so the test script will
+fabricate a plausible smoke day, a fog morning or a clean day into a scratch
+cache and screenshot the panel reading it. The demo is not told; it reads the
+cache it always reads.
+
+### wateryear
+
+![wateryear](screenshots/wateryear.png)
+
+California's water year, played in about twenty seconds and landing on today. A
+mountain range across the top is the Sierra snowpack; eight vessels underneath
+it are the state's major reservoirs, north to south; and the panel sweeps from
+1 October to the latest day CDEC has, so you watch the snow build down the
+mountain through winter, watch the snowline climb back up in April with
+meltwater running off it into the lakes below, and watch the lakes rise while
+it happens. Percent of capacity and percent of average for the date are the two
+numbers on it, the second one big.
+
+The wall already had the ocean — `tide`, `swell`, `ships` — and none of that is
+the water anybody in this state argues about. The water that matters is stored
+water, and it arrives on an annual clock: essentially everything California
+gets falls between October and April, most of it lands as snow, and the
+snowpack is a second reservoir — in a good year larger than every concrete one
+put together — that releases itself over the following three months. That is
+why this is not a row of bar charts. **The melt has to visibly become the
+storage**, and that connection is the panel.
+
+**Left to right is latitude.** Trinity, Shasta, Oroville, Folsom, New Melones,
+Don Pedro, McClure, Pine Flat: 17.9 million acre-feet of the state's forty-odd,
+running 40.8°N to 36.8°N in monotonic order, so the horizontal axis of the
+picture is the map. The snow above them is in the same order — the Cooperative
+Snow Surveys' North, Central and South Sierra indices, blended across the width
+rather than drawn as three blocks, because a hard vertical seam between two
+survey regions is a boundary that does not exist on the ground. The coupling is
+**by latitude and not by watershed**, and that is worth saying plainly: Shasta
+and Trinity are fed by the Trinity Alps and the southern Cascades and not by
+the Sierra at all. What is true is that the mountains melt into the lakes and
+that both are ordered north to south, which is enough for the picture to be
+honest at a glance and is why the streams fall straight down. San Luis is
+deliberately absent from the eight: it is off-stream, filled by pumping, and
+its curve is a delivery schedule rather than a watershed.
+
+A small `SF` tick on the valley floor is this wall's own latitude, read from
+`ftsite.py` and interpolated between the two reservoirs it falls between (Don
+Pedro and New Melones, as it happens). It is a position on the transect, not a
+claim that anything about Sequoia Fabrica is in the Sierra.
+
+**The amber dashes are the reference, and they move with the sweep.** Each
+vessel carries its own normal storage *for the day being drawn*. Water above
+the dashes is a surplus and water below them is a deficit, and eight of those
+read at once with no arithmetic. On the screenshot Pine Flat is the one lake
+visibly under its line while the other seven are over — the southern Sierra had
+its own drought inside a statewide good year, which no single statewide
+percentage would ever show you. That is the whole argument for drawing eight
+vessels instead of one bar.
+
+**Percent of average is derived here, and the panel says what the baseline
+is.** CDEC's `RES` report does publish its own "% of historical average", but
+against an unstated period of record, and only for today — there is no way to
+ask it what average storage on the 3rd of February looks like, which is exactly
+what a panel that animates the year needs. So fifteen complete water years,
+2011 through 2025, are fetched once by hand and baked into
+`wateryear-normals.npz`:
+
+    $ python3 -c "import ftdata; ftdata.wateryear_bake_normals()"
+
+Thirty-odd requests, about a hundred megabytes, a couple of minutes, run once a
+year and committed. Nothing on the fetch timer ever touches history. The
+resulting figure runs a few points *above* CDEC's, because 2011–2025 contains
+two historic droughts and is a drier baseline than the longer one they use — so
+the panel prints `VS 2011-25 AVG` under the number rather than the word
+"average". A percentage whose baseline is a secret is not a number.
+
+Averaging is by calendar date on a leap template rather than by "days since 1
+October", which sounds like pedantry and is not: a leap water year is 366 days
+long and a common one is 365, so indexing by day offset smears every normal
+after February by a day, and 29 February ends up averaged against 1 March in
+eleven years out of fifteen. The template puts 29 February in a slot of its
+own; common years leave it empty and the mean skips it. `wateryear_doy()` is
+that mapping and the test asserts every date in the year lands somewhere
+distinct.
+
+**Snow is measured, not scraped.** CDEC's `DLYSWEQ` summary has exactly the
+numbers you want — stations reporting, average snow water equivalent, percent
+of normal for the date, by region — and it is useless here, because it only
+serves dates inside the snow season and freezes on the last one. Asked in
+August it will cheerfully hand you June's numbers with today's date on the
+page. So the index is computed instead: six snow pillows per region, sensor 82
+(revised daily snow water equivalent), the mean of whichever of the six
+answered that day, and a floor of three — two pillows out of six is not a
+regional index, it is two mountains, and in a melt-out week the two that still
+report are the two that are highest. The eighteen stations were picked for a
+spread of basins and elevations and then checked one at a time against the
+servlet for a continuous record back to 2011.
+
+The mountain is white at 28 inches of index, which is set to a *normal* April
+rather than to the record: the mean 1 April index across the fifteen baked
+years is 29, 35 and 26 inches for the three regions, and in a normal April the
+Sierra genuinely is white from the crest to the foothills. 2017 clips, which is
+the right failure — the mountain is already as white as it can be drawn and the
+caption is what separates a big year from a huge one.
+
+**Everything CDEC gives you is a trap somewhere.** Missing data is `-9999`, not
+null, so a fetcher that only checks for null writes minus nine thousand
+acre-feet into the record. The date field is `2026-8-11 00:00` — unpadded — so
+anything slicing fixed columns works for ten days a month. Rows for days a
+station never reported are simply absent, so the response length is not the
+number of days asked for and the series has to be assembled by date. And the
+service is a state service on a state budget: it times out, and one dead
+station here costs one vessel, one dead region costs a third of the snow band,
+and a failed fetch leaves yesterday's record in place with an honest age on it.
+
+**Reading `[-1]` is the bug this panel was always going to have.** CDEC's daily
+values for today land some time in the morning, so for most of every day the
+newest slot in every series is empty. Reading it rather than the newest number
+reports a state-wide drought at breakfast and recovers by lunch, which is
+exactly the kind of failure nobody catches by looking. Nothing in `wateryear.py`
+indexes `[-1]`; `last_finite()` does it, per reservoir, and the test asserts
+both that the synthetic record really does end in a hole and that the headline
+is not it.
+
+**Frame budget.** Everything is baked in `build()`. The sky, the rock, the
+vessel shells, their labels, the year axis and the month letters are one uint8
+frame; snow and water are two more, drawn through per-step thresholds so that
+the entire picture is *two integer comparisons and two masked copies* a frame —
+`ROWV >= LEV[j]` is exactly the wet pixels, because `LEV` is 32000 in every
+column that is not inside a vessel. The water levels, the normal marks and the
+snowline are precomputed as `(steps, 320)` int16 tables, one step per panel
+column, which also makes the sweep index and the cursor's column the same
+number and removes a class of off-by-one between the picture and the axis. Two
+tiny particle systems and a few short writes are the rest.
+
+The one thing that had to be fixed after measuring was the size of those two
+comparisons. Done at full panel width they were 0.21 ms a frame here; cut down
+to the band each one describes — seventeen rows of mountain, fourteen of vessel
+— they are 0.08 ms. Measured over 1500 frames on the desktop: **mean 0.078 ms,
+p50 0.073, p95 0.100, p99 0.116**, worst frame 0.162 ms; `build()` is 6 ms.
+Against `caiso`'s measured desktop-to-Pi factor that is a few milliseconds a
+frame on the wall, well inside 20 ms.
+
+`render` is a pure function of `t` — the sweep, the surface shimmer, the
+meltwater and the cursor all come off the segment clock, and the shimmer phase
+in particular is derived from `t` and not from the frame counter, because a
+demo that animates on `i` is a different animation under the preview baker than
+it is on the wall. The test asserts a cold `render(t)` against the same `t`
+reached frame by frame.
+
+**Nothing here touches the network.** `build()` calls `ftdata.load()`, reads
+one 13 kB JSON file and one 15 kB `.npz` beside the demo, and that is all. The
+product is `wateryear`, ttl 30 h, refetched every 6 h against a source that
+moves once a day, and deliberately not `volatile` — the payload is the year so
+far, so a record that survives a reboot is the difference between coming back
+up with the winter on the panel and coming back up with one column of it. Four
+requests and 1.4 MB off the wire, trimmed to eleven series of about a hundred
+and sixty samples: every second day, counted back from today, with both
+of the last two days kept regardless of parity so the leading edge is never a
+day older than it has to be.
+
+A record past its TTL still draws — a year-shaped picture that is two days
+behind is still that year — with the age and `STALE` in the header. A record
+from the *previous* water year is refused outright and says so, because an axis
+that runs October to September drawn with last year's numbers is a confident
+picture of a season that did not happen. No record at all gets a no-data card.
+
+Because the panel is a whole year, it is genuinely different in February from
+how it is in August, which nothing else on the wall does. To see the other
+season without waiting for it:
+
+    $ python3 wateryear.py --hold-at 2026-02-15        # freeze on a date
+    $ python3 scripts/test-wateryear.py --write-winter /tmp/wy-winter
+    $ FT_DATA_CACHE=/tmp/wy-winter python3 wateryear.py --host 127.0.0.1
+
+Run:
+
+    $ python3 ftdata.py --once --only wateryear
+    $ python3 wateryear.py --host 127.0.0.1
+    $ FT_DATA_CACHE=/tmp/empty python3 wateryear.py   # the no-data card
+    $ python3 scripts/test-wateryear.py
+
+### cityline
+
+A whole day of San Francisco asking the city for something, replayed in half a
+minute.
+
+Every other city panel here is about vehicles — `stringline` is trains, `bikes`
+and `docks` are bikeshare, `ships` is the bay, `adsb` is what is overhead. None
+of them is about people. 311 is the other half of a city: the number you call
+when the sidewalk is filthy, when somebody has tagged your roll-up door, when
+the tree out front has dropped a limb, when the car across the driveway has not
+moved in a week. Two and a half thousand of those land in a day and they have a
+shape — three requests at four in the morning, three hundred and twenty in the
+nine o'clock hour, a long afternoon that does not let up until the light goes.
+That shape is the panel.
+
+**Three panes, left to right.** The map is 62×57 pixels of San Francisco at
+270 m to the pixel; each request blooms where it was filed, in its category's
+colour, and fades to a floor rather than to nothing, so by mid-afternoon you are
+looking at the accumulated day with the last hour bright on top of it. The
+middle is twenty-four stacked hourly bars in the same seven colours, with a
+playhead sweeping it — everything to its left in colour, everything to its right
+a dim ghost of itself, so the day ahead is visible as well as the day behind.
+The right is the total in the biggest type on the panel and then the legend,
+which is also the tally: seven categories, seven colours, seven numbers that add
+to the headline. The map and the chart are driven from one phase, so the bloom
+and the bar are always the same ten minutes.
+
+The white cross is the building. Nothing else on the panel is white. It gets no
+label on the map, because `ftsite.SHORT` is `SF` and beside a map of San
+Francisco that reads as the city rather than as this room; the name is spelled
+out in the header instead, with the number of requests filed within a kilometre
+of it — 45 on the day this was written, which is the number that makes the panel
+land in the workshop rather than merely be about a city.
+
+**The data.** DataSF's 311 Cases dataset (`vw6y-z8j6`) over Socrata's SODA API,
+keyless. A `$select` of four fields turns a 1 kB row into 130 bytes; a day is
+about three thousand of them, 380 kB on the wire, and about 16 kB reaches the
+cache.
+
+The dataset advertises itself as changing "multiple times per hour" and is in
+fact a **nightly snapshot**: the newest case in it is always around midnight of
+the previous day, loaded some time between one and four in the morning. So there
+is no honest way to draw "today so far" from it, and the first design — a
+rolling 24 hours ending now — would have drawn an empty afternoon every day.
+What is there instead is better for this panel: one *complete* calendar day,
+midnight to midnight, which is exactly the window a daily rhythm needs. The
+fetcher asks for `max(requested_datetime)`, takes the calendar date off it and
+fetches that day, so the window comes from the data rather than from the clock
+and would still be right if the city ever went hourly. The header names the day
+and how long ago its last case was filed; a dim dotted column marked NOW is
+where the clock stands today against that curve.
+
+`requested_datetime` is a floating timestamp in local time, which is convenient
+— the `$where` bounds are local midnight to local midnight with no conversion —
+and is a trap on a machine that is not set to Pacific. The wall is.
+
+**What is not on this panel, and why.** 311 records are public and every one of
+them is a record about a specific address. `address`, `service_request_id`,
+`status_notes` and often a photograph are all in the response, and none of them
+are read. Three reductions happen in `ftdata.py`, before anything is written to
+disk:
+
+* **Position is snapped to a 0.002° grid** — 223 m north-south, 176 m
+  east-west, about two city blocks. That number was not chosen for privacy
+  alone: the map above is 270 m to the pixel, so the quantum is *smaller than a
+  drawn pixel* and the quantisation costs the picture nothing. A quantisation
+  that is visible is one somebody will eventually be tempted to loosen. The cell
+  is stored as a pair of small integers against a fixed origin, so the record is
+  structurally incapable of holding a street address back, and the test asserts
+  that by unpacking every point and checking it lands exactly on a grid centre.
+* **Time is bucketed to ten minutes**, and duplicate (bucket, category, cell)
+  triples collapse to one point. The exact counts survive in an hourly
+  histogram, which carries no position at all — which is why the chart is drawn
+  from the histogram and not from the points, and why the two disagree about
+  totals on purpose.
+* **Encampment reports are dropped outright** and never reach the cache. Matched
+  on a keyword list — `ENCAMPMENT`, `HOMELESS`, `WELLNESS`, `WELFARE`,
+  `MENTAL HEALTH`, `CRISIS`, `OVERDOSE`, `SYRINGE`, `NEEDLE` — rather than on
+  today's category names, so a category the city adds next year cannot arrive
+  through the unlabelled OTHER bucket. Deliberately not `SHELTER`, which would
+  take MTA's bus-shelter complaints with it.
+
+Included and named: **cleaning** (street and sidewalk cleaning, litter
+receptacles), **parking** (enforcement, blocked street and sidewalk, MTA sign
+requests), **graffiti** (public, private, illegal postings), **street** (defects,
+sidewalk and curb, streetlights, sewer, water quality), **trees**, **noise**.
+Everything else that survives the keyword filter — general requests, RPD, Muni
+feedback, residential building, damage to property, taxi and AV complaints, the
+administrative tail — lands in **OTHER**, which is drawn in grey and not broken
+out, because a category with four requests in it is a label nobody can read and
+a hint about who filed them.
+
+Encampment is about 140 requests a day, five per cent of the total, and it is
+the largest single thing thrown away here. An encampment report says where
+specific unhoused people are sleeping tonight; a labelled, locatable dot for it
+on a wall in a room the public walks through is a map of vulnerable people, and
+folding it into OTHER would not fix that. So the headline on this panel is the
+count of what is *drawn*, and it is about five per cent under the city's own
+figure for the day. That is the same call `bikes` made when it hashed away the
+per-bike identifiers it could have inferred journeys from, and it is the right
+one.
+
+**The map is `sfmix-map.npz`**, the same 768×768 bit-packed land/sea bake
+`sfmix.py` draws its bay with. San Francisco occupies about 110 by 115 cells of
+it, twice what this pane can show, so baking a second and finer coastline would
+have bought nothing but a second asset to keep in step with the first. The
+extent is fixed rather than fitted to the day's requests — the city has to be in
+the same place every time the panel comes up — and reaches north to the Marin
+headlands, because the Golden Gate is what makes the silhouette instantly San
+Francisco rather than a generic peninsula. The land sits a dozen levels above
+the sea and the shoreline four times that; the first version had land and sea a
+few levels apart and the peninsula vanished into the bay from three metres away.
+
+**What was hard.** The stacked bars, twice. Rounding each category's height
+independently overshoots the bar by up to seven rows on the busiest hour of the
+day, the top of the stack runs off the chart, and the category on top — OTHER,
+always — silently vanishes from the one hour it mattered in. A stack missing its
+cap looks exactly like a stack, so it was found by reading the nine o'clock bar
+back off the panel in `scripts/test-cityline.py` rather than by looking at it.
+The fix rounds the bar once and then rounds the *boundaries* off the cumulative
+sum, so the segments add up by construction, and lends a row from the largest
+segment to any category that has requests but rounded to nothing.
+
+Second, unpacking cell indices in float32 puts the cell centre about half a
+metre off its own grid — a latitude of 37.7 spends six of float32's seven digits
+before the decimal point matters. Invisible on a 270 m pixel, and it would have
+made the mechanical check of the privacy promise fail forever for a reason that
+was not the point.
+
+**Frame budget.** Nothing is computed per frame that could be computed once.
+`build()` bakes 144 whole map images — one per ten-minute bucket, 1.5 MB of
+uint8 — plus a lit and a dim copy of the chart and 144 pre-rendered clock and
+running-count strips, because formatting and blitting a string is thirty numpy
+calls and copying a baked one is a single `copyto`. The per-bucket state is
+(which category last lit each pixel, how many buckets ago) rather than an
+accumulated image, so compositing a fade 144 times cannot drift the early
+morning to a different colour than it started. `render()` is then four copies,
+one multiply and one fancy-indexed write for the current bucket's blooming
+points, a playhead column and a heartbeat pixel: **eight numpy calls a frame**,
+none of them allocating, and the count does not vary with how busy the day was —
+a quiet 4 am and the nine o'clock wave cost exactly the same. Measured over 6000
+frames on the development machine: **mean 0.007 ms, p50 0.007, p95 0.008,
+p99 0.011**, worst frame 0.052 ms. `build()` is 19–22 ms here, once, on the
+scheduler's worker thread, and most of that is the 144 map bakes. The baked
+frames are about 2.2 MB of uint8, which is the one thing to know before putting
+two copies of this in a rotation.
+
+`render()` is a pure function of `t` and the test asserts it — a cold
+`render(7.35)` against the same instant reached by driving 148 frames from zero,
+and again after seeking elsewhere and back. Wall clock is read exactly twice,
+both in `build()`: the age of the data, and where the NOW column goes.
+
+Past its six-hour TTL the panel says STALE — on a nightly dataset a TTL can only
+usefully mean "the fetcher has stopped", since the data is a day old by
+construction. Past sixty hours of data age it says OLD, which means the *city*
+has stopped, and the panel must not imply San Francisco simply had a quiet
+Tuesday. With no record at all it draws the no-data card and the command that
+fixes it.
+
+Run:
+
+    $ python3 ftdata.py --once --only sf311-day
+    $ python3 cityline.py --host 127.0.0.1
+    $ python3 cityline.py --cycle 45
+    $ FT_DATA_CACHE=/tmp/empty python3 cityline.py     # the no-data card
+    $ python3 scripts/test-cityline.py
+
+
 ## Group buttons
 
 Sixty-three cards is a lot of switches. The thing people actually want from the

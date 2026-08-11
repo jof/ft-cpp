@@ -82,7 +82,8 @@ SPARSE = {"starfield", "fireworks", "boing", "daliclock", "sierpinski_rain",
           "adsb", "sats", "caiso", "quake", "ships",
           "wardial", "ansi", "toasters",
           "swell", "helicorder", "stringline", "bikes", "bgp", "sfmix",
-          "docks"}
+          "docks",
+          "sun", "air", "wateryear", "cityline"}
 
 # The default running order. Names not present in the checkout are dropped
 # with a warning, so effects still being written can already be listed here
