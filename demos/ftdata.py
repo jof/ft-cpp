@@ -937,6 +937,278 @@ for _st in [CURRENT_STATION] + [s for s in
 
 
 # --------------------------------------------------------------------------
+# NDBC buoy observations -- what the ocean is actually doing, as opposed to
+# what the harmonic fit above says it will do. swell.py draws these.
+#
+# Every product above this line is a *prediction* served as JSON. This one is a
+# measurement served as fixed-width text by a machine that has been publishing
+# the same format since before JSON, and both of those differences matter.
+#
+# The file is newest row first, which is the good luck this section is built
+# on: the last day of a buoy's life is the first sixteen kilobytes of a file
+# that runs to six hundred, so a ranged GET takes the part we want and leaves
+# the rest on the server. NDBC serve these off CloudFront and honour
+# `Range:` with a 206; a server that ignored it would answer 200 with the whole
+# file and the parse below would still be right, just dearer. That is the only
+# reason this is safe to do at a ten-minute cadence over shop wifi.
+#
+# `MM` means missing and it is *common*: a buoy with a dead wave sensor keeps
+# reporting wind and water temperature for months, and the sample this was
+# written against had WVHT on one row, WTMP on the next and neither on the one
+# after. So nothing here assumes a row is complete. Each headline value is
+# taken from the newest row that actually has it, and it carries the time of
+# *that* row, because "1.9 m" and "1.9 m, six hours ago" are different claims
+# and only one of them is worth animating.
+#
+# Two files, because they answer different questions. `.txt` is the ten-minute
+# standard meteorological record -- one significant wave height, one dominant
+# period, one mean direction, which is the sea summarised as though it were a
+# single wave. `.spec` is the directional spectral summary, and it splits that
+# into the swell and the windsea with a height, a period and a direction each.
+# That split is the single most useful thing the data says: 1.9 m at 9 s out of
+# the northwest with a 0.4 m windsea on top is a clean groundswell, and the
+# same 1.9 m as 1.3 m of swell under 1.4 m of 4-second slop is a completely
+# different afternoon in a boat. Both files are parsed the same way, off their
+# own header line rather than off a hardcoded column order, so a column added
+# at the end of either does not silently shift everything after it.
+# --------------------------------------------------------------------------
+
+NDBC_REALTIME = "https://www.ndbc.noaa.gov/data/realtime2/"
+
+# An hour. The buoy reports every ten minutes, so a record that has not been
+# refreshed in six cycles means the fetcher or the network is down rather than
+# that the sea has stopped, and the panel should say so. Note this is the age of
+# the *fetch*; the age of the newest observation inside it is a separate number
+# and swell.py shows that one too -- see NDBC_HOURS.
+NDBC_TTL = 3600
+
+# The buoy's own cadence, and no faster. NDBC ask for a descriptive User-Agent
+# and for restraint; `get()` already sends the former and this is the latter.
+NDBC_INTERVAL = 600
+
+# How much history to keep. A day is what the demo plots; the extra two hours
+# are so a 24-hour window still fills after the fetcher has missed a pass or
+# two, and so the newest-row search has somewhere to look when a sensor has
+# been quiet for a while.
+NDBC_HOURS = 26
+NDBC_STEP = 600.0
+
+# Ranged-GET sizes. A standard-meteorological row is about a hundred bytes and
+# a spectral row about seventy, so 64 kB is four days of the first and 8 kB is
+# a day and a half of the second -- generous by a factor of three either way,
+# and still a fortieth of what fetching the whole file would cost.
+NDBC_BYTES = 65536
+NDBC_SPEC_BYTES = 8192
+
+# Station names. NDBC publish these in a 400 kB table of every buoy on the
+# planet, which is not worth a request to put four words on a wall, so the
+# handful anybody here would point this at are written down and everything else
+# falls back to its number.
+NDBC_NAMES = {
+    "46026": "SF 18NM W", "46237": "SF BAR", "46013": "BODEGA BAY",
+    "46012": "HALF MOON BAY", "46042": "MONTEREY", "46059": "W CALIFORNIA",
+    "46022": "EEL RIVER", "46028": "CAPE SAN MARTIN", "46214": "POINT REYES",
+}
+
+# The compass points the spectral file uses for direction, in the order that
+# makes the index the bearing. `.spec` gives a point and not a number -- the
+# directional estimate is not worth a degree -- so this is the whole conversion.
+NDBC_POINTS = ("N NNE NE ENE E ESE SE SSE "
+               "S SSW SW WSW W WNW NW NNW").split()
+
+
+def _ndbc_get(station, ext, nbytes):
+    """The first `nbytes` of a realtime2 file, as text.
+
+    Ranged, because these files are newest-first and we want the top of one.
+    Falls back to whatever the server sends: a 200 with the lot is a slow
+    success, not a failure, and the parser stops at the cutoff either way.
+    """
+    import urllib.request
+    url = NDBC_REALTIME + station + ext
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "flaschen-taschen-ftdata/1 (+wall display)",
+        "Range": "bytes=0-%d" % (nbytes - 1)})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        raw = resp.read(nbytes)
+    return raw.decode("ascii", "replace"), url
+
+
+def _ndbc_num(s):
+    """A column as a float, or None for NDBC's `MM` and anything unparseable."""
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ndbc_rows(text, cutoff):
+    """Parse a realtime2 file into (epoch, {column: text}) newest first.
+
+    Stops at the first row older than `cutoff`, which is what keeps this cheap:
+    the rows are in descending time order, so the loop touches a day of them and
+    returns. A truncated last line -- the guaranteed consequence of a ranged GET
+    landing mid-row -- has the wrong field count and is dropped by the same test
+    that drops a corrupt one.
+
+    Column names come from the file's own `#YY MM DD ...` header rather than
+    from a list here. The two files this parses have different columns, the
+    order has changed once in NDBC's history, and reading the header costs one
+    line.
+    """
+    import calendar
+    names, out = None, []
+    for line in text.splitlines():
+        if line.startswith("#"):
+            if names is None:
+                names = line[1:].split()
+            continue
+        f = line.split()
+        if names is None or len(f) != len(names) or len(f) < 6:
+            continue
+        try:
+            t = float(calendar.timegm(
+                (int(f[0]), int(f[1]), int(f[2]), int(f[3]), int(f[4]), 0,
+                 0, 1, -1)))
+        except ValueError:
+            continue
+        if t < cutoff:
+            break
+        out.append((t, dict(zip(names[5:], f[5:]))))
+    return out
+
+
+def _ndbc_latest(rows, key):
+    """The newest row that actually has `key`, as (value, time), or (None, None).
+
+    The reason this is a search and not `rows[0][key]`: a buoy whose wave sensor
+    has failed still reports wind and pressure every ten minutes, and the newest
+    row is then a row with `MM` where the interesting number goes. Taking the
+    newest *present* value and carrying its own timestamp is the only way to
+    show one without implying the other is that fresh.
+    """
+    for t, r in rows:
+        v = _ndbc_num(r.get(key))
+        if v is not None:
+            return v, t
+    return None, None
+
+
+def _ndbc_train(rows, hkey, pkey, dkey):
+    """One wave train out of the spectral file: height, period, direction.
+
+    All three from the *same* row, deliberately. Mixing this hour's swell height
+    with last hour's swell direction would draw a wave train that never existed,
+    and the whole point of the panel is that the picture is the measurement.
+    """
+    for t, r in rows:
+        h = _ndbc_num(r.get(hkey))
+        p = _ndbc_num(r.get(pkey))
+        if h is None or p is None or p <= 0:
+            continue
+        pt = (r.get(dkey) or "").upper()
+        deg = NDBC_POINTS.index(pt) * 22.5 if pt in NDBC_POINTS else None
+        return {"h": round(h, 2), "p": round(p, 1), "dir": deg, "pt": pt or "",
+                "t": t}
+    return None
+
+
+def _ndbc_history(rows, keys, hours=NDBC_HOURS, step=NDBC_STEP):
+    """The last `hours` of a few columns, resampled onto an exact grid.
+
+    Explicit timestamps beside every sample would double the record for no
+    information, and the buoy is already on a ten-minute grid; what it is not is
+    *gapless*, so a hole stays a hole. `null` in these arrays means the buoy did
+    not report, and swell.py draws a gap there rather than interpolating across
+    it -- a trend line that closes over a six-hour outage is a claim nobody
+    measured.
+    """
+    if not rows:
+        return None
+    n = int(hours * 3600.0 / step)
+    t1 = round(rows[0][0] / step) * step
+    t0 = t1 - (n - 1) * step
+    out = {"t0": t0, "step": step, "n": n}
+    for spec in keys:
+        out[spec[0]] = [None] * n
+    for t, r in rows:
+        i = int(round((t - t0) / step))
+        if not (0 <= i < n):
+            continue
+        for name, key, nd in keys:
+            v = _ndbc_num(r.get(key))
+            if v is not None and out[name][i] is None:
+                out[name][i] = round(v, nd)
+    return out
+
+
+def _ndbc_payload(station):
+    """One buoy: the present sea state, the spectral split, and a day of trend."""
+    cutoff = time.time() - NDBC_HOURS * 3600.0
+    text, url = _ndbc_get(station, ".txt", NDBC_BYTES)
+    rows = _ndbc_rows(text, cutoff)
+    if not rows:
+        raise ValueError("no recent rows for NDBC station %s" % station)
+
+    payload = {"station": station,
+               "name": NDBC_NAMES.get(station, station).upper(),
+               "units": {"h": "m", "p": "s", "dir": "degT", "spd": "m/s",
+                         "temp": "degC"}}
+    # Each headline value with the time of the row it came from. See
+    # _ndbc_latest() on why they are not all the same time.
+    for name, key, nd in (("wvht", "WVHT", 2), ("dpd", "DPD", 1),
+                          ("apd", "APD", 1), ("mwd", "MWD", 0),
+                          ("wspd", "WSPD", 1), ("wdir", "WDIR", 0),
+                          ("gst", "GST", 1), ("wtmp", "WTMP", 1),
+                          ("atmp", "ATMP", 1), ("pres", "PRES", 1)):
+        v, t = _ndbc_latest(rows, key)
+        payload[name] = None if v is None else round(v, nd)
+        payload[name + "_t"] = t
+    payload["hist"] = _ndbc_history(
+        rows, (("wvht", "WVHT", 2), ("dpd", "DPD", 1)))
+
+    # The spectral summary is a nice-to-have and is allowed to fail on its own:
+    # not every station publishes one, and a panel that can draw a single wave
+    # train from the standard file is much better than a panel that draws
+    # nothing because the second request timed out.
+    try:
+        stext, surl = _ndbc_get(station, ".spec", NDBC_SPEC_BYTES)
+        srows = _ndbc_rows(stext, cutoff)
+        payload["swell"] = _ndbc_train(srows, "SwH", "SwP", "SwD")
+        payload["windsea"] = _ndbc_train(srows, "WWH", "WWP", "WWD")
+        if srows:
+            payload["steepness"] = (srows[0][1].get("STEEPNESS") or "").upper()
+            payload["spec_t"] = srows[0][0]
+        payload["spec_url"] = surl
+    except Exception as e:                                   # noqa: BLE001
+        print("ftdata: %s spectral summary unavailable: %r" % (station, e),
+              file=sys.stderr)
+        payload["swell"] = payload["windsea"] = None
+    return payload, url
+
+
+def register_buoy(station):
+    """Register an `ndbc-<station>` product. Returns the product name."""
+    name = "ndbc-" + station
+
+    def fetch_buoy(station=station):
+        return _ndbc_payload(station)
+
+    fetch_buoy.__name__ = "_ndbc_" + station
+    product(name, ttl=NDBC_TTL, interval=NDBC_INTERVAL,
+            description="NDBC buoy %s: waves, wind and a day of trend"
+                        % station)(fetch_buoy)
+    return name
+
+
+SWELL_BUOY = "46026"                    # 18 nm west of the Golden Gate
+
+for _bu in [SWELL_BUOY] + [s for s in
+                           os.environ.get("FT_BUOYS", "").split(",") if s]:
+    register_buoy(_bu.strip())
+
+
+# --------------------------------------------------------------------------
 # GOES GeoColor imagery, from NESDIS STAR. goes.py plays these as a time lapse.
 #
 # This is the first product whose payload is not numbers, and it changes what
