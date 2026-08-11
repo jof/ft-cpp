@@ -3966,6 +3966,277 @@ def _sfport_cruise():
             "sources": used}, used[0]
 
 
+# --------------------------------------------------------------------------
+# The San Francisco Metropolitan Internet Exchange: what is on its backbone
+# right now, and how much of it there is. sfmix.py draws the weathermap.
+#
+# **Three endpoints, all keyless, all the exchange's own.**
+#
+#   /statistics/map/map.json   the public structure -- sites, metros, and the
+#                              inter-metro trunks with their real fibre routes
+#                              as coarse lon/lat polylines.
+#   /statistics/map/traffic    live bits per second per opaque cable id, with a
+#                              24 hour series and a per-member breakdown.
+#   /statistics/metrics/?panel=ix_total&range=24h
+#                              the aggregate everybody quotes: total ingress
+#                              and egress across every member port, 300 s step.
+#
+# **The generation field is a safety interlock and it is used as one.** Both
+# map.json and the traffic feed carry the same `generation` string, and the
+# cable ids are opaque *per generation* -- they are rebuilt from scratch every
+# time the portal re-runs its NetBox build. Joining traffic from one generation
+# onto geometry from another does not fail loudly: it silently drops some links
+# and, worse, could colour a trunk with a number belonging to a different one.
+# So the two are fetched, compared, and refetched once if they disagree (which
+# is the ordinary race -- the builder republished between our two GETs). A
+# second disagreement raises, and `fetch()` keeps the last good record.
+#
+# **What is thrown away here, and why.** The three responses are about 135 KB
+# together and almost none of it survives:
+#
+#   * The twelve *sites* collapse to five *metros*. At the scale this panel
+#     draws -- eighty kilometres across two hundred columns, so a third of a
+#     kilometre a pixel -- the six Santa Clara facilities are the same pixel,
+#     and the six intra-metro cables between them are zero pixels long. The
+#     portal's own zoomed-out tier already solved this: `metro_cables` are
+#     pre-aggregated inter-metro trunks with their own routes, and traffic is
+#     summed onto them exactly the way the portal's frontend does it.
+#   * The 24 hour per-link series and the per-member breakdowns go entirely.
+#     The panel shows *now* per trunk; the history it shows is the exchange
+#     total, which is a different and much smaller series.
+#   * The routes are Douglas-Peucker simplified to about a tenth of their
+#     vertices. 846 points down to under a hundred, at a tolerance well under
+#     one panel pixel, so the drawn line is unchanged.
+#   * The ix_total series is bucketed down from 289 points to 97 and carried in
+#     megabits rather than bits. Bucket *maximum* rather than mean, and the true
+#     peak and its timestamp are carried separately, because the peak is the
+#     number an exchange is judged by and a decimation that shaved it would be
+#     the one lie this record could tell.
+#
+# What lands in the cache is about 6 KB.
+# --------------------------------------------------------------------------
+
+SFMIX_MAP_URL = "https://portal.sfmix.org/statistics/map/map.json"
+SFMIX_TRAFFIC_URL = "https://portal.sfmix.org/statistics/map/traffic"
+SFMIX_METRICS_URL = ("https://portal.sfmix.org/statistics/metrics/"
+                     "?panel=%s&range=24h")
+
+# Half an hour. The traffic feed is a five-minute Prometheus rate behind a
+# thirty-second server-side cache, so a record older than this is showing a
+# backbone load that has had time to move; the structure underneath it is good
+# for days. Thirty minutes is where "this is what the exchange is doing" stops
+# being true and the panel has to say so.
+SFMIX_TTL = 1800
+
+# Five minutes, which is the resolution of the underlying counters. Asking
+# faster returns the same numbers and costs the portal a Prometheus burst.
+SFMIX_INTERVAL = 300
+
+# How many points of the 24 hour total curve to keep. The chart it draws is
+# about ninety columns wide, so ninety-seven buckets of fifteen minutes each is
+# a hair over one sample a column and nothing is thrown away that could be seen.
+SFMIX_SERIES_POINTS = 97
+
+# Douglas-Peucker tolerance for the trunk routes, in degrees. 0.0012 deg is
+# about 110 m, which at the panel's ~330 m a pixel is a third of a pixel: the
+# simplification is invisible by construction, and it takes 846 vertices to 90.
+SFMIX_PATH_TOL = 0.0012
+
+
+def _sfmix_simplify(path, tol):
+    """Douglas-Peucker on a [[lon, lat], ...] polyline. Iterative, no recursion.
+
+    Plain arithmetic in degrees rather than metres: the tolerance is a panel
+    pixel and the aspect error over half a degree of latitude is smaller than
+    the rounding that follows, so converting would be precision theatre.
+    """
+    if len(path) < 3:
+        return [list(p) for p in path]
+    keep = [False] * len(path)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(path) - 1)]
+    while stack:
+        i0, i1 = stack.pop()
+        if i1 <= i0 + 1:
+            continue
+        x0, y0 = path[i0]
+        x1, y1 = path[i1]
+        dx, dy = x1 - x0, y1 - y0
+        norm = (dx * dx + dy * dy) ** 0.5
+        worst, at = -1.0, -1
+        for i in range(i0 + 1, i1):
+            x, y = path[i]
+            if norm == 0.0:
+                d = ((x - x0) ** 2 + (y - y0) ** 2) ** 0.5
+            else:
+                d = abs(dy * (x - x0) - dx * (y - y0)) / norm
+            if d > worst:
+                worst, at = d, i
+        if worst > tol:
+            keep[at] = True
+            stack.append((i0, at))
+            stack.append((at, i1))
+    return [[round(path[i][0], 5), round(path[i][1], 5)]
+            for i in range(len(path)) if keep[i]]
+
+
+def _sfmix_metro_code(codes):
+    """The three-letter airport-ish prefix a metro's site codes agree on.
+
+    'sfo01', 'sfo02' -> 'SFO'; the Santa Clara metro's six codes are five scl
+    and one snv, and the majority wins. Derived rather than hardcoded because a
+    table of pretty names in this file would be the thing that went stale the
+    first time a site was added.
+    """
+    counts = {}
+    for code in codes:
+        head = str(code)[:3].upper()
+        if len(head) == 3 and head.isalpha():
+            counts[head] = counts.get(head, 0) + 1
+    if not counts:
+        return "?"
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+
+
+def _sfmix_buckets(values, stamps, n):
+    """Bucket a series down to `n` points, keeping the maximum of each bucket.
+
+    Maximum and not mean: this is a traffic curve whose whole shape question is
+    "how high did it get", and averaging four five-minute samples into a
+    quarter hour shaves the top off every spike it touches.
+    """
+    if not values:
+        return [], []
+    n = min(n, len(values))
+    out_v, out_t = [], []
+    for k in range(n):
+        lo = k * len(values) // n
+        hi = max(lo + 1, (k + 1) * len(values) // n)
+        chunk = [v for v in values[lo:hi] if v is not None]
+        out_v.append(max(chunk) if chunk else None)
+        out_t.append(int(stamps[hi - 1]))
+    return out_v, out_t
+
+
+def _sfmix_mbps(v):
+    return None if v is None else int(round(float(v) / 1e6))
+
+
+@product("sfmix-ix", ttl=SFMIX_TTL, interval=SFMIX_INTERVAL,
+         description="SFMIX metro trunks, utilisation and 24h exchange total")
+def _sfmix_ix():
+    """The exchange's backbone as five trunks, plus the total curve for today.
+
+    Traffic is summed onto a trunk from its member cables the way the portal's
+    own frontend does it -- utilisation is `max(in, out) / capacity`, the
+    convention every weathermap has used since MRTG, because a link is as busy
+    as its busier direction and averaging the two hides a saturated one.
+
+    Direction is resolved per member rather than assumed. A trunk's `out` is
+    a_metro to z_metro, and each member cable carries its own a_site; where a
+    member happens to be cabled the other way round its two figures are swapped
+    before they are added, so the arrows on the panel point at the direction
+    the bits are actually going.
+    """
+    struct = get_json(SFMIX_MAP_URL, timeout=30)
+    traffic = get_json(SFMIX_TRAFFIC_URL, timeout=30)
+    gen = struct.get("generation")
+    if gen != traffic.get("generation"):
+        # The ordinary case is a rebuild landing between our two GETs. Refetch
+        # the structure once, which is the half that just changed.
+        struct = get_json(SFMIX_MAP_URL, timeout=30)
+        gen = struct.get("generation")
+    if not gen or gen != traffic.get("generation"):
+        raise ValueError("map generation %r != traffic generation %r"
+                         % (gen, traffic.get("generation")))
+
+    metros_in = struct.get("metros") or {}
+    links = traffic.get("links") or {}
+    site_metro = {code: site.get("metro")
+                  for code, site in (struct.get("sites") or {}).items()}
+    cable_a = {c["id"]: c.get("a_site") for c in (struct.get("cables") or [])}
+
+    metros = {}
+    for name, m in metros_in.items():
+        codes = m.get("codes") or []
+        metros[name] = {"lat": round(float(m["lat"]), 5),
+                        "lon": round(float(m["lon"]), 5),
+                        "code": _sfmix_metro_code(codes),
+                        "sites": len(codes)}
+
+    trunks = []
+    for g in struct.get("metro_cables") or []:
+        a_metro, z_metro = g.get("a_metro"), g.get("z_metro")
+        cap = float(g.get("capacity_bps") or 0.0)
+        in_bps = out_bps = 0.0
+        seen = 0
+        for cid in g.get("member_ids") or []:
+            tr = links.get(cid)
+            if not tr:
+                continue
+            seen += 1
+            # `out` on a cable leaves its own a_site. If that site is in the
+            # trunk's z metro the cable is cabled the other way round and its
+            # two directions belong to the trunk's other arrow.
+            flip = site_metro.get(cable_a.get(cid)) == z_metro
+            in_bps += float(tr.get("out_bps") or 0.0) if flip \
+                else float(tr.get("in_bps") or 0.0)
+            out_bps += float(tr.get("in_bps") or 0.0) if flip \
+                else float(tr.get("out_bps") or 0.0)
+        trunks.append({
+            "a": a_metro, "z": z_metro,
+            "cap_mbps": int(round(cap / 1e6)),
+            "in_mbps": _sfmix_mbps(in_bps), "out_mbps": _sfmix_mbps(out_bps),
+            "util_pct": round(100.0 * max(in_bps, out_bps) / cap, 2)
+                        if cap > 0 else 0.0,
+            "status": g.get("status") or "up",
+            "members": len(g.get("member_ids") or []),
+            "reporting": seen,
+            "path": _sfmix_simplify(g.get("path") or [], SFMIX_PATH_TOL),
+        })
+    if not trunks:
+        raise ValueError("SFMIX map carried no metro trunks")
+
+    # Every inter-site cable, whether or not it is inside a metro trunk. This
+    # is the "13 backbone links" the panel can honestly claim; the intra-site
+    # LAGs and cross-connects are not backbone and are not counted.
+    inter = [c for c in (struct.get("cables") or [])
+             if c.get("scope") == "inter"]
+
+    total = get_json(SFMIX_METRICS_URL % "ix_total", timeout=30)
+    stamps = [int(x) for x in (total.get("timestamps") or [])]
+    series = {s.get("name", "").lower(): s.get("values") or []
+              for s in (total.get("series") or [])}
+    ingress = series.get("ingress") or []
+    if not stamps or len(ingress) != len(stamps):
+        raise ValueError("ix_total series does not line up with its timestamps")
+
+    # Ingress and egress differ by about two parts in ten thousand, which is
+    # what an exchange looks like when it is working: what a member sends into
+    # the fabric is what some other member receives out of it. One curve, and
+    # the panel says "exchanged" rather than picking a side.
+    finite = [(v, ts) for v, ts in zip(ingress, stamps) if v is not None]
+    if not finite:
+        raise ValueError("ix_total series is entirely null")
+    peak_v, peak_t = max(finite, key=lambda vt: vt[0])
+    now_v, now_t = finite[-1]
+    curve, curve_t = _sfmix_buckets(ingress, stamps, SFMIX_SERIES_POINTS)
+
+    return {"generation": gen,
+            "generated_at": struct.get("generated_at"),
+            "metros": metros,
+            "trunks": trunks,
+            "backbone_links": len(inter),
+            "sites": len(site_metro),
+            "total": {"now_mbps": _sfmix_mbps(now_v), "now_at": int(now_t),
+                      "peak_mbps": _sfmix_mbps(peak_v), "peak_at": int(peak_t),
+                      "step_s": int(total.get("step") or 300),
+                      "t": curve_t,
+                      "mbps": [_sfmix_mbps(v) for v in curve]},
+            "note": "util is max(in,out)/capacity per trunk, portal convention",
+            }, SFMIX_MAP_URL
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="fetch outside data into a cache the demos read",
