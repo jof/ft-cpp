@@ -2122,6 +2122,378 @@ def _adsb_bay():
 
 
 # --------------------------------------------------------------------------
+# Every BART train, as a path through time. stringline.py draws these.
+#
+# **Why BART.** It publishes GTFS-Realtime with no API key, no signup and no
+# terms beyond politeness -- https://api.bart.gov/gtfsrt/tripupdate.aspx answers
+# 200 with about 39 KB of protobuf to anybody who asks. The obvious alternative
+# for a wall in the Mission is Muni, and 511.org's GTFS-RT returns 401 without a
+# free-but-registered key, which was verified before this was written. So BART.
+#
+# **The protobuf is decoded by hand, in about sixty lines.** The proper answer
+# is `gtfs-realtime-bindings`, which pulls in `protobuf`, which is a C extension
+# and a wheel and a version skew on a Raspberry Pi that already has enough of
+# those. What is actually needed here is five field numbers deep in a message
+# whose wire format is self-describing: every field is a tag varint carrying a
+# number and a type, and the four types that appear are varint, length-delimited
+# and two fixed widths that can be skipped. Nothing is validated against a
+# schema, which is the honest trade -- a field that changes meaning would be
+# read as the old meaning -- and against that, the reader cannot be broken by a
+# field being *added*, which is the thing that actually happens to these feeds.
+#
+# **A TripUpdate is only the future.** The feed carries, per running train, the
+# stops it has not reached yet; a stop drops out behind the train as it passes.
+# That is exactly half a stringline. So the fetcher keeps the other half: each
+# pass merges the new predictions into what it already had for that trip, and a
+# stop that has fallen out of the feed keeps the last time it was given. Since
+# the fetch runs every minute, that last time was published within sixty seconds
+# of the train actually being there, which makes it an observation in every
+# sense that matters to a panel. The record therefore *accumulates* -- it is the
+# only product here that is a function of its own previous value -- and the
+# ninety minutes it holds is what the past half of the diagram is drawn from.
+#
+# **Trips have to be matched to a line, and the feed does not say.** BART's
+# TripDescriptor carries a trip_id and nothing else: no route_id, no direction,
+# no headsign. Two things recover it, in order:
+#
+#   1. a trip_id -> line table baked into `stringline-lines.npz` from the static
+#      schedule. Trip ids are regenerated every time BART publishes a new
+#      schedule, so this table goes stale a few times a year -- and is therefore
+#      only ever a *hint*, accepted when the live stop list is consistent with
+#      it and ignored otherwise.
+#   2. failing that, the set of stations the trip calls at. A trip whose stops
+#      all lie on exactly one line is on that line. Checked against the whole
+#      static schedule, this is right for 2384 trips, wrong for none, and
+#      undecidable for 346 -- the SFO-Millbrae and Warm Springs-Berryessa
+#      shuttles, which really are on two lines at once.
+#
+# A trip that neither method resolves is counted and dropped, never guessed at.
+# Guessing would put a Red train on the Yellow diagram, which on a stringline is
+# not a small error: it invents a headway that does not exist.
+#
+# One minute is the interval and five the TTL, matching the ADS-B reasoning: a
+# minute of drift is a train a kilometre out of place, which the diagram absorbs
+# because it is drawn at two kilometres a row, and five minutes is the point at
+# which the panel should say so rather than keep drawing. `volatile` because it
+# is rewritten 1440 times a day and is worthless the next morning.
+# --------------------------------------------------------------------------
+
+BART_URL = "https://api.bart.gov/gtfsrt/tripupdate.aspx"
+
+BART_PRODUCT = "bart-stringline"
+BART_TTL = 300
+BART_INTERVAL = 60
+
+# How much history the record carries. The panel's default window is forty
+# minutes of past, and a train takes ninety to cross the Yellow line end to end,
+# so ninety keeps a whole run visible and bounds the record at the same time.
+BART_KEEP = 5400.0
+
+# Backstops, so a feed having a strange day cannot grow the record without
+# limit. Both are far above anything BART has ever put in it: 83 trips and 1098
+# stop times was a Monday teatime.
+BART_MAX_TRIPS = 300
+BART_MAX_POINTS = 60
+
+# The baked line geometry, which is stringline.py's asset and is read here for
+# one thing only: turning platform stop ids into stations and stations into
+# lines. Cached in a one-slot dict because --loop keeps this process alive for
+# weeks and the file does not change under it.
+BART_ASSET = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "stringline-lines.npz")
+_BART_GEOM = {}
+
+
+def _pb_varint(buf, i):
+    """A base-128 varint at `i`. Returns (value, next index)."""
+    r = s = 0
+    while True:
+        c = buf[i]
+        i += 1
+        r |= (c & 0x7F) << s
+        if not c & 0x80:
+            return r, i
+        s += 7
+
+
+def _pb_fields(buf):
+    """Decode one protobuf message into [(field number, wire type, value)].
+
+    Values are ints for varints and `bytes` for length-delimited fields; the
+    two fixed-width types are handed back as bytes too and are never used here.
+    Unknown field numbers cost nothing, which is the property that makes this
+    safe to point at a feed that gains fields later.
+    """
+    out = []
+    i, n = 0, len(buf)
+    while i < n:
+        key, i = _pb_varint(buf, i)
+        fn, wt = key >> 3, key & 7
+        if wt == 0:
+            v, i = _pb_varint(buf, i)
+        elif wt == 2:
+            ln, i = _pb_varint(buf, i)
+            v, i = buf[i:i + ln], i + ln
+        elif wt == 5:
+            v, i = buf[i:i + 4], i + 4
+        elif wt == 1:
+            v, i = buf[i:i + 8], i + 8
+        else:
+            raise ValueError("protobuf wire type %d at %d" % (wt, i))
+        out.append((fn, wt, v))
+    return out
+
+
+def _pb_get(fields, num):
+    return [v for f, _, v in fields if f == num]
+
+
+def _pb_signed(v):
+    """Protobuf writes a negative int32 as a 64-bit two's complement varint."""
+    return v - (1 << 64) if v >= (1 << 63) else v
+
+
+def _bart_geometry():
+    """(stop id -> station code, [ {code: index} per line ], hints, keys).
+
+    Loaded once. numpy is imported inside the function, like everything else
+    optional in this file, so `load()` stays free of it.
+    """
+    if "g" in _BART_GEOM:
+        return _BART_GEOM["g"]
+    import numpy as np
+    with np.load(BART_ASSET, allow_pickle=False) as z:
+        keys = [str(k) for k in z["line_key"]]
+        off = [int(v) for v in z["line_off"]]
+        code = [str(c) for c in z["st_code"]]
+        stop_of = dict(zip((str(s) for s in z["sid"]),
+                           (str(c) for c in z["sid_code"])))
+        index = [{c: i for i, c in enumerate(code[off[k]:off[k + 1]])}
+                 for k in range(len(keys))]
+        ends = [(0, off[k + 1] - off[k] - 1) for k in range(len(keys))]
+        hints = {}
+        for tid, li, dr, last in zip(z["trip_id"], z["trip_line"],
+                                     z["trip_dir"], z["trip_last"]):
+            hints[str(tid)] = (int(li), int(dr), int(last))
+    g = (stop_of, index, ends, hints, keys)
+    _BART_GEOM["g"] = g
+    return g
+
+
+def _bart_line_of(tid, codes, index, ends, hints):
+    """(line, direction) for a trip, or (None, None) if it cannot be told.
+
+    `codes` are the stations the trip still calls at, in order. Direction 0 is
+    towards the line's last station, which is the direction the panel draws
+    downwards.
+    """
+    hint = hints.get(tid)
+    if hint is not None:
+        li, dr, last = hint
+        ix = index[li]
+        if all(c in ix for c in codes):
+            # The live stop list has to be a *suffix* of the scheduled trip:
+            # every station on the line, running the scheduled way round, and
+            # ending at or before the scheduled terminal. Not "ending exactly
+            # at it", because BART's feed drops a trip's final stop a station
+            # early -- a Millbrae train's last update is SFO -- and requiring
+            # the terminal threw away a quarter of the feed. Three conditions
+            # together are still a strong enough check that a trip id reused by
+            # a later schedule for a different line will fail them.
+            seq = [ix[c] for c in codes]
+            step = -1 if dr else 1
+            fwd = all((seq[i + 1] - seq[i]) * step > 0
+                      for i in range(len(seq) - 1))
+            ends_ok = (seq[-1] <= last) if dr == 0 else (seq[-1] >= last)
+            if fwd and ends_ok:
+                return li, dr
+    cand = [li for li, ix in enumerate(index) if all(c in ix for c in codes)]
+    if len(cand) > 1:
+        # Several lines share the Market Street trunk, so a train seen only
+        # inside it is on all of them as far as its stop list can say. Its
+        # terminal breaks most of those ties; what it does not break stays
+        # undecided rather than being guessed.
+        cand = [li for li in cand if index[li][codes[-1]] in ends[li]]
+    if len(cand) != 1:
+        return None, None
+    li = cand[0]
+    a, b = index[li][codes[0]], index[li][codes[-1]]
+    if a == b:
+        return None, None
+    return li, (0 if b > a else 1)
+
+
+def _bart_parse(blob, stop_of):
+    """The feed as (feed timestamp, [(trip id, [(stop code, time)], delay)]).
+
+    Arrival is preferred over departure because a stringline is about when the
+    train *reaches* a place. Stops the feed marks SKIPPED are dropped, and so is
+    anything at a stop id the baked geometry does not know -- which is how the
+    OAK Airport shuttle, which is not one of the five lines, leaves quietly.
+    """
+    top = _pb_fields(blob)
+    feed_t = 0.0
+    head = _pb_get(top, 1)
+    if head:
+        ts = _pb_get(_pb_fields(head[0]), 3)
+        if ts:
+            feed_t = float(ts[0])
+    trips = []
+    for ent in _pb_get(top, 2):
+        tu = _pb_get(_pb_fields(ent), 3)
+        if not tu:
+            continue
+        tuf = _pb_fields(tu[0])
+        desc = _pb_get(tuf, 1)
+        if not desc:
+            continue
+        tid = _pb_get(_pb_fields(desc[0]), 1)
+        if not tid:
+            continue
+        delay = _pb_get(tuf, 5)
+        delay = _pb_signed(delay[0]) if delay else None
+        stops = []
+        for stu in _pb_get(tuf, 2):
+            sf = _pb_fields(stu)
+            rel = _pb_get(sf, 5)
+            if rel and rel[0] == 1:                          # SKIPPED
+                continue
+            sid = _pb_get(sf, 4)
+            if not sid:
+                continue
+            code = stop_of.get(sid[0].decode("ascii", "replace"))
+            if code is None:
+                continue
+            ev = _pb_get(sf, 2) or _pb_get(sf, 3)            # arrival, else dep
+            if not ev:
+                continue
+            evf = _pb_fields(ev[0])
+            when = _pb_get(evf, 2)
+            if not when:
+                continue
+            if delay is None:
+                d = _pb_get(evf, 1)
+                if d:
+                    delay = _pb_signed(d[0])
+            stops.append((code, float(when[0])))
+        if len(stops) >= 1:
+            trips.append((tid[0].decode("ascii", "replace"), stops,
+                          0.0 if delay is None else float(delay)))
+    return feed_t, trips
+
+
+def _bart_previous(cache_dir, index):
+    """Last pass's record, back as {trip id: [line, dir, {station: time}, delay]}.
+
+    Reading the product's own last output is what makes the past half of the
+    diagram exist. It is deliberately forgiving: a record from an older format,
+    or one naming a line that no longer exists, simply contributes nothing and
+    the history rebuilds itself over the next hour and a half.
+    """
+    out = {}
+    got = load(BART_PRODUCT, cache_dir)
+    if got is None:
+        return out
+    payload = got[0] or {}
+    for tr in payload.get("trips", []):
+        try:
+            li = int(tr["l"])
+            if not 0 <= li < len(index):
+                continue
+            t0 = float(tr["t0"])
+            pts = {int(s): t0 + float(a) for s, a in zip(tr["s"], tr["a"])}
+            if pts:
+                out[str(tr["i"])] = [li, int(tr.get("d", 0)), pts,
+                                     float(tr.get("y", 0.0))]
+        except Exception:                                    # noqa: BLE001
+            continue
+    return out
+
+
+@product(BART_PRODUCT, ttl=BART_TTL, interval=BART_INTERVAL, volatile=True,
+         description="BART trains as time-distance paths, from the keyless "
+                     "GTFS-Realtime TripUpdate feed")
+def _bart_stringline(cache_dir):
+    """A rolling ninety minutes of every BART train's path along its line."""
+    stop_of, index, ends, hints, keys = _bart_geometry()
+    feed_t, seen = _bart_parse(get(BART_URL, timeout=25), stop_of)
+    now = time.time()
+    if not 1e9 < feed_t < now + 3600:
+        # A feed with no timestamp, or one whose clock is wrong, is still full
+        # of usable predictions; only the "how old is this" line suffers.
+        feed_t = now
+
+    state = _bart_previous(cache_dir, index)
+    unknown = 0
+    for tid, stops, delay in seen:
+        codes = [c for c, _ in stops]
+        prev = state.get(tid)
+        if prev is not None:
+            li, dr = prev[0], prev[1]
+        else:
+            li, dr = _bart_line_of(tid, codes, index, ends, hints)
+            if li is None:
+                unknown += 1
+                continue
+            prev = state[tid] = [li, dr, {}, 0.0]
+        ix = index[li]
+        for code, when in stops:
+            i = ix.get(code)
+            if i is not None:
+                prev[2][i] = when
+        prev[3] = delay
+
+    cut = now - BART_KEEP
+    trips = []
+    for tid, (li, dr, pts, delay) in state.items():
+        pts = {s: t for s, t in pts.items() if t >= cut}
+        if len(pts) < 2:
+            continue
+        # Station order *is* travel order -- a train calls at them in sequence,
+        # which is the only ordering a Marey diagram can be drawn from.
+        order = sorted(pts, reverse=bool(dr))
+        if len(order) > BART_MAX_POINTS:
+            order = order[-BART_MAX_POINTS:]
+        times = [pts[s] for s in order]
+        # Forced non-decreasing. A prediction that goes backwards between two
+        # stops happens, rarely, when an estimate is revised across a fetch, and
+        # the demo interpolates against these as an x axis: numpy's interp on a
+        # non-increasing x is not an error, it is silently wrong.
+        for i in range(1, len(times)):
+            if times[i] < times[i - 1]:
+                times[i] = times[i - 1]
+        t0 = times[0]
+        trips.append((times[-1], {
+            "i": tid, "l": li, "d": dr, "t0": int(round(t0)),
+            "s": order, "a": [int(round(x - t0)) for x in times],
+            "y": int(round(delay)),
+        }))
+
+    # Newest last-known position first if anything has to go: a train that
+    # finished an hour ago is the least interesting thing in the record.
+    trips.sort(key=lambda r: -r[0])
+    kept = [r[1] for r in trips[:BART_MAX_TRIPS]]
+    payload = {
+        "t": now, "feed_t": feed_t, "lines": keys,
+        "keep": BART_KEEP,
+        "n_feed": len(seen), "n_trips": len(kept), "n_unknown": unknown,
+        "n_points": sum(len(tr["s"]) for tr in kept),
+        "units": {"t0": "epoch seconds", "a": "seconds after t0",
+                  "s": "station index within the line", "y": "delay seconds",
+                  "d": "0 towards the line's last station, 1 towards its first"},
+        "source": "BART GTFS-Realtime TripUpdates",
+        "trips": kept,
+    }
+    return payload, BART_URL
+
+
+# Not a flag on product(): marking the spec afterwards keeps the registration
+# helper exactly as the other products use it. This one wants the cache
+# directory because, uniquely here, its new record is a function of its old one.
+PRODUCTS[BART_PRODUCT]["blob"] = True
+
+
+# --------------------------------------------------------------------------
 # What California is running on. caiso.py draws this.
 #
 # CAISO's "Today's Outlook" page is backed by three keyless CSVs that are
