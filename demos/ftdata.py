@@ -3937,6 +3937,334 @@ def _docks_nearby(cache_dir):
 PRODUCTS[DOCKS_PRODUCT]["blob"] = True
 
 # --------------------------------------------------------------------------
+# The Sun's corona in the 193 A channel of SDO/AIA, as a day-long time lapse.
+# sun.py draws this.
+#
+# SDO has been staring at the Sun from geosynchronous orbit since 2010, and
+# GSFC publishes every AIA frame as a browse JPEG within a few minutes of it
+# coming off the telescope. 193 angstroms is Fe XII/XXIV at about 1.2 million
+# kelvin: the channel where the corona is legible rather than the photosphere,
+# so what the picture shows is the *magnetic* Sun -- active regions as bright
+# knots, coronal loops arcing off them, and coronal holes as the black gaps
+# that open-field solar wind escapes through. It is the channel people mean
+# when they say "a picture of the Sun".
+#
+# **Two endpoints, and the expensive one is only used to repair.** Frames live
+# at `/assets/img/browse/YYYY/MM/DD/YYYYMMDD_HHMMSS_512_0193.jpg`, and the
+# directory is a plain Apache index -- which is the problem: it lists ten
+# wavelengths plus magnetograms for a whole day, so it is **1.2 MB of HTML,
+# served uncompressed** (no gzip on Accept-Encoding, and Range requests are
+# ignored -- asking for the last 120 kB returns all 1.2 MB with a 200). Pulling
+# that every pass would cost 57 MB a day to learn the name of one new file,
+# many times what the imagery itself costs.
+#
+# The filenames cannot be predicted either, which is what makes the listing
+# necessary at all. GOES above gets away with naming tomorrow's files because
+# its scans are exactly on a five-minute grid; AIA's are not. Over one sampled
+# day the cadence is nominally ten minutes but the minute wanders (00:07,
+# 00:17, 00:27, 00:37, 00:48, 00:57 ...) and the seconds land only on a
+# twelve-second grid, {05, 17, 29, 41, 53}. There are holes, too -- one
+# nineteen-minute gap in 105 frames, an eclipse season or a calibration slot.
+# So a name has to be read, never computed.
+#
+# What saves it is that `/assets/img/latest/latest_512_0193.jpg` is the newest
+# frame at a **fixed** URL, 44 kB, with a `Last-Modified` that dates the
+# publication rather than the fetch. So the ring is topped up from `latest` and
+# nothing else in the ordinary case -- one 44 kB request per slot, no listing at
+# all -- and the listing is fetched only when the ring has a hole older than an
+# hour, which means a cold start or a fetcher that has been down. Steady state
+# is about 2 MB a day; a cold start pays one or two listings once.
+#
+# `Last-Modified` is not the observation time and this stores the difference.
+# A frame captured at 17:38:05 UT appeared with `Last-Modified` 17:43:06 GMT,
+# so publication trails the shutter by very close to five minutes, and
+# SDO_PUBLISH_LAG backs that out to keep the two paths' timestamps comparable.
+# It is an estimate on the frames sampled here, not a guarantee; the residual
+# error is a few minutes on a twenty-four hour axis, which is under a pixel.
+#
+# **One channel is stored, not three, and that is lossless here.** The browse
+# JPEG is already false colour: AIA 193 is drawn through a fixed one
+# dimensional bronze colormap, so G and B are functions of R and not
+# independent information. Binning a frame confirms it -- at a given intensity
+# the spread in the other two channels is one to five levels, which is JPEG
+# ringing rather than colour. So the fetcher keeps a single intensity plane and
+# sun.py maps it back through its own copy of that ramp, which thirds the
+# sidecar and, more usefully, puts the contrast curve under the demo's control
+# instead of NASA's. The index is (R+G+B)/3 rather than R alone on purpose: R
+# saturates at 255 before the other two do, and the pixels where it saturates
+# are exactly the flare cores worth keeping apart from merely bright.
+#
+# The disk does not fill the frame and its radius is not assumed. On the 512 px
+# browse image the Sun is centred on (255.5, 255.5) with a photospheric radius
+# of about 203 px -- measured from the radial profile, which peaks sharply at
+# r=200 where the limb brightens and has fallen to a tenth by r=250. The crop
+# is 216 px of half-width, so the disk covers 94 per cent of the tile and a
+# little corona survives around it. That crop also throws away the caption GSFC
+# burns into the bottom of every browse frame (`SDO/AIA 193 2026-08-11
+# 17:38:05 UT`, rows 492-504), which would otherwise arrive as unreadable
+# smeared type along the bottom of the panel.
+# --------------------------------------------------------------------------
+
+SDO_BROWSE = "https://sdo.gsfc.nasa.gov/assets/img/browse/%s/"
+SDO_LATEST = "https://sdo.gsfc.nasa.gov/assets/img/latest/latest_512_0193.jpg"
+SDO_WAVE = os.environ.get("FT_SDO_WAVE", "0193")
+
+# The ring. Half-hourly over twenty-four hours, which is the brief's "last day
+# of the Sun" and is also as fine as the panel can resolve: the Sun turns 13.2
+# degrees a day, so half an hour of rotation moves a feature about a tenth of a
+# pixel on a sixty-pixel disk. A ten-minute ring would triple the fetching to
+# show the same picture. What half-hourly does still catch is the thing that
+# actually moves at this scale -- an active region brightening, a flare, a
+# coronal hole changing shape.
+SDO_CADENCE = float(os.environ.get("FT_SDO_CADENCE", "1800"))
+SDO_FRAMES = int(os.environ.get("FT_SDO_FRAMES", "48"))
+
+# A cold start is 48 JPEGs at 44 kB. Capped so one pass cannot sit on the wifi
+# for minutes; a short ring plays anyway and the next pass fills more in.
+SDO_MAX_FETCH = int(os.environ.get("FT_SDO_MAX_FETCH", "16"))
+
+# How far off a slot a frame may be and still count as that slot. Half the
+# cadence: at ten-minute posting there is always a frame inside this.
+SDO_SLOP = SDO_CADENCE / 2.0
+
+# Only repair from the directory listing when the hole is older than this.
+# Anything newer is what `latest` is for, and `latest` costs 44 kB against the
+# listing's 1.2 MB.
+SDO_LISTING_AFTER = float(os.environ.get("FT_SDO_LISTING_AFTER", "3600"))
+
+# Measured: publication trails observation by ~301 s on the frames sampled.
+SDO_PUBLISH_LAG = 300.0
+
+# Source geometry, in pixels of the 512 px browse image, and the tile stored.
+SDO_CENTRE = (255.5, 255.5)
+SDO_SOLAR_R = 203.0
+# Half-width of the crop, and the one number here that is a composition
+# decision rather than a measurement. Cropping tight to the limb gets the
+# biggest possible disk on a 64-row panel, and looks wrong: the corona is
+# still bright a long way out -- a tenth of its limb value at r=250 -- so a
+# tight square crop slices through it and the Sun ends up in a luminous box,
+# bright at the edge midpoints and black only in the corners. Leaving room for
+# the corona to fall off costs disk diameter and buys a star with a halo
+# instead of a photograph with a border. sun.py fades the last of it to black
+# with a vignette; this is the room that fade needs.
+SDO_CROP_R = 248.0
+SDO_TILE = int(os.environ.get("FT_SDO_TILE", "64"))
+
+SDO_PRODUCT = "sdo-aia193"
+# Frames post every ten minutes, so a newest frame two hours old means SDO,
+# the CDN or the fetcher has stopped. The panel says so rather than implying
+# this is the Sun right now.
+SDO_TTL = 7200
+SDO_INTERVAL = 1800
+
+
+def sdo_slots(now=None, count=None, cadence=None):
+    """The `count` most recent half-hour slot epochs at or before `now`."""
+    now = time.time() if now is None else now
+    count = SDO_FRAMES if count is None else count
+    cadence = SDO_CADENCE if cadence is None else cadence
+    newest = (now // cadence) * cadence
+    return [newest - i * cadence for i in range(count - 1, -1, -1)]
+
+
+def _sdo_day_url(epoch):
+    return SDO_BROWSE % time.strftime("%Y/%m/%d", time.gmtime(epoch))
+
+
+def _sdo_listing(epoch):
+    """{observation epoch: absolute jpeg url} for one UTC day. 1.2 MB.
+
+    Only ever called to repair a hole older than an hour; see the block
+    comment. Parses the Apache index with a regex rather than an HTML parser
+    because the only thing wanted out of it is filenames of a known shape, and
+    a listing that changes layout should yield nothing rather than garbage.
+    """
+    import calendar
+    import re
+    url = _sdo_day_url(epoch)
+    text = get(url, timeout=60).decode("utf-8", "replace")
+    out = {}
+    pat = r"(\d{8})_(\d{6})_512_%s\.jpg" % SDO_WAVE
+    for date, clock in set(re.findall(pat, text)):
+        try:
+            when = calendar.timegm(time.strptime(date + clock, "%Y%m%d%H%M%S"))
+        except ValueError:
+            continue
+        out[float(when)] = "%s%s_%s_512_%s.jpg" % (url, date, clock, SDO_WAVE)
+    return out
+
+
+def _sdo_http_date(s):
+    """An RFC 1123 `Last-Modified` as an epoch, or None."""
+    import calendar
+    try:
+        return float(calendar.timegm(
+            time.strptime(s.strip(), "%a, %d %b %Y %H:%M:%S GMT")))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _sdo_fetch_latest():
+    """(jpeg bytes, observation epoch) for the newest published frame.
+
+    The header is read for the timestamp rather than the fetch clock being
+    used, because a fetcher that ran late would otherwise stamp an old frame
+    as new and the panel would claim a currency it does not have.
+    """
+    import urllib.request
+    req = urllib.request.Request(
+        SDO_LATEST,
+        headers={"User-Agent": "flaschen-taschen-ftdata/1 (+wall display)"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = resp.read()
+        when = _sdo_http_date(resp.headers.get("Last-Modified"))
+    if when is None:
+        when = time.time()
+    return data, when - SDO_PUBLISH_LAG
+
+
+def _sdo_tile(data):
+    """One browse JPEG -> a (tile, tile) uint8 intensity plane.
+
+    Pillow is imported here and only here, exactly as _goes_tile does it: a
+    fetcher-side dependency the demo must never need, never import and never
+    be the thing that discovers is missing.
+    """
+    import io
+    import numpy as np
+    from PIL import Image
+    im = Image.open(io.BytesIO(data))
+    im.load()
+    im = im.convert("RGB")
+    cx, cy = SDO_CENTRE
+    r = SDO_CROP_R
+    if im.size != (512, 512):
+        # A different browse size. Scale the geometry with it rather than
+        # cropping the same pixel box out of a different picture, which would
+        # quietly be a different piece of the Sun.
+        sx, sy = im.size[0] / 512.0, im.size[1] / 512.0
+        cx, cy, r = cx * sx, cy * sy, r * min(sx, sy)
+    box = (int(round(cx - r)), int(round(cy - r)),
+           int(round(cx + r)), int(round(cy + r)))
+    im = im.crop(box).resize((SDO_TILE, SDO_TILE), Image.LANCZOS)
+    a = np.asarray(im, dtype=np.uint16)
+    # (R+G+B)/3, which indexes the AIA bronze ramp without saturating where R
+    # alone would. See the block comment.
+    return ((a[:, :, 0] + a[:, :, 1] + a[:, :, 2]) // 3).astype(np.uint8)
+
+
+def _sdo_payload(cache_dir):
+    """Top the ring up and rewrite the sidecar. Returns (payload, source)."""
+    import numpy as np
+
+    wanted = sdo_slots()
+    now = time.time()
+
+    # What survives from last pass, keyed by slot. Re-reading the sidecar is
+    # the whole point: a pass in the steady state fetches exactly one JPEG.
+    have = {}
+    got = load(SDO_PRODUCT, cache_dir)
+    if got is not None:
+        prev = got[0] or {}
+        blob = load_blob(prev.get("blob"), cache_dir)
+        # The crop has to match, not just the tile size. Both geometries
+        # produce a 64x64 uint8 tile, so shape alone would happily splice
+        # frames cropped at two different radii into one ring -- and the
+        # result is a time lapse in which the Sun changes size every few
+        # frames, which looks like a bug in the demo rather than in here.
+        same_crop = (float(prev.get("crop", -1.0)) == float(SDO_CROP_R)
+                     and str(prev.get("wave", SDO_WAVE)) == str(SDO_WAVE))
+        if (blob is not None and same_crop
+                and "frames" in blob and "stamps" in blob):
+            frames, stamps = blob["frames"], blob["stamps"]
+            if (len(frames) == len(stamps)
+                    and frames.shape[1:] == (SDO_TILE, SDO_TILE)):
+                for slot in wanted:
+                    # Keep the frame nearest this slot, if one is close enough.
+                    best, best_d = None, SDO_SLOP
+                    for t, f in zip(stamps, frames):
+                        d = abs(float(t) - slot)
+                        if d < best_d:
+                            best, best_d = (f, float(t)), d
+                    if best is not None:
+                        have[slot] = best
+
+    fetched = failed = 0
+    listings = {}
+    source = SDO_LATEST
+
+    # The newest slot first, from `latest`, and only if we do not already have
+    # something for it. This is the entire cost of an ordinary pass.
+    newest = wanted[-1]
+    if newest not in have:
+        try:
+            data, when = _sdo_fetch_latest()
+            if abs(when - newest) <= SDO_SLOP + SDO_CADENCE:
+                have[newest] = (_sdo_tile(data), when)
+                fetched += 1
+        except Exception:                                    # noqa: BLE001
+            # The newest slot may simply not be published yet. Not an error.
+            failed += 1
+
+    # Anything still missing and old enough that `latest` cannot supply it is
+    # repaired from the day listing -- at most two of them, since the ring is
+    # exactly a day long.
+    holes = [s for s in wanted if s not in have and now - s >= SDO_LISTING_AFTER]
+    for slot in holes[::-1][:SDO_MAX_FETCH]:
+        day = time.strftime("%Y%m%d", time.gmtime(slot))
+        if day not in listings:
+            try:
+                listings[day] = _sdo_listing(slot)
+            except Exception:                                # noqa: BLE001
+                listings[day] = {}
+        index = listings[day]
+        pick, pick_d = None, SDO_SLOP
+        for t, url in index.items():
+            d = abs(t - slot)
+            if d < pick_d:
+                pick, pick_d = (t, url), d
+        if pick is None:
+            continue
+        try:
+            have[slot] = (_sdo_tile(get(pick[1], timeout=60)), pick[0])
+            fetched += 1
+        except Exception:                                    # noqa: BLE001
+            failed += 1
+
+    if not have:
+        raise ValueError("no SDO frames could be fetched")
+
+    slots = sorted(have)
+    frames = np.stack([have[s][0] for s in slots])
+    stamps = np.asarray([have[s][1] for s in slots], np.float64)
+
+    filename = store_blob(SDO_PRODUCT,
+                          {"frames": frames, "stamps": stamps}, cache_dir)
+    payload = {
+        "blob": filename, "count": int(len(slots)),
+        "oldest": float(stamps[0]), "newest": float(stamps[-1]),
+        "cadence": SDO_CADENCE, "want": len(wanted),
+        "tile": SDO_TILE, "wave": SDO_WAVE, "crop": float(SDO_CROP_R),
+        "instrument": "SDO/AIA", "channel": "%d A" % int(SDO_WAVE),
+        # What fraction of the tile's half-width the photosphere covers, so
+        # the demo can place the limb -- and put its vignette outside it --
+        # without rediscovering the geometry.
+        "disk_frac": float(SDO_SOLAR_R / SDO_CROP_R),
+        "fetched": fetched, "missing": failed,
+        "listings": len(listings),
+    }
+    prune_blobs(SDO_PRODUCT, filename, cache_dir)
+    return payload, source
+
+
+product(SDO_PRODUCT, ttl=SDO_TTL, interval=SDO_INTERVAL,
+        description="SDO/AIA %s A time lapse, %d frames at %d min"
+                    % (SDO_WAVE, SDO_FRAMES, int(SDO_CADENCE / 60)))(_sdo_payload)
+# Not a flag on product(): marking the spec afterwards keeps the registration
+# helper exactly as the other products use it.
+PRODUCTS[SDO_PRODUCT]["blob"] = True
+
+# --------------------------------------------------------------------------
 # The ground under the building. quake.py draws this.
 #
 # **One feed, two scales, and a third request that is not a feed.** USGS
