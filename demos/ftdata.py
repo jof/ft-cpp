@@ -5648,6 +5648,313 @@ def _sfport_cruise():
 
 
 # --------------------------------------------------------------------------
+# San Francisco's 311 service requests for the last day the city published:
+# what people asked the city for, when, and roughly where. cityline.py draws it.
+#
+# **One dataset, keyless, on Socrata's SODA API.** `vw6y-z8j6` is "311 Cases",
+# eight point eight million rows going back to 2011, and the only three things
+# taken off it are `service_name`, `requested_datetime` and `lat`/`long`. A
+# `$select` naming those four fields turns a 1 kB row into about 130 bytes, and
+# there are three thousand of them in a day, so the wire is 380 kB and what
+# lands in the cache is thirteen.
+#
+# **The feed is a nightly snapshot, not a live one, and the panel has to say
+# so.** The portal's own metadata claims "Data change frequency: multiple times
+# per hour", and the *publishing* frequency underneath it says Daily -- which is
+# the one that is true. On the morning this was written the newest case in the
+# dataset was filed at 23:58 the previous night, `data_as_of` was 01:00 and
+# `data_loaded_at` was 03:16. So there is a ten to thirty hour lag between a
+# call to 311 and its appearance here, and a panel promising "today, live"
+# would be lying by most of a day.
+#
+# What that buys, though, is the better story: the snapshot always contains one
+# *complete* calendar day, midnight to midnight, which is exactly the shape a
+# daily rhythm wants. So the fetcher asks for `max(requested_datetime)`, takes
+# the calendar date off it, and fetches that whole day. The record carries the
+# day and the timestamp of its last case; the demo prints both and how old they
+# are. Rolling "the last 24 hours" would give the same window today and would
+# quietly become a ragged partial day the moment the city went hourly, so the
+# day is derived from the data rather than from the clock.
+#
+# **`requested_datetime` is a floating timestamp in local time.** Socrata stores
+# it with no zone and the city writes Pacific wall-clock into it, so the string
+# comparisons in `$where` are local-midnight to local-midnight with no
+# conversion, and `time.mktime` on the parsed struct is the right way back to an
+# epoch *on a machine set to Pacific time*, which the wall is. A machine in
+# another zone will read the day's edges as its own midnight; that is a
+# one-line fix nobody needs and would make the SoQL wrong on the wall.
+#
+# **PRIVACY. This is the part that matters, and it happens here rather than in
+# the demo, so that no precise coordinate is ever written to disk.**
+#
+# 311 records are public and each one is a record about a specific address --
+# `address`, `service_request_id`, `status_notes` and often a photograph are all
+# in the response and none of them are read. Three reductions run before
+# anything is stored:
+#
+#   * **Position is snapped to a grid** of SF311_QUANT_DEG degrees, about 220 m
+#     north-south and 175 m east-west at this latitude -- call it two city
+#     blocks. The cell is then packed to a pair of small integers against a
+#     fixed origin, so the stored value is structurally incapable of holding a
+#     street address back. The number was not chosen for privacy alone: the map
+#     cityline draws is 270 m to the pixel, so the quantum is smaller than a
+#     drawn pixel and costs the picture nothing. A quantisation that is visible
+#     is one somebody will be tempted to loosen.
+#   * **Time is bucketed** to SF311_BUCKET_MIN minutes, and the exact filing
+#     second -- which, with a block, is close to a key -- never leaves here.
+#   * **Duplicate (bucket, category, cell) triples collapse to one point.**
+#     Three parking complaints on the same block in the same ten minutes are one
+#     dot on a wall-sized map whatever the record says, and the exact counts
+#     survive in the hourly histogram, which carries no position at all.
+#
+# **Categories are curated, and two categories of curation are going on.**
+#
+# `service_name` has a long tail -- 38 distinct values over ninety days, from
+# 78,000 street-cleaning calls down to a single "Service Request Copy" -- so the
+# first job is bucketing it into six things a legend can name plus an unlabelled
+# OTHER. That is presentation.
+#
+# The second job is not. **Anything whose category names an individual person in
+# difficulty is dropped outright and never reaches the cache**, matched on
+# SF311_SENSITIVE rather than on an exact name so that a category the city adds
+# next year cannot arrive through the OTHER bucket. In practice this is
+# "Encampment", which is ten thousand rows a quarter -- about five per cent of
+# the day and easily the largest single thing thrown away here. An encampment
+# report is a report about where specific unhoused people are sleeping tonight,
+# and a labelled dot for it on a wall in a public workshop is a map of
+# vulnerable people at a known address. Folding it into OTHER would not fix
+# that; only dropping it does. The record carries the keyword list and the
+# number of rows it removed, so the panel and anybody reading the cache can see
+# what is missing rather than having to trust a comment.
+#
+# This is the same call the `bikes` panel made about per-bike identifiers: real
+# data, compelling picture, and the identifying part destroyed in the fetcher
+# where it cannot be recovered by changing the demo.
+# --------------------------------------------------------------------------
+
+SF311_URL = "https://data.sfgov.org/resource/vw6y-z8j6.json"
+
+# Six hours. Not the age of the *data* -- that is a day or so by construction
+# and the panel computes it from the record's own last-case timestamp -- but the
+# age at which the fetcher itself has clearly stopped running, which is the only
+# thing a TTL on a daily dataset can usefully mean.
+SF311_TTL = 21600
+
+# Hourly. The day only changes once, in the small hours, but the load time
+# wanders between one and four in the morning and an hourly look costs a 35 byte
+# probe plus one 380 kB fetch a day at the moment the day rolls over.
+SF311_INTERVAL = 3600
+
+# The quantisation grid. 0.002 degrees is 223 m north-south and 176 m east-west
+# at 37.77 N. See the privacy note above: this is both the coarsest thing the
+# picture can carry and the finest thing the record is allowed to.
+SF311_QUANT_DEG = 0.002
+
+# The origin the grid is measured from, south-west of the city, and the base the
+# cell is packed against. Both fixed constants rather than derived from the
+# data, so two records from different days index the same grid.
+SF311_ORIGIN = (37.700, -122.530)
+SF311_PACK = 128
+
+# Minutes to a time bucket. Ten gives 144 buckets in a day, which is one column
+# per bucket on the chart cityline draws and a little over one bloom step per
+# frame-tenth at its default replay speed.
+SF311_BUCKET_MIN = 10
+
+# Anything outside this box is a geocoding failure, not a case: 311 occasionally
+# lands a request on (0, 0) or on the county centroid, and one dot in the middle
+# of the Pacific rescales nothing but does look like a bug.
+SF311_BOX = (37.690, 37.860, -122.550, -122.330)
+
+# A day is three thousand rows; twenty thousand is the ceiling that says the
+# window went wrong rather than that the city had a busy Tuesday.
+SF311_MAX_ROWS = 20000
+
+# Metres around the installation that count as "near us". Counted here, off the
+# unquantised coordinates, and stored as a single integer -- which is the whole
+# point of doing it here: an exact aggregate carries no position at all, whereas
+# counting quantised cells in the demo would undercount by however many requests
+# happened to share a block. The panel prints this number and draws nothing
+# from it. ftsite is already imported at the top of this file for the three
+# other products that fetch for the installation's own address.
+SF311_NEAR_M = 1000.0
+
+# Substrings that get a request dropped, not bucketed. Matched against the
+# upper-cased `service_name`. See the privacy note: this is a standing filter on
+# vocabulary rather than a list of today's category names, precisely so that a
+# new one does not arrive silently through OTHER. Deliberately *not* "SHELTER",
+# which would take MTA's bus shelter complaints with it.
+SF311_SENSITIVE = ("ENCAMPMENT", "HOMELESS", "WELLNESS", "WELFARE",
+                   "MENTAL HEALTH", "CRISIS", "OVERDOSE", "SYRINGE", "NEEDLE")
+
+# The buckets, in the order the legend draws them, which is the order of the
+# day's volume. Everything surviving SF311_SENSITIVE and matching none of these
+# lands in OTHER, which is drawn but not named -- a category with four requests
+# in it is a label nobody can read and a hint about who filed them.
+SF311_CATEGORIES = (
+    ("CLEANING", ("STREET AND SIDEWALK CLEANING",
+                  "LITTER RECEPTACLE MAINTENANCE")),
+    ("PARKING", ("PARKING ENFORCEMENT", "BLOCKED STREET AND SIDEWALK",
+                 "MTA PARKING TRAFFIC SIGNS NORMAL PRIORITY",
+                 "MTA PARKING TRAFFIC SIGNS HIGH PRIORITY")),
+    ("GRAFFITI", ("GRAFFITI PUBLIC", "GRAFFITI PRIVATE", "ILLEGAL POSTINGS")),
+    ("STREET", ("STREET DEFECT", "SIDEWALK AND CURB", "STREETLIGHTS",
+                "SEWER", "WATER QUALITY", "WASTE OF WATER")),
+    ("TREES", ("TREE MAINTENANCE",)),
+    ("NOISE", ("NOISE",)),
+)
+
+# name -> bucket index, built once. OTHER is the index past the end.
+SF311_LOOKUP = {}
+for _i, (_n, _members) in enumerate(SF311_CATEGORIES):
+    for _m in _members:
+        SF311_LOOKUP[_m] = _i
+SF311_OTHER = len(SF311_CATEGORIES)
+SF311_CAT_NAMES = [_n for _n, _m in SF311_CATEGORIES] + ["OTHER"]
+
+
+def sf311_bucket(service_name):
+    """A `service_name` -> its category index, or None if it must be dropped.
+
+    A function rather than four lines inside the fetch loop so that the privacy
+    rule is one testable thing: `scripts/test-cityline.py` asserts against this
+    directly, including for category names the city does not publish today.
+    """
+    name = str(service_name or "").upper().strip()
+    if any(word in name for word in SF311_SENSITIVE):
+        return None
+    return SF311_LOOKUP.get(name, SF311_OTHER)
+
+
+def _sf311_get(params):
+    """One SODA query. Returns the parsed rows."""
+    from urllib.parse import urlencode
+    return json.loads(get(SF311_URL + "?" + urlencode(params), timeout=60))
+
+
+def _sf311_day_after(day):
+    """'2026-08-10' -> '2026-08-11', via local noon so DST cannot bite."""
+    noon = time.mktime(time.strptime(day + " 12:00:00", "%Y-%m-%d %H:%M:%S"))
+    return time.strftime("%Y-%m-%d", time.localtime(noon + 86400.0))
+
+
+def _sf311_epoch(stamp):
+    """A floating local timestamp '2026-08-10T23:58:32.000' -> epoch seconds."""
+    return time.mktime(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S"))
+
+
+@product("sf311-day", ttl=SF311_TTL, interval=SF311_INTERVAL,
+         description="SF 311 requests for the last published day, "
+                     "block-quantised, no addresses or case ids")
+def _sf311_day():
+    """The last complete day of 311 requests, as buckets, cells and counts.
+
+    Two requests: a 35 byte probe for the newest timestamp in the dataset, which
+    is what decides which day this is, and then that day. Nothing here is
+    derived from the wall clock, so a fetcher run at any hour returns the same
+    record until the city publishes the next day.
+    """
+    import math                       # local, like the other optional deps here
+
+    probe = _sf311_get({"$select": "max(requested_datetime) as mx"})
+    latest = (probe or [{}])[0].get("mx")
+    if not latest:
+        raise ValueError("311 dataset reported no maximum timestamp")
+    day = latest[:10]
+    nxt = _sf311_day_after(day)
+
+    where = ("requested_datetime >= '%sT00:00:00'"
+             " AND requested_datetime < '%sT00:00:00'"
+             " AND lat IS NOT NULL" % (day, nxt))
+    rows = _sf311_get({"$select": "service_name,requested_datetime,lat,long",
+                       "$where": where, "$order": "requested_datetime",
+                       "$limit": str(SF311_MAX_ROWS)})
+    if not rows:
+        raise ValueError("311 returned no cases for %s" % day)
+    if len(rows) >= SF311_MAX_ROWS:
+        raise ValueError("311 returned %d rows for %s, which is not a day"
+                         % (len(rows), day))
+
+    lat0, lon0 = SF311_ORIGIN
+    la_lo, la_hi, lo_lo, lo_hi = SF311_BOX
+    nbuckets = 1440 // SF311_BUCKET_MIN
+    ncat = SF311_OTHER + 1
+
+    # A set per bucket, so the duplicate collapse happens as the rows arrive
+    # rather than as a pass afterwards over a list that briefly held them all.
+    cells = [set() for _ in range(nbuckets)]
+    hist = [[0] * ncat for _ in range(24)]
+    dropped = ungeocoded = near = 0
+
+    # Metres per degree at the installation, for the "near us" count. Flat
+    # enough over a kilometre that the error is centimetres.
+    site_lat, site_lon = ftsite.LAT, ftsite.LON
+    m_lat = 111320.0
+    m_lon = 111320.0 * math.cos(math.radians(site_lat))
+
+    for row in rows:
+        cat = sf311_bucket(row.get("service_name"))
+        if cat is None:
+            dropped += 1
+            continue
+        try:
+            la = float(row["lat"])
+            lo = float(row["long"])
+            stamp = row["requested_datetime"]
+            minute = int(stamp[11:13]) * 60 + int(stamp[14:16])
+        except (KeyError, TypeError, ValueError):
+            ungeocoded += 1
+            continue
+        if not (la_lo < la < la_hi and lo_lo < lo < lo_hi):
+            ungeocoded += 1
+            continue
+        # The histogram is exact and positionless; the cells are positional and
+        # deduplicated. Every number the panel prints comes from the first, and
+        # every dot it draws from the second, which is why the two disagree
+        # about totals on purpose.
+        hist[minute // 60][cat] += 1
+        if ((la - site_lat) * m_lat) ** 2 + ((lo - site_lon) * m_lon) ** 2 \
+                <= SF311_NEAR_M ** 2:
+            near += 1
+        gx = int(round((lo - lon0) / SF311_QUANT_DEG))
+        gy = int(round((la - lat0) / SF311_QUANT_DEG))
+        if not (0 <= gx < SF311_PACK and 0 <= gy < SF311_PACK):
+            ungeocoded += 1
+            continue
+        cells[minute // SF311_BUCKET_MIN].add(
+            (cat * SF311_PACK + gx) * SF311_PACK + gy)
+
+    total = sum(sum(h) for h in hist)
+    if total <= 0:
+        raise ValueError("every one of %d cases for %s was filtered out"
+                         % (len(rows), day))
+
+    return {
+        "day": day,
+        "latest": _sf311_epoch(latest),
+        "day_start": _sf311_epoch(day + "T00:00:00"),
+        "n": total,
+        "n_rows": len(rows),
+        "dropped_sensitive": dropped,
+        "ungeocoded": ungeocoded,
+        "near": near,
+        "near_m": SF311_NEAR_M,
+        "site": [site_lat, site_lon],
+        "site_name": ftsite.NAME,
+        "excluded": list(SF311_SENSITIVE),
+        "cats": list(SF311_CAT_NAMES),
+        "hist": hist,
+        "pts": [sorted(s) for s in cells],
+        "bucket_min": SF311_BUCKET_MIN,
+        "origin": [lat0, lon0],
+        "step": SF311_QUANT_DEG,
+        "pack": SF311_PACK,
+        "note": ("positions snapped to a %.4f degree grid; no address, "
+                 "case id or description is stored" % SF311_QUANT_DEG),
+    }, SF311_URL
+
+
+# --------------------------------------------------------------------------
 # The San Francisco Metropolitan Internet Exchange: what is on its backbone
 # right now, and how much of it there is. sfmix.py draws the weathermap.
 #
