@@ -3921,307 +3921,286 @@ $ python3 scripts/test-ships.py
 
 ![bikes](screenshots/bikes.png)
 
-Half a day of San Francisco's bikes moving, replayed in half a minute. The
-picture is a **cross-section of the city along its commute axis**: the left edge
-is the Ferry Building at the foot of Market Street, the right edge is twelve
-kilometres out at Ocean Beach and the county line, and height is ground
-altitude — so the shape is the climb out of downtown, sea level on the left, the
-ridge of Nob Hill and Buena Vista and Twin Peaks bulging through the middle, the
-low sandy flats of the Sunset falling away on the right. All 383 San Francisco
-docks are dots on it. Over that landscape, bikes move. It is a **time lapse**,
-in the shape `goes` established: one pass through the last twelve hours at an
-hour every 2.3 seconds, then a hold on the newest hour so the loop lands on now.
-In one rotation slot you watch a whole commute — the morning pull into the
-financial district, the midday lull, the evening scatter back out over the hills.
+One day of San Francisco's bike traffic, left to right: midnight to midnight
+across 320 columns. The dark blue silhouette is **what this weekday normally
+looks like** — the morning commute peak around eight, the midday trough, the
+bigger evening peak around five, the long tail into the night — built from
+three months of Bay Wheels' own published trip records. The bright gold line
+over it is **today, so far**. A lit rule marks *now*, everything to the right of
+it is what the rest of the day usually does, and the headline is an estimate of
+how many trips have happened today with the word `EST` and the arithmetic that
+produced it printed next to the number.
 
-This replaced a version that drew the same feed as a hillside: 383 docks sorted
-by altitude, coloured by occupancy, under a headline giving the fleet's altitude
-anomaly in metres. That was a good picture of **state**, and the wall's owner
-said, correctly, that it was hard to tell what people were doing. State is not
-what people are doing. Movement is. What survived the rewrite is the committed
-elevation bake, the honest degraded states, and the rolling series the fetcher
-grows for itself; what went is the hill, the altitude-rank axis, the metre-count
-headline and — late, and deliberately — a twelve-hour bar chart along the bottom
-that was a good instrument and the wrong use of a sixth of the panel.
+**This is the third design of this panel and the first one that answers the
+question that was asked.** The first drew all 383 docks as a hillside sorted by
+altitude and coloured by occupancy: a good picture of **state**, and the wall's
+owner said, correctly, that it was hard to tell what people were doing. The
+second replayed twelve hours of inferred flow as a swarm over a
+distance-and-altitude cross-section of the city: a genuinely good instrument,
+rejected twice — *"just some random arc"* (the altitude profile does not read as
+anything to somebody walking past) and *"doesn't really communicate a clear
+visual message"*. What had actually been asked for was *"the patterns of the
+day, and where we are in the cycle"*, and this is that question drawn literally:
+one shape everybody in the building already knows from their own commute, and a
+line moving along it.
 
-**Two things move, and they are two different kinds of claim.**
+#### The honesty problem, which is the whole of the design
 
-**The bright comets were watched happening.** This is the part that took a
-measurement rather than a decision. `free_bike_status.json` carries two
-identifiers per undocked ebike: `bike_id`, an opaque 32-hex token, and `name`,
-the number printed on the physical bike (`190-591`). GBFS rotates `bike_id`
-between rentals *specifically* so that trips cannot be reconstructed, and it
-does — across two snapshots 36 minutes apart, **0 of 634 tokens survived**, and
-across two four minutes apart 590 of 624 survived but not one of the survivors
-had moved, which is the signature of a token that is stable exactly while the
-bike sits still. `name` is not rotated: **585 of 620 survived 36 minutes**, with
-a median displacement of 4.5 m and a 90th percentile of 11 m — GPS jitter — and
-nine bikes that had plainly been ridden somewhere, the furthest 4.1 km. So for
-the free-floating ebikes, a journey is an *observation*: the same physical bike
-at a new place at a new time. Those are the near-white marks with a coloured
-tail, the brightest thing on the panel.
+**The silhouette is measured. The gold line is estimated.** They are not the
+same kind of number and everything about the panel is arranged so that nobody
+can mistake one for the other.
 
-**The dim field is inferred, and the panel says so.** Docked bikes have no
-per-bike record in GBFS at all — `station_status` is counts and nothing else,
-and `ebikes_at_stations.json` currently returns zero stations — so for the other
-~2 700 bikes the panel has only how the counts changed between two snapshots ten
-minutes apart. The city is cut into forty bands of distance from downtown; the
-running sum of their net changes is the number of bikes that **had to** cross
-each distance, which follows from arithmetic and not from a model; and each dim
-dot is one bike of that net displacement carried from an emptying band to a
-filling one along the **least-total-displacement matching** (the one-dimensional
-optimal transport coupling, which never claims a bike went further than it had
-to; matching at random would give the same flux and a great deal more apparent
-traffic, and the extra would be invention). Before any of that the imbalance is
-removed — the docked fleet is not closed, bikes leave it for the kerb and for
-vans — by spreading the residual across the bands in proportion to how many docks
-each has, which is an assumption, is stated in the code, and is a couple of bikes
-a band on a typical ten minutes.
+Bay Wheels publishes a monthly CSV of every trip taken — start time, end time,
+which dock at each end — at
+`https://s3.amazonaws.com/baywheels-data/YYYYMM-baywheels-tripdata.csv.zip`,
+keyless, about 20 MB zipped a month. That is a *census*, and the silhouette
+comes out of it. The live GBFS feed publishes **no trips at all**: it is a
+snapshot of how many bikes are in each dock right now. Everything the panel
+knows about today comes from differencing those counts every ten minutes, which
+sees a **floor** on movement and not a trip count — two riders swapping a dock
+inside one window cancel out, a rebalancing van looks like fifteen riders, and
+the several hundred free-floating ebikes that never touch a dock are invisible
+to it entirely.
 
-The two are separated three ways so nobody has to read a legend to see that they
-are different: the observed marks are **brighter**, they have a **longer trail**,
-and they fly in a **lane of their own** eleven rows above the terrain while the
-inferred field hugs it. The legend then says it in words anyway:
+Putting those two on one axis and printing "+12% vs a typical Monday" would
+claim a commensurability nobody had established. Three ways out were available:
 
-    SEEN▮ 298 OF 602 FREE EBIKES        IN▮ OUT▮ REST FROM DOCK COUNTS - NOT TRIPS
+1. **Plot both in absolute trips and print the percentage anyway.** Rejected:
+   the percentage would be a made-up figure with two significant digits.
+2. **Normalise both to their own peak and compare shape only.** Honest, and
+   shape is most of what was asked for — but today's own peak is not known
+   until the day has ended, so at nine in the morning the normalisation has
+   nothing to divide by, and every substitute reintroduces the assumption it
+   was meant to avoid. Rejected on mechanics rather than on principle.
+3. **Calibrate the estimator against the archive and disclose the calibration
+   on the panel.** Chosen.
 
-and the caption beside the headline repeats `NET FLOW - NOT TRIPS`, with a
-ladder of shorter forms — `REST FROM DOCK COUNTS - NOT TRIPS`, `FROM DOCK
-COUNTS - NOT TRIPS`, `NOT TRIPS` — so the caveat is the last thing a narrow panel
-drops rather than the first. (There are no commas anywhere on this panel:
-`defcon.py`'s 3×5 font has no comma glyph and silently draws a space for one, so
-the first render read `NET FLOW  NOT TRIPS` and looked like a typesetting bug.
-The punctuation is hyphens by choice.)
+**The calibration is measurable because the archive contains both halves of
+it.** Every trip in the census can be replayed as the two dock-count changes it
+would have caused — minus one at the dock it left, when it left; plus one at the
+dock it reached, when it reached it — so the estimator can be *run on the
+census*, bucket by bucket, and its output compared with the true number of trips
+in the same bucket. Over 92 days in May, June and July 2026:
 
-**Privacy, which was a decision and not boilerplate.** The GBFS spec rotates
-`bike_id` to prevent exactly what `name` makes possible again, and this panel
-hangs on a wall in a public makerspace. So the printed number is hashed in the
-fetcher the moment it is read and never reaches a variable that is stored; the
-tokens live only in `loose_base`, which holds **one** snapshot and is overwritten
-every pass; and **no identifier of any kind enters the rolling twelve hours**.
-The record therefore cannot link a bike across more than a single ten-minute
-interval however long the fetcher has been running — there is no accumulating
-trip history in it to obtain. What survives into the history is a pair of
-positions on the panel's distance axis, rounded to 100 m, with no way back to
-which bike made it. The hash is not itself the control and is not claimed as one:
-six-digit bike numbers are a small enough space to enumerate, so somebody holding
-a record could recover the current snapshot's numbers — which the public feed
-already gives them. The control is that history carries nothing. Nothing on the
-panel is a bike number. A viewer sees traffic, never a bike they could go and
-look for. `scripts/test-bikes.py` asserts all of that against the serialised
-record, including that no `NNN-NNN` string survives anywhere at any depth.
+    true trips / dock-count moves = 1.83   (median day; 1.72 to 1.94, p10-p90)
 
-**What is deliberately not drawn.** In four minutes about nineteen ebikes vanish
-from the feed and thirteen appear. Vanishing usually means the bike was docked or
-picked up by a van; appearing means undocked or released, or a rental ending.
-They are journey endpoints with one end unobservable. They are counted in the
-record — `hist.gone` and `hist.came` — and never drawn, because a dot appearing
-out of nothing reads as a bike arriving from somewhere, which is the one claim
-that cannot be made. Nineteen and thirteen against two observed movers is also
-the honest scale of what this feed hides.
+varying by hour of the day from about 1.30 at four in the morning to 2.21 at
+five in the afternoon — busy hours cancel more inside a ten-minute bucket, and
+the free-floating share moves with the hour too. The gold line is the live
+estimator multiplied by that hour-of-day factor. **The panel prints the
+factor:**
 
-**Coverage, stated on the panel.** The comets are the free-floating ebike fleet,
-about 620 bikes, not the 383-dock system and not the ~2 700 docked bikes. The
-legend gives both numbers.
+    11711  TRIPS TODAY                              USUAL FOR A MONDAY
+           EST FROM DOCK COUNTS X1.7        SHADED - 13 RECENT MONDAYS
 
-**The headline is a floor.** It counts docked bikes that changed place: the sum
-of |change| over every station, halved, because a bike ridden from one dock to
-another shows up as minus one at one end and plus one at the other. Measured on
-the live feed at ten on a Monday night: 88 gross changes in five minutes, which
-is 528 an hour; the peaks are four figures. It is a lower bound three ways over —
-two riders cancelling inside one ten-minute window are invisible, a bike left
-loose at the kerb is a departure with no arrival, and a rebalancing van moving
-fifteen bikes at once is indistinguishable from fifteen riders. It is the biggest
-honest number this feed contains and the one somebody can read in two seconds,
-which is why this demo is in the SPARSE set.
+`X1.7` is the effective multiplier over the slots actually measured so far.
+Somebody who reads that line knows precisely how much of the number is
+measurement and how much is arithmetic, which is a better disclosure than an
+error bar they have no way to check.
 
-**Why not a map, and why not a second `winds`.** `winds` is already a particle
-field over a map of this bay, and the worst outcome of this rewrite would have
-been two panels that look the same from across the room:
+**There is deliberately no percentage on the panel, and this is the part worth
+arguing about.** The 5.9% figure above is the spread of the calibration measured
+*by simulating the estimator on the archive*, not by comparing live GBFS against
+the archive — nobody has months of paired snapshots, so that comparison cannot
+be made yet. The live estimator sees things the simulation cannot: rebalancing
+vans, bikes going out of service, a one-minute feed sampled every ten. So 5.9%
+is a **floor** on the real error, not the error.
 
-| | `winds` | `bikes` |
-|---|---|---|
-| field | smooth and continuous | discrete, sourced and sunk at fixed points |
-| ground | full-bleed colour wash, filled sea and land | near-black, a dot constellation, a dim terrain band |
-| marks | streaks everywhere, always present | dots that arrive in bursts and fade out, plus a few bright comets |
-| colour | wind speed | direction, and what that direction means socially |
-| time | sweeps *forward* through a forecast | sweeps *backward* through the observed past |
-| chrome | a speed ramp along the bottom | one legend row and a one-row scrub bar |
+Against that, the thing being compared barely moves: the middle half of thirteen
+Mondays' daily totals is within about **3%** of the median. The estimator's
+uncertainty is roughly twice the signal a percentage would be reporting.
+Printing "+12%" would be reporting noise to two digits. So the panel prints a
+**verdict word** — `BUSIER THAN USUAL`, `QUIETER THAN USUAL`,
+`USUAL FOR A MONDAY` — and only leaves the middle verdict when today is outside
+the typical range *widened by the calibration's own uncertainty*, floored at ten
+per cent. On an ordinary day it says the ordinary thing, which is the correct
+output and not a failure of nerve.
 
-A map would have been wrong on its own merits too. Measured off
-`station_information.json`, San Francisco's 383 docks are a blob 11.9 km by
-12.4 km — aspect ratio 0.96, i.e. square. On a panel five times wider than it is
-tall, a map of that spends three hundred columns saying the city is square and
-puts a Nob Hill dock two pixels from one at the foot of it. Distance from
-downtown is the one spatial variable this data actually varies along, and putting
-it on the long axis buys 320 columns over 12 km — 37 m a column.
+The one end-to-end check that *can* be made was made: on a live record from a
+Monday night, the estimator plus calibration produced 33 trips over ten measured
+minutes against 23 for the same ten minutes in the archive — a factor of 1.4 on
+a sample of ten minutes, which is the right *size*, and that is all a sample
+that small can establish. `scripts/test-bikes.py` runs the check against
+whatever is in the live cache and fails outside 0.4 to 2.5, because it is
+looking for a factor of ten and not a few per cent.
 
-**Gravity is the other axis because gravity is the explanation.** Bikes roll
-downhill for free and have to be pedalled, or trucked, back up, which is why the
-fleet drifts to sea level every day and why the operator runs vans at all. The
-two axes are the two forces on the system: the social pull of downtown and the
-one it is fighting. The terrain is the 25th-to-75th percentile of dock height in
-each band with the median as the line the swarm rides — the spread is drawn
-rather than hidden, because at four kilometres out the city contains both the
-Mission flats and Buena Vista Park and one line would be a lie about that. The
-scale is linear, not the square root the hillside version needed: on a rank axis
-half the docks were under 21 m and had to be stretched, but on a distance axis
-the median profile runs 3 m at the waterfront to about 90 m at the crest and
-spreads across the rows on its own.
+#### How the silhouette was computed
 
-**The docks are quiet and only the failures are loud.** The hillside version put
-a diverging amber-to-blue occupancy ramp on every dock; with a swarm moving over
-it, three hundred coloured dots competed with the thing you are meant to watch.
-So the ramp's own principle — that the healthy middle should be the dimmest part
-of it — is taken to its limit: an ordinary dock is one dim slate pixel, a dry one
-is two amber pixels, a jammed one is a pale blue pixel. Amber is spent in exactly
-one place on this panel. The undocked ebikes are also a stipple along the plinth
-under the landscape, binned on the same distance axis.
+`demos/bikes-typical.npz`, 43 kB, baked offline and committed the way
+`adsb-coast.npz` and `bikes-terrain.npz` are:
 
-**Restraint, because the brief for this rewrite was a compelling picture of real
-data and not an instrument.** An earlier draft carried a ten-row bar chart of the
-last twelve hours along the bottom, with a bar per bucket, signed by direction.
-It read beautifully and it was the wrong thing to spend a sixth of the panel on —
-the replay *is* the time axis, and the commute surges in the swarm itself.
-Removing it gave the landscape 51 rows instead of 40, which is the difference
-between a chart with dots on it and a place with weather in it. What is left is a
-header, one headline, one legend row and `goes`'s one-row scrub bar.
+    $ python3 bikes.py --bake-typical                    # last 3 whole months
+    $ python3 bikes.py --bake-typical 202605 202606 202607
 
-**The source, and being polite to it.** GBFS, keyless and with no signup, at
-`gbfs.lyftbikes.com/gbfs/en/` — `gbfs.baywheels.com` 301-redirects there, so the
-fetcher uses the destination directly. Three files a pass:
-`station_information.json` (348 kB, near-static), `station_status.json` (243 kB,
-regenerated every minute) and `free_bike_status.json` (206 kB). 790 kB every ten
-minutes is 1.3 kB/s averaged, about half what `quake` costs. Ten minutes is also
-exactly the history bucket, so one pass is one difference; sampling faster would
-lower the floor the headline represents and cost a public server more, and ten
-minutes is where those two arguments met. The TTL is half an hour.
+Three monthly CSVs (1.5 M trips, 66 MB of zip, about ten seconds), cropped to
+San Francisco by the start coordinate against the same bounding box `ftdata.py`
+crops the live feed with — Bay Wheels is one system covering four separated
+cities and San Jose's commute is not this wall's. 92 dates come out, 13 or 14 of
+each weekday, 514 000 SF trips a month.
 
-**The record, and what it costs a Raspberry Pi.** **29.8 kB** at full stretch —
-twelve hours, 72 buckets — against 13 kB on a cold cache with the arrays and no
-history. For scale, `goes` keeps a 3.5 MB sidecar. The shape:
+The asset stores two raw matrices per weekday, one row per date and 144
+ten-minute columns: the trips that happened, and what the estimator would have
+reported. Raw counts rather than percentiles, so that everything on the panel
+can be re-derived and argued with, and because a cold-started panel needs sums
+over an arbitrary subset of the day.
 
-    dist_m, elev_m, fill_pct, free_docks, open   383 ints each, sorted by distance
-    loose_bins                                   40 ints
-    hist.t / mov / dt / seen / gone / came        72 numbers each
-    hist.flow                                    72 x 40 ints   <- 9 kB, the bulk
-    hist.trk                                     72 x [from, to, ...] in 100 m units
-    base.sid / at / bikes                        2298 chars + 383 ints
-    loose_base.k / lat / lon                     ~620 x (8 chars + 2 ints)
+The band is the **10th to 90th percentile across the dates of that weekday**,
+after each date is smoothed with a 30-minute centred mean. Both of those are
+drawing decisions as much as statistical ones, and both went the other way
+first. The quartiles were tried and are *invisible*: the middle half of thirteen
+Mondays is within 3% of the median at the morning peak, which on a 40-row chart
+is a band one pixel high that reads as a rendering artefact. And without the
+smoothing the band is mostly Poisson noise — a single ten-minute bucket of a
+single Monday is a couple of hundred trips at the peak and a dozen at four in
+the morning, so its sampling noise is comparable to the day-to-day variation the
+band exists to show. Smoothing costs the morning peak about 2% of its height,
+which is a smaller lie than a band twice as wide as the truth. What is left is a
+crust two rows deep at the morning peak and six in the middle of the afternoon,
+which is itself a true statement about when this city is predictable.
 
-The flow is binned to forty bands *in the fetcher* rather than kept per station,
-which is the one place this record departs from the house rule that binning is a
-drawing decision: 383 numbers per ten minutes for twelve hours is 55 000 of them,
-and forty is already finer than the shortest real feature in the field. The
-per-station arrays stay per-station, because how to draw a dock is still a
-drawing decision.
+Public holidays, Bay to Breakers and rainy days are all left in. Thirteen dates
+a weekday is too few to identify outliers without also removing real variety,
+and a 10-to-90 band is exactly the right instrument for absorbing one odd Monday
+in thirteen.
 
-`base` and `loose_base` are the only things in the payload that are state rather
-than observation: the snapshots the *next* pass differences against. Station
-identity is six hex characters of SHA-1 per station id — 2.3 kB, against 14 kB
-for the raw UUIDs — and matching on that hash rather than on array position is
-what makes a station being installed, removed or renumbered cost nothing.
-Position matching would silently shift every station past the new one and invent
-a citywide flow out of an insertion. Both live in the record and not in a
-`store_blob` sidecar because sidecars live in tmpfs and a reboot would then cost
-a bucket every time. For the same reason this is the one product in `ftdata.py`
-deliberately **not** `volatile`.
+The parse was sanity-checked against what everybody already knows, and the
+checks are in the test script: weekdays must peak between seven and nine and
+again between four and six, with both peaks at least 1.5× the noon rate;
+weekends must be a single hump between eleven and four with eight in the morning
+under 60% of it. A CSV parsed as UTC instead of local would put the morning peak
+at one in the morning and every one of those fails.
 
-**Four ways the differencing declines, all benign, all tested.** No baseline —
-the first pass after a cold start or a version change — gives one bucket with no
-flow in it. Two passes closer together than four minutes decline *and keep the
-old baseline*, so the next ordinary pass still gets a full-length difference
-rather than inheriting a ten-second one; replacing the baseline there is the bug
-that would make a doubled pass erase a good interval. More than forty minutes
-apart declines and resets, because by then the two snapshots straddle enough of a
-commute that "net change" stops describing a flow. A clock that jumps backwards —
-a Pi with no RTC getting NTP for the first time after boot — declines and resets
-rather than storing a negative interval. The series itself is keyed on the
-absolute ten-minute bucket, trimmed to twelve hours and 80 entries on every
-write, and a record written by a version that stored different columns fails the
-length check and starts fresh rather than being extended into a shape the demo
-would misread. The same three windows govern the ebike tracks.
+#### The record grew a day
 
-**Cold start is a designed state and will be the first thing the wall shows.**
-The flow needs two snapshots, so a wall that has just booted has none. It draws
-the city, the docks and their occupancy, and says `LEARNING FLOW` with `NEEDS TWO
-FETCHES - FIRST IN 8M` under it, and no swarm and no rate at all. As buckets
-accumulate the replay window grows with them: `REPLAY OF LAST 40M`, then `2H`,
-then the full `12H` after half a day, and the header prints `12/72` beside the
-age while the window is materially short — `goes`'s convention and its ninety per
-cent threshold, because one or two missed passes out of seventy is the feed
-having an ordinary day and is not worth a number on the wall.
+`ftdata.py`'s `baywheels` product already accumulated a rolling twelve hours,
+which is what the previous design replayed and is deliberately not longer. A
+panel drawing *today* needs something else: every ten minutes since local
+midnight, whether that is one hour ago or twenty-three. So the record gained a
+`today` block — 144 slots from local midnight carrying two scalars each, `mov`
+and `dt`, about 1.5 kB of JSON, reset when the local date rolls over. It is
+local midnight and not UTC because the thing being drawn is a day as somebody
+who rides a bike experiences one.
 
-**Three data states, and a fourth that is worse than stale.** Past the half-hour
-TTL the panel still draws with the age and `STALE` in red. Past `--max-age` (six
-hours) it is refused outright and gets a card naming the age: a confident swarm
-of this morning's flow under an evening clock is the one lie this panel could
-tell. No record, half a file, arrays of mismatched length and a record sorted the
-wrong way round all get the same card and the command that fixes it. An hour that
-was never fetched draws `NO DATA / THIS STEP WAS NEVER FETCHED` rather than being
-replayed as a quiet one.
+`dt` is not redundant, and it is where the one subtle bug in this panel lived. A
+missed pass makes the next difference forty minutes long instead of ten, and
+charging that to the single slot it was written into draws a tower with three
+holes beside it — so the demo spreads the measurement across the four slots it
+actually describes, at the rate it measured, and counts its trips exactly once.
 
-**Frame budget.** The landscape, the docks, the header, the legend and *all
-twelve captions* are rasterised once in `build()` — the last of those is `goes`'s
-rule, that a caption belongs to the moment it describes, and it is worth
-following: doing it on the step change instead cost a 0.3 ms spike twelve times a
-cycle, which is nothing here and six times the mean on the Pi, and is exactly the
-shape of thing that becomes a dropped frame in a transition. `render()` copies
-one frame, blits the 19-row caption box, and advances the two swarms through five
-passes of about fifteen numpy calls each on arrays of a few hundred. Measured
-here over 2000 frames of a full twelve-hour replay with the peaks saturating the
-440-particle pool: **mean 0.098 ms, p50 0.112, p95 0.131, p99 0.214**, worst
-frame 0.406. `build()` is 5.7 ms. At the ~60× desktop-to-Pi ratio measured across
-this tree that is about 6 ms mean and 8 ms at p95 against a 50 ms budget at
-20 fps. `render` is a pure function of `t` with `--reload 0` and the test script
-asserts it against ten awkward values of `t`; with the default `--reload 300` it
-asks the wall clock whether to re-read the cache, exactly as `caiso` does.
+The bug was the other direction. Coverage was first tracked in whole **slots**,
+which is right only if the fetcher is on its ten minute timer; run it every five
+and every slot is marked fully observed while only half of it was. Today's five
+minutes then get compared against the archive's ten and the headline is silently
+halved. It was caught by the live check above coming out at 0.83 when the
+arithmetic said 1.4. Coverage is now counted in **seconds**, the comparison
+weights each historical slot by the fraction of it that was actually watched,
+and both are asserted in the test script. It is the kind of error this whole
+panel is supposed to be careful about, and it still got in once.
 
-Two tricks paid for most of it. The swarm is written through a single unmasked
-scatter: a particle outside its own flight window comes out of the fade envelope
-at brightness level zero, which is black in the palette, and its target index is
-multiplied by that same zero — so it writes black to pixel (0, 0), the corner of
-the header, which is black anyway. No mask, no branch, no compaction. And the
-caption is a halo blit rather than a clearance check: the one-pixel border around
-each stroke is darkened before the stroke is drawn, which lets text sit over the
-terrain instead of being dropped whenever the two would meet. The first version
-checked the terrain under each line and gave way, which meant the caveat vanished
-on exactly the days the panel was busiest.
+**One real bug was found and fixed on the way in.** `_bikes_flow()` returned
+`int(mov) * 2` where `mov` was already the sum of |change| over the stations —
+which already counts both ends of every move. The record's own `units` block
+says "/2 is bikes moved" and the old demo dutifully halved it, so **every
+bike-movement figure this product has ever put on the wall was exactly twice the
+truth**. Fixed in the fetcher rather than compensated for in the demo, because
+the unit the record documents is the unit it should carry. Buckets written by
+the old code age out of the rolling history within twelve hours.
 
-**What was hard.** Four things. The axis: it took measuring the dock cloud
-(11.9 by 12.4 km) to be sure a map was wrong rather than merely awkward, and the
-choice of distance-from-the-Ferry-Building over a PCA principal axis or altitude
-rank is the whole design. Deciding what an inferred particle is allowed to mean;
-the monotone transport coupling is the answer that lets the field be drawn
-without claiming anything the counts do not contain, and `scripts/test-bikes.py`
-asserts its direction three separate ways — off the arithmetic, off the baked
-endpoints, and off the rendered pixels by counting hues while a synthetic city
-empties its hills into its downtown, then repeating the whole measurement with
-every count negated and requiring the answer to come out the other way. Third,
-the identifier question, which had to be answered with two live probes rather
-than from the spec, because the spec says `bike_id` rotates and is silent on
-`name`. And fourth, a test-harness bug worth writing down: a synthetic record
-dated eight in the morning was also *fetched* at eight in the morning, so on an
-evening test run the demo refused it as thirteen hours old and every direction
-check silently had nothing to measure. The test script now separates the two
-clocks and says why.
+#### Four states, all deliberate
 
-**One disclosure about the screenshot.** The landscape, the 383 docks, their
-occupancy and the header counts are a real Bay Wheels snapshot. The twelve hours
-of flow and ebike tracks under it are synthesised, because the series accumulates
-ten minutes at a time and this panel was written in an evening; the live fetcher
-was verified end to end and did produce real observed tracks — one ebike seen
-moving from 3.7 km to 4.4 km out over five minutes, with 587 ebikes present in
-both snapshots, 14 gone and 5 appeared. The first real half-day appears on the
-wall twelve hours after the fetcher starts; before that the panel draws the
-cold-start state described above, honestly.
+**Cold start is the interesting one.** The silhouette is baked, so it is on the
+panel in the very first frame of a fresh install — there is no version of this
+demo that shows an empty rectangle, which is a nice property for a data panel to
+have. The gold line is the opposite: it starts empty at local midnight and fills
+in as the day goes, and on the day the fetcher is first started it begins only
+from when it started. Every slot nobody looked at is a null in the record, so
+the panel knows the difference between "nothing happened" and "nobody was
+looking": it draws the line only where it was looking, leaves a **gap** where a
+fetch was missed rather than interpolating a measurement that was not made, and
+changes the headline from `TRIPS TODAY` to `TRIPS SINCE 2:40P`. The comparison
+follows it — today is only ever compared against the typical day *over the same
+slots* — so a wall that has been up for two hours makes a two-hour comparison,
+and under two hours it says `TOO EARLY TO SAY` rather than guessing.
 
-    python3 ftdata.py --once --only baywheels   # twice, ten minutes apart
+**Stale.** Past the half-hour TTL the header says `STALE` with the age and the
+gold line simply stops where the data stopped while the now-rule keeps moving,
+so the gap between the two is the panel telling you. That is deliberately not a
+refusal, unlike the previous design's: this chart's whole subject is the day so
+far, and a day so far that ends an hour early is still true.
+
+**Yesterday.** A record whose day does not match the local date draws no line at
+all and the headline says `LAST DATA 8/9`. A day-shaped picture of the wrong day
+is the one lie this panel could tell.
+
+**Absent.** No live record but the asset present: the silhouette, the axis and
+the now-rule are drawn, the headline says `NO LIVE DATA` and the command that
+fixes it, and there is nothing on the panel that could be mistaken for today.
+Only a missing *asset* gets the plain no-data card.
+
+#### Why it does not look like caiso
+
+`caiso` is also one day across 320 columns with now marked, and the two had to
+be tellable apart from across the room. They are, three ways. caiso is
+**full-bleed** — a stacked area of five saturated fuels filling the panel edge to
+edge and top to bottom, whose subject is the *composition* of a total. This is
+**mostly black**: one dark blue silhouette that touches the top of the chart for
+about twenty minutes a day, one gold line, and nothing else, and its subject is
+*one quantity against its own history*. caiso is five hues at once; this is two,
+and one of them is nearly the background. And caiso draws one day where this
+draws two at the same time, which is the entire reason for the
+silhouette-plus-line form. The shared vocabulary — a day axis, a now-rule, a
+breathing pulse — is deliberate; that is the house style for a day chart in this
+tree and it should be the same in both.
+
+#### Motion, and the frame budget
+
+Three things move, none of them decorative. Today's line **draws itself in**
+over 1.6 seconds when the segment starts, wiping over a chart that already has
+the silhouette on it rather than over a black hole. A **light runs along the
+line** every 3.6 seconds, which is the one animation that says what the line is
+— the day, moving. And a short pulse runs up the now-rule, which is the only
+thing guaranteed to move in *every* frame; both are driven by the segment's own
+`t` rather than the wall clock, so a test harness rendering a hundred frames in
+a millisecond sees the same animation the wall does.
+
+Everything else is rasterised once per cache read: the silhouette, the crust,
+the line, the gridlines, the axis, the header and all five strings of the
+headline strip, including the ladder of shorter forms each of them shortens
+through. `render()` copies one frame, writes a comet of two dozen pixels and
+draws the now-rule — about seven numpy calls on top of the copy. Measured here
+over 700 frames: **mean 0.006 ms, p95 0.006 ms, worst frame 0.014 ms**, with
+`build()` at 2.5 ms. At the 50–60× this tree measures desktop-to-Pi that is well
+under a millisecond on the wall against a 50 ms budget; the full-frame copy is
+memory-bound rather than clock-bound so call it 1–1.5 ms, which is still an
+order of magnitude of headroom.
+
+`render()` takes the present moment from the wall clock, exactly as `caiso`
+does, so the now-rule is really now. With `--reload 0` it is a pure function of
+`t` and the test script asserts that, because a demo that accumulates state
+between calls desyncs from a scheduler that builds segments ahead on a worker
+thread.
+
+#### The other thing that had to be said in hyphens
+
+`defcon.py`'s 3×5 font has no `=` glyph and silently draws a space for one, so
+the first render of the note under the headline read `SHADED   13 RECENT
+MONDAYS` and looked like a typesetting fault. It is `SHADED - 13 RECENT MONDAYS`
+by necessity, which is the same trap the previous design hit with commas. The
+axis labels and the scale tick were also drawn in the panel's faintest colour on
+the grounds that they are small print; that colour peaks at 64 of 255, which is
+under what a 3×5 glyph needs to survive being looked at from ten feet away.
+Small print that has to be read is still print.
+
+The screenshot above is the panel driven by a real Monday from the archive,
+played back through the live code path at ten to six in the evening — the wall's
+own record covers only the hours since the fetcher last started, and a
+screenshot taken at half past eleven at night is a flat line in a corner. The
+test script builds the same kind of record to assert the picture in pixels.
+
+    python3 ftdata.py --once --only baywheels     # twice, ten minutes apart
     python3 bikes.py --host 127.0.0.1
-    python3 bikes.py --no-seen                  # the inferred field alone
-    python3 bikes.py --hours 6 --step 1800      # finer, six hours
-    python3 bikes.py --cycle 90 --particles 700 # slower and busier
-    FT_DATA_CACHE=/tmp/empty python3 bikes.py   # the no-data card
+    python3 bikes.py --at '2026-08-10 08:40'      # pretend it is the peak
+    FT_DATA_CACHE=/tmp/empty python3 bikes.py     # the typical day alone
     python3 scripts/test-bikes.py
 
 ### docks

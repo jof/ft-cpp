@@ -604,9 +604,9 @@
       "kind": "py",
       "name": "bikes",
       "module": "bikes",
-      "seconds": 35.0,
+      "seconds": 26.0,
       "fps": 20,
-      "ms": 6.0,
+      "ms": 1.2,
       "enabled": true,
       "solo": false,
       "options": {
