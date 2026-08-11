@@ -93,6 +93,19 @@ button:hover { background: var(--card-hi); }
 button:active { transform: translateY(1px); }
 button[aria-pressed="true"] { border-color: var(--live); color: var(--live); }
 
+/* ---- the group buttons ------------------------------------------------ */
+/* Radio, not switches: these are modes and only one can be on. They wrap onto
+   another line rather than scrolling sideways -- a row that scrolls hides the
+   option somebody was looking for and gives no hint on a phone that it did. */
+.groups {
+  display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center;
+}
+.groups button { padding: 7px 12px; min-height: 36px; font-size: 14px; }
+/* role=radio, so aria-checked rather than the aria-pressed the toggle buttons
+   above use; same look, because to a thumb it is the same kind of "this one". */
+.groups button[aria-checked="true"] { border-color: var(--live); color: var(--live); }
+#groupNote { color: var(--dim); font-size: 12px; }
+
 /* ---- the rotation ----------------------------------------------------- */
 #grid {
   display: grid; gap: 12px; margin-top: 14px;
@@ -241,9 +254,16 @@ dialog::backdrop { background: rgba(4, 6, 10, .66); }
     <button id="btnPause" aria-pressed="false">Pause</button>
     <button id="btnNext">Skip &rsaquo;&rsaquo;</button>
     <span class="gap"></span>
+    <!-- "Enable all" and the All group button do the same thing on purpose:
+         one is the bulk switch that has always been here, the other is the
+         neutral position of the radio row, and each is where you look for it. -->
     <button id="btnAllOn" class="minor">Enable all</button>
     <button id="btnAllOff" class="minor">Disable all</button>
   </div>
+  <!-- Themed sets, from rotation-groups.json by way of /api/schema. Empty and
+       hidden where there is no group file, so an installation without one is
+       exactly as it was. -->
+  <div class="groups" id="groupBar" role="radiogroup" aria-label="Themed set" hidden></div>
   <!-- The display itself rather than the rotation: this talks to ft_server via
        ftctl, not to the scheduler. Hidden until /api/display answers, so the
        panel is unchanged when served standalone on :8081 or before nginx is
@@ -290,6 +310,7 @@ dialog::backdrop { background: rgba(4, 6, 10, .66); }
 const grid = document.getElementById("grid");
 const errBox = document.getElementById("err");
 const bar = document.querySelector("#progress i");
+const groupBar = document.getElementById("groupBar");
 
 let state = null;
 let cards = new Map();          // name -> {el, img, sw, badge}
@@ -297,6 +318,12 @@ let cards = new Map();          // name -> {el, img, sw, badge}
 // Empty until /api/schema answers, which is what decides whether a card gets
 // a settings button at all, so the cards are rebuilt when it lands.
 let schema = {};
+// [{key, label, description, count}] and key -> button, read once with the
+// schema. Empty where the scheduler has no group file, which is what leaves
+// the row off the page entirely.
+let groups = [];
+let groupBtns = new Map();
+let groupNote = null;
 // The server publishes once a second; the progress bar is advanced locally in
 // between so it moves smoothly instead of stepping.
 let localElapsed = 0, localDuration = 1, lastTick = performance.now();
@@ -321,6 +348,57 @@ async function post(op, extra) {
     if (!r.ok) say("command failed: " + (await r.json()).error);
     else { say(""); refresh(); }            // the command lands next frame
   } catch (e) { say("offline"); }
+}
+
+/* ---- the group buttons ------------------------------------------------ *
+ * Themed sets: "just the data ones", "just the movie ones", "just the Sequoia
+ * Fabrica ones". Selecting one enables its members and disables everything
+ * else, in a single command, so the wall changes at the top of one frame
+ * rather than flickering through a half-applied set.
+ *
+ * Radio-style, because the modes are exclusive. Membership is not -- tide is
+ * honestly both a data panel and a San Francisco one, and lives in both --
+ * which is exactly why the page does not try to work out which group is on
+ * from the cards. The scheduler answers that, over the state, and answers
+ * null once the live set matches none of them.
+ */
+
+function buildGroups(list) {
+  groups = list;
+  groupBtns.clear();
+  groupBar.textContent = "";
+  groupBar.hidden = !list.length;
+  if (!list.length) return;
+  for (const g of list) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.setAttribute("aria-checked", "false");
+    b.textContent = g.label;
+    b.title = g.description + (g.count ? " — " + g.count + " entries" : "");
+    // No confirmation, unlike "Disable all" next door. That one is a chore to
+    // undo from a phone; this is one tap, it is the entire point of the row,
+    // and the way back is the first button in it.
+    b.addEventListener("click", () => post("select", {group: g.key}));
+    groupBar.append(b);
+    groupBtns.set(g.key, b);
+  }
+  groupNote = document.createElement("span");
+  groupNote.id = "groupNote";
+  groupNote.textContent = "custom mix";
+  groupNote.hidden = true;
+  groupBar.append(groupNote);
+}
+
+function paintGroups(s) {
+  if (!groups.length) return;
+  const active = s.group == null ? null : s.group;
+  for (const [key, b] of groupBtns)
+    b.setAttribute("aria-checked", String(active === key));
+  // Somebody has flipped a card since a group was chosen, so the live set is
+  // none of these any more. Leaving the last button lit would be claiming a
+  // mode the wall is not in; say what is actually true instead.
+  groupNote.hidden = active !== null;
 }
 
 /* ---- the cards -------------------------------------------------------- */
@@ -424,6 +502,8 @@ function paint(s) {
     if (c.cog) c.cog.classList.toggle("custom", !!e.customised);
   }
 
+  paintGroups(s);
+
   document.getElementById("nowName").textContent = s.now.name || "—";
   document.getElementById("nowPos").textContent =
     s.now.position >= 0
@@ -466,10 +546,15 @@ let fields = [];                // [{o, el}] for the form currently in it
 async function loadSchema() {
   try {
     const r = await fetch("/api/schema", {cache: "no-store"});
-    schema = (await r.json()).modules || {};
+    const j = await r.json();
+    schema = j.modules || {};
+    // The group row rides on the same fetch: it is fixed for the life of the
+    // daemon, so polling it every second would be a second of radio for an
+    // answer that never changes.
+    buildGroups(j.groups || []);
     paint.names = null;         // the cards were built without their buttons
     refresh();
-  } catch (e) { /* no editors, and everything else still works */ }
+  } catch (e) { /* no editors, no groups, everything else still works */ }
 }
 
 /* Effective settings: what the entry overrides, over the demo's defaults. */

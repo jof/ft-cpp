@@ -1,0 +1,166 @@
+{
+  "about": [
+    "Themed sets of rotation entries, for the group buttons in the ftsched",
+    "control panel. Selecting one enables exactly its members and disables",
+    "everything else, so somebody running an event can put the wall into a",
+    "mode in one tap instead of working down sixty-three switches.",
+    "",
+    "This is deliberately a separate file from the rotation. Groups are a",
+    "presentation concern: the same taxonomy should survive a different",
+    "running order, and a rotation file that is edited often should not carry",
+    "a field on every entry that only the web page reads.",
+    "",
+    "Membership is many-to-many. tide is honestly both a data panel and a San",
+    "Francisco panel, voxel is both a demoscene technique and a flight over",
+    "the Bay, and scroller is both a classic scroller and a sign that says",
+    "SEQUOIA FABRICA. Only the *selection* is one-at-a-time.",
+    "",
+    "Names that are not in the loaded rotation are skipped. That is what makes",
+    "this file safe to edit ahead of the demos it names, and safe to carry",
+    "across installations with different running orders. There is no 'all'",
+    "group here -- the scheduler synthesises it, so it cannot be broken by an",
+    "edit to this file.",
+    "",
+    "Order in the list is the order of the buttons on the page. Left to right,",
+    "roughly most-asked-for first; it has to fit across a phone."
+  ],
+  "version": 1,
+  "groups": [
+    {
+      "key": "data",
+      "label": "Data",
+      "description": "Live panels reading the outside world",
+      "members": [
+        "propagation",
+        "adsb",
+        "goes",
+        "caiso",
+        "sats",
+        "winds",
+        "quake",
+        "wx",
+        "ships",
+        "tide",
+        "swell",
+        "helicorder",
+        "stringline",
+        "bikes",
+        "bgp",
+        "sfmix"
+      ]
+    },
+    {
+      "key": "movies",
+      "label": "Movies",
+      "description": "Film and hacker-culture callbacks",
+      "members": [
+        "wopr",
+        "defcon",
+        "tron",
+        "sneakers",
+        "trench",
+        "fsn",
+        "esper",
+        "headroom",
+        "gibson",
+        "wardial",
+        "ansi"
+      ]
+    },
+    {
+      "key": "makerspace",
+      "label": "Makerspace",
+      "description": "Sequoia Fabrica's tools and its name",
+      "members": [
+        "console",
+        "knit",
+        "sewing",
+        "printer",
+        "lathe",
+        "wheel",
+        "laser",
+        "scope",
+        "splitflap",
+        "scroller",
+        "sf-tree",
+        "sf-tree-bounce"
+      ]
+    },
+    {
+      "key": "sanfrancisco",
+      "label": "San Francisco",
+      "description": "The city, its weather, its bay and its grid",
+      "members": [
+        "goldengate",
+        "karl",
+        "sunset",
+        "grove",
+        "voxel",
+        "sf-tree",
+        "sf-tree-bounce",
+        "wardial",
+        "tide",
+        "ships",
+        "quake",
+        "caiso",
+        "adsb",
+        "wx",
+        "swell",
+        "helicorder",
+        "stringline",
+        "bikes",
+        "sfmix"
+      ]
+    },
+    {
+      "key": "demoscene",
+      "label": "Demoscene",
+      "description": "The classic effects, and the machines they ran on",
+      "members": [
+        "fire",
+        "tunnel",
+        "starfield",
+        "metaballs",
+        "rotozoom",
+        "twister",
+        "water",
+        "cycle",
+        "floor",
+        "voxel",
+        "boing",
+        "scroller",
+        "fireworks",
+        "daliclock"
+      ]
+    },
+    {
+      "key": "games",
+      "label": "Games",
+      "description": "Arcade pixel art and things that play themselves",
+      "members": [
+        "pacman",
+        "pacman-ghosts",
+        "space-invaders",
+        "mario",
+        "nyancat",
+        "toasters",
+        "boing"
+      ]
+    },
+    {
+      "key": "algorithms",
+      "label": "Algorithms",
+      "description": "Simulations and automata working something out",
+      "members": [
+        "sort",
+        "wireworld",
+        "life",
+        "maze",
+        "slime",
+        "fireflies",
+        "chladni",
+        "scope"
+      ]
+    }
+  ]
+}

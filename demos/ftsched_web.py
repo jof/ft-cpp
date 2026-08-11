@@ -36,6 +36,12 @@ UI_FILE = os.path.join(_HERE, "ftsched_ui.html")
 # loop's command handler.
 OPS = {"jump": ("index",), "toggle": ("name", "on"), "all": ("on",),
        "next": (), "pause": (), "resume": (), "restart": (),
+       # One command, not an `all(off)` and a toggle per member: the whole
+       # group lands at the top of one frame, so the wall is never briefly
+       # showing half a mode. The payload is the group's key rather than a
+       # list of names, so the group file stays the only place membership is
+       # written down and a client cannot invent a set of its own.
+       "select": ("group",),
        # options is the whole set for that entry, not a patch, so an editor
        # that has been open a while cannot half-apply against a rotation that
        # moved under it. null means "back to what the rotation file says".
@@ -92,7 +98,12 @@ class Handler(BaseHTTPRequestHandler):
             # Primed at startup, so this is a dict walk and not a sweep of
             # imports on the request thread. Fetched once per page load and
             # then the editors open without a round trip.
-            self._json(200, {"modules": self.server.sched.schemas()})
+            # Groups ride along here rather than in /api/state: the list is
+            # fixed for the life of the process, so it belongs with the thing
+            # fetched once per page load and not with the thing polled every
+            # second. Which group is *active* does change, and is in the state.
+            self._json(200, {"modules": self.server.sched.schemas(),
+                             "groups": self.server.sched.groups_json()})
         elif path.startswith("/previews/"):
             self._preview(path[len("/previews/"):])
         else:
@@ -139,6 +150,17 @@ class Handler(BaseHTTPRequestHandler):
         if missing:
             self._json(400, {"error": "%s needs %s" % (op, ", ".join(missing))})
             return
+        if op == "select":
+            # Checked here as well as in the scheduler, exactly as configure
+            # is: an unknown key should come back as a sentence naming what
+            # there is, not be accepted and then dropped a frame later where
+            # only the journal sees it.
+            known = [g["key"] for g in self.server.sched.groups_json()]
+            if payload["group"] not in known:
+                self._json(404, {"error": "no group called %r; there is %s"
+                                          % (payload["group"],
+                                             ", ".join(known) or "none")})
+                return
         if op == "configure":
             # Checked here as well as in the scheduler so a typo comes back as
             # a sentence the editor can put under the field, rather than as a

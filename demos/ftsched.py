@@ -260,6 +260,102 @@ def pair_check(entries, fps, warn):
 
 
 # --------------------------------------------------------------------------
+# Themed groups.
+# --------------------------------------------------------------------------
+
+# Sets of entry names -- "the data panels", "the movie ones", "the Sequoia
+# Fabrica ones" -- so that putting the wall into a mode for an event is one tap
+# on a phone rather than sixty-three.
+#
+# In their own file, and not as a field on each rotation entry, for two
+# reasons. Groups are a presentation concern and the same taxonomy should
+# survive a different running order; and the rotation file is the one that gets
+# edited whenever a demo is added, so anything living there gets rewritten by
+# people who are not thinking about the panel.
+GROUPS_FILE = os.path.join(_HERE, "rotation-groups.json")
+
+# The way back. Synthesised rather than read from the file: "switch the whole
+# rotation on" is the one selection that must always exist and must always mean
+# the same thing, and leaving it out of the data means an edit to the group
+# file cannot take it away.
+ALL_GROUP = "all"
+
+
+class Group(object):
+    """A named set of entry names, resolved against one rotation.
+
+    `members` is what the file said; `names` is what this rotation actually
+    has. The two differ on purpose and in both directions: the file lists
+    demos that are not in every installation's running order, and it is
+    normally edited a few days before the demos it names exist. Anything
+    unrecognised is dropped here, once, at startup -- rather than at selection
+    time, where a name that has not landed yet would silently switch a slot of
+    the wall off and look like a bug in the button.
+    """
+
+    def __init__(self, key, label, description, members):
+        self.key = key
+        self.label = label
+        self.description = description
+        self.members = list(members)
+        self.names = frozenset()             # filled in by resolve()
+
+    def resolve(self, known):
+        self.names = frozenset(n for n in self.members if n in known)
+        return self
+
+    def to_json(self):
+        return {"key": self.key, "label": self.label,
+                "description": self.description, "count": len(self.names)}
+
+
+def load_groups(path, warn):
+    """Read the group file. A missing or unusable one is not fatal.
+
+    A wall playing without its group buttons is much better than a wall that
+    will not start, which is the same call ftsched_web.serve() makes about the
+    control server itself. The panel simply does not show the row.
+    """
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+        out = []
+        for g in doc["groups"]:
+            key = str(g["key"])
+            if key == ALL_GROUP:
+                raise ValueError("%r is reserved" % (ALL_GROUP,))
+            out.append(Group(key, g.get("label") or key,
+                             g.get("description") or "", g["members"]))
+        return out
+    except Exception as exc:
+        warn("ignoring unusable group file %s (%s)" % (path, exc))
+        return []
+
+
+def resolve_groups(groups, entries, warn):
+    """Bind each group to this rotation, dropping what it does not have."""
+    known = {e.name for e in entries}
+    kept, missing = [], 0
+    for g in groups:
+        missing += len(g.members) - len(g.resolve(known).names)
+        if g.names:
+            kept.append(g)
+        else:
+            # A button that would empty the wall. Refuse it here rather than
+            # having select() refuse it every time somebody presses it.
+            warn("group %s matches nothing in this rotation; dropping it" % g.key)
+    if missing:
+        # One line, not one per name. There are usually a few demos in flight
+        # that the group file already lists, and a paragraph of warnings at
+        # every restart is how people learn to skip the startup log.
+        warn("%d group entries are not in this rotation and were skipped"
+             % missing)
+    return kept
+
+
+# --------------------------------------------------------------------------
 # The steerable running order.
 # --------------------------------------------------------------------------
 
@@ -322,6 +418,46 @@ class Rotation(object):
                 self.all[0].enabled = True   # never leave it empty
                 changed = True
             return changed
+
+    def set_only(self, names):
+        """Enable exactly the entries named, and disable every other one.
+
+        The whole of what a group button does, and it has to be one operation
+        rather than an `all(off)` followed by a toggle each. That would be N+1
+        commands over N+1 frames, and the wall would spend a second showing a
+        half-applied group -- which is not a mode, it is a fault.
+
+        Names this rotation does not have are simply not found, which is what
+        lets the group file name demos that are not installed here. A set that
+        matches nothing at all is refused rather than applied: there would be
+        nothing left to play, and set_all() has the same rule for the same
+        reason.
+        """
+        with self.lock:
+            want = {e for e in self.all if e.name in names}
+            if not want:
+                return False
+            changed = False
+            for e in self.all:
+                on = e in want
+                if e.enabled != on:
+                    e.enabled = on
+                    changed = True
+            return changed
+
+    def enabled_names(self):
+        """The live set, as names -- what a group is compared against.
+
+        Names rather than entries because that is the unit a group is written
+        in, and because set_enabled() already moves every slot sharing a name
+        together, so no two entries with one name can disagree.
+        """
+        with self.lock:
+            return frozenset(e.name for e in self.all if e.enabled)
+
+    def all_enabled(self):
+        with self.lock:
+            return all(e.enabled for e in self.all)
 
     def configure(self, name, options):
         """Replace an entry's options. `options` None restores the file's.
@@ -596,9 +732,12 @@ class Show(mega.Show):
 
 class Scheduler(object):
 
-    def __init__(self, args, entries):
+    def __init__(self, args, entries, groups=None):
         self.args = args
         self.rot = Rotation(entries)
+        # Already resolved against `entries` by the caller, so nothing in here
+        # names a slot that does not exist and select() cannot half-apply.
+        self.groups = list(groups or [])
         self.commands = []                   # (op, payload), drained per frame
         self.cmd_lock = threading.Lock()
         self.state_lock = threading.Lock()
@@ -659,6 +798,15 @@ class Scheduler(object):
             if self.rot.set_all(on, keep=self.builder.entry_at(self.show.index)):
                 self.builder.invalidate_from(self.show.index + 1)
                 self.dirty.set()
+        elif op == "select":
+            if self._select(payload["group"]):
+                # Exactly what a toggle does, and for the same reason: only
+                # indices past the playhead move, so the effect on air plays
+                # out its slot even when the group it belongs to just went
+                # away. Cutting mid-segment because somebody chose a mode is a
+                # worse answer than the next forty seconds being the old mode.
+                self.builder.invalidate_from(self.show.index + 1)
+                self.dirty.set()
         elif op == "jump":
             if self.rot.jump(int(payload["index"]), self.show.index + 1):
                 self.builder.invalidate_from(self.show.index + 1)
@@ -710,6 +858,54 @@ class Scheduler(object):
             if position >= 0 and self.rot.jump(position, self.show.index + 1):
                 self.builder.invalidate_from(self.show.index + 1)
                 self.show.skip(t, self.args.transition)
+
+    # -- themed groups ----------------------------------------------------
+
+    def _select(self, key):
+        """Put the wall into one group, or back to the whole rotation."""
+        if key == ALL_GROUP:
+            return self.rot.set_all(True)
+        for g in self.groups:
+            if g.key == key:
+                return self.rot.set_only(g.names)
+        # The API checks this before queueing, so getting here means a client
+        # that talks to /api/command directly. Say so and carry on.
+        self.warn("select: no group called %r" % (key,))
+        return False
+
+    def active_group(self):
+        """Which group the live set is exactly, or None if it is none of them.
+
+        None is the honest answer as soon as somebody flips a single card: the
+        set on the wall is no longer any of these, and a button still drawn as
+        pressed would be claiming otherwise. The page shows nothing selected
+        and says the mix is custom, rather than showing a stale mode.
+
+        `all` is tested first, so a group that happened to list the entire
+        rotation would lose the tie -- which is right, since it is the same
+        selection under a more specific name that nobody chose.
+        """
+        if self.rot.all_enabled():
+            return ALL_GROUP
+        live = self.rot.enabled_names()
+        for g in self.groups:
+            if g.names == live:
+                return g.key
+        return None
+
+    def groups_json(self):
+        """The buttons, in file order, with `all` in front.
+
+        Static for the life of the process, so it is served from /api/schema
+        with the option schemas and fetched once per page load, not polled.
+        Only which one is *active* changes, and that rides in the state
+        snapshot.
+        """
+        if not self.groups:
+            return []                        # no file: the panel omits the row
+        return [{"key": ALL_GROUP, "label": "All",
+                 "description": "Everything in the rotation",
+                 "count": len(self.rot.all)}] + [g.to_json() for g in self.groups]
 
     # -- what the editor needs to know ------------------------------------
 
@@ -950,6 +1146,11 @@ class Scheduler(object):
                 "ready": (show.index + 1) in self.builder.ready,
             },
             "paused": show.paused,
+            # null once the live set stops matching any group exactly. Computed
+            # here rather than in the page so that every phone looking at the
+            # wall agrees, and because it is a handful of set comparisons once
+            # a second against work the snapshot is doing anyway.
+            "group": self.active_group(),
             "cycle_seconds": round(self.rot.cycle_seconds()),
             "rotation": self.rot.snapshot(),
             "health": {
@@ -1004,6 +1205,9 @@ def add_arguments(ap):
                     help="JSON rotation file (default: the built-in order)")
     ap.add_argument("--dump-rotation", action="store_true",
                     help="print the built-in rotation as JSON and exit")
+    ap.add_argument("--groups", default=GROUPS_FILE,
+                    help="JSON file of themed entry groups for the panel's "
+                         "group buttons (empty to leave the row off)")
     ap.add_argument("--state-file", default=None,
                     help="persist which effects are switched off, across restarts")
     ap.add_argument("--transition", type=float, default=2.0,
@@ -1085,8 +1289,9 @@ def main():
     entries = load_rotation(args.rotation) if args.rotation else default_rotation()
     load_state(args.state_file, entries, warn)
     pair_check(entries, args.fps, warn)
+    groups = resolve_groups(load_groups(args.groups, warn), entries, warn)
 
-    sched = Scheduler(args, entries)
+    sched = Scheduler(args, entries, groups)
     server = ftsched_web.serve(args.listen, sched, args.previews, warn) \
         if args.listen else None
 
