@@ -2433,6 +2433,484 @@ def _sats():
 
 
 # --------------------------------------------------------------------------
+# The global routing table, churning, as San Francisco hears it. bgp.py draws
+# it as a per-second chart of the last quarter hour with a ticker of the actual
+# prefixes underneath.
+#
+# **Why RouteViews at SFMIX and not the obvious live feed.** RIPE's RIS Live
+# streams the whole default-free zone over plain HTTP as newline-delimited
+# JSON, and it was the first thing tried here. It works, and it is the wrong
+# tool for this panel for two reasons. Unfiltered it delivered 78 MB in 25
+# seconds -- that is not going anywhere near a Pi on shop wifi -- and even
+# filtered to one collector it can only ever be *sampled*: the fetcher opens
+# the socket, reads for twenty seconds, and closes it, so the other hundred and
+# sixty seconds of every three minutes are simply not observed. A burst that
+# lasted a minute would be missed entirely, and a chart that silently omits the
+# interesting parts is a worse chart than a coarser one that does not.
+#
+# The RouteViews archive has the opposite shape. Every collector writes a
+# complete MRT dump of every update it saw in each fifteen-minute window and
+# publishes it about a minute after the window closes, bzip2'd. One 1.2 MB file
+# gets **the entire window**, 75,000 messages, with per-second resolution and
+# nothing sampled away. It is a quarter of an hour behind, and that is a trade
+# worth making: this panel is about rate and texture, not about the last
+# second, and the age is on the screen anyway.
+#
+# And the collector is `route-views.sfmix` -- RouteViews' vantage point inside
+# the San Francisco Metropolitan Internet Exchange, which is a couple of miles
+# from the wall and is where the makerspace's own ISP hands off its traffic.
+# The routes this panel draws are the ones the room's packets are actually
+# steered by, which is not a claim any of the other collectors could make.
+# Eight networks peer with it -- Cloudflare and Amazon among them -- so the
+# feed is a genuinely local view of a global table rather than a global average
+# of one.
+#
+# **MRT is parsed here, by hand, and that needs justifying.** The usual answer
+# is libbgpstream or mrtparse, and neither is going on a Pi for this: the first
+# is a C library with a build, the second pulls in a dependency tree to do
+# something this file already does for PDFs. The wire format is RFC 6396 and
+# RFC 4271 and the part of it a churn counter needs is small -- walk the record
+# frames, find the BGP UPDATEs, count the prefixes in the withdrawn block, the
+# NLRI block and the two multiprotocol attributes, and read the AS_PATH. What
+# is deliberately *not* implemented is everything else: communities, MED,
+# aggregators, the legacy two-byte-ASN subtypes nobody has emitted this decade.
+# An attribute this does not understand is skipped by its own length field,
+# which is why an unknown one cannot desynchronise the parse.
+#
+# **Where the cost is.** 12.5 MB of MRT and 75,000 records is 0.5 s of pure
+# Python on a desktop, so call it ten on the wall, once every fifteen minutes,
+# in the fetcher process and never in a demo. Both ends are capped anyway --
+# see BGP_MAX_BZ2, BGP_MAX_MRT and BGP_MAX_RECORDS -- and a capped parse says
+# so in the record rather than quietly reporting a low rate.
+# --------------------------------------------------------------------------
+
+BGP_ARCHIVE = "https://archive.routeviews.org"
+
+# The collector, and the words for where it is. Overridable because somebody
+# forking this wall for another city should not have to edit code to move the
+# vantage point, and every RouteViews collector publishes the identical layout.
+BGP_COLLECTOR = os.environ.get("FT_BGP_COLLECTOR", "route-views.sfmix")
+BGP_SITE = os.environ.get("FT_BGP_SITE", "SFMIX SAN FRANCISCO")
+
+# RouteViews rolls an updates file every fifteen minutes and publishes it a
+# minute or so after the window closes. Asking on the same cadence is exactly
+# right; asking faster only re-downloads a file we already have.
+BGP_INTERVAL = 900
+
+# Three quarters of an hour. Two missed windows and the panel should start
+# saying so: churn is the one thing here that genuinely does not keep, and a
+# fifteen-minute picture of the routing table from two hours ago is a picture
+# of an event that is over.
+BGP_TTL = 2700
+
+# How many fifteen-minute slots back to look for the newest published file.
+# Six is an hour and a half, which covers the publisher having a bad afternoon
+# without turning a fetch into a crawl of the archive.
+BGP_LOOKBACK = 6
+
+# Caps, in the order they bite. The compressed file is normally 1.0-1.6 MB and
+# the decompressed MRT 10-16 MB; these are roughly five times that, so they
+# never fire in normal operation and do fire on the day some collector emits a
+# pathological window. A capped fetch is still a usable fetch -- the record
+# carries the span actually parsed and the rates are computed against it, not
+# against the fifteen minutes it was supposed to be.
+BGP_MAX_BZ2 = 8 << 20
+BGP_MAX_MRT = 64 << 20
+BGP_MAX_RECORDS = 250000
+
+# Time resolution kept in the record. Two seconds over a nine-hundred second
+# window is 450 numbers a series, which is more columns than the panel has and
+# small enough to sit in a JSON record without apology. Per-second would be
+# 900 and would let the demo redraw at a resolution no 320-pixel panel can
+# show; the binning is done here so the demo never has to know it happened.
+BGP_BIN_SECS = 2
+
+# Lines the ticker can draw. Reservoir-sampled across the whole window rather
+# than taken from the front of it, because the front of a fifteen-minute window
+# is frequently one router dumping its table and forty lines of the same peer
+# is not what the routing table looks like.
+BGP_SAMPLES = 48
+
+# Origin ASNs kept, by how many prefixes each announced. The tail is thousands
+# long and the head is the story.
+BGP_ORIGINS = 12
+
+
+def _bgp_slot(epoch):
+    """(url, filename) for the fifteen-minute window starting at `epoch`."""
+    lt = time.gmtime(epoch)
+    name = "updates.%s.bz2" % time.strftime("%Y%m%d.%H%M", lt)
+    return ("%s/%s/bgpdata/%s/UPDATES/%s"
+            % (BGP_ARCHIVE, BGP_COLLECTOR, time.strftime("%Y.%m", lt), name),
+            name)
+
+
+def _bgp_newest(now=None, lookback=BGP_LOOKBACK):
+    """Find the newest published updates file. Returns (url, name, size).
+
+    Walks back a slot at a time from the present and HEADs each candidate. The
+    filenames are derived from the clock rather than from the directory
+    listing, which is a month of two thousand eight hundred links and would be
+    a bigger download than half the products in this file.
+    """
+    import urllib.error
+    import urllib.request
+    now = time.time() if now is None else now
+    slot = int(now // BGP_INTERVAL) * BGP_INTERVAL
+    last = None
+    for k in range(1, lookback + 1):
+        url, name = _bgp_slot(slot - k * BGP_INTERVAL)
+        req = urllib.request.Request(url, method="HEAD", headers={
+            "User-Agent": "flaschen-taschen-ftdata/1 (+wall display)"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                size = int(resp.headers.get("Content-Length") or 0)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                continue                 # not published yet; try the one before
+            raise
+        if size > BGP_MAX_BZ2:
+            # Refusing is better than truncating here: a bz2 stream cut mid
+            # block does not decompress, so a partial download of an oversized
+            # file buys nothing at all.
+            last = "%s is %d bytes, over the %d cap" % (name, size, BGP_MAX_BZ2)
+            continue
+        return url, name, size
+    raise RuntimeError(last or "no updates file published in the last %d slots"
+                       % lookback)
+
+
+def _bgp_fetch_mrt(url):
+    """Download and decompress one updates file, both ends capped."""
+    import bz2
+    import urllib.request
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "flaschen-taschen-ftdata/1 (+wall display)"})
+    dec = bz2.BZ2Decompressor()
+    chunks = []
+    raw = out = 0
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        while True:
+            block = resp.read(1 << 16)
+            if not block:
+                break
+            raw += len(block)
+            if raw > BGP_MAX_BZ2:
+                raise RuntimeError("compressed stream ran past the %d cap"
+                                   % BGP_MAX_BZ2)
+            piece = dec.decompress(block)
+            if piece:
+                out += len(piece)
+                if out > BGP_MAX_MRT:
+                    # Stop cleanly rather than raise: whole MRT records already
+                    # decoded are perfectly good data, and the parse below finds
+                    # the end of the last complete one by itself.
+                    chunks.append(piece)
+                    break
+                chunks.append(piece)
+    return b"".join(chunks), raw
+
+
+def _bgp_prefixes(buf, i, end, v6=False, want_first=False):
+    """Walk an RFC 4271 NLRI block; return (count, first_prefix_or_None).
+
+    One length-in-bits byte then that many bits rounded up to whole octets,
+    with the trailing zero octets of the prefix left off the wire entirely --
+    which is why the bytes are padded back out before being formatted. The
+    same encoding carries v4 and v6; only the width of the padding differs.
+    """
+    n = 0
+    first = None
+    width = 16 if v6 else 4
+    while i < end:
+        bits = buf[i]
+        i += 1
+        nb = (bits + 7) >> 3
+        if nb > width or i + nb > end:
+            # Malformed, or a SAFI whose NLRI is not a plain prefix (labelled
+            # unicast and VPN routes both prepend fields here). Either way the
+            # rest of this block cannot be walked, and guessing would corrupt
+            # the count far more than stopping does.
+            break
+        if want_first and first is None:
+            pad = buf[i:i + nb] + b"\0" * (width - nb)
+            if v6:
+                import socket
+                first = "%s/%d" % (socket.inet_ntop(socket.AF_INET6, pad), bits)
+            else:
+                first = "%d.%d.%d.%d/%d" % (pad[0], pad[1], pad[2], pad[3], bits)
+        i += nb
+        n += 1
+    return n, first
+
+
+def _bgp_as_path(buf, i, end):
+    """Decode an AS_PATH attribute body into a list of four-byte ASNs.
+
+    Segments are (type, count, ASNs); AS_SET and AS_SEQUENCE are flattened
+    together because the distinction does not survive being drawn four pixels
+    high, and the four-byte width is safe because every RouteViews collector
+    has spoken RFC 6793 since long before it started writing these files.
+    """
+    out = []
+    from struct import unpack_from
+    while i + 2 <= end:
+        count = buf[i + 1]
+        i += 2
+        for k in range(count):
+            if i + 4 > end:
+                return out
+            out.append(unpack_from(">I", buf, i)[0])
+            i += 4
+    return out
+
+
+def _bgp_parse(data):
+    """Count churn out of a raw MRT stream. Everything happens in one pass.
+
+    Returns the counters bgp.py needs and nothing else -- twelve megabytes in,
+    about nine kilobytes out. The expensive part is deliberately not done for
+    every record: the AS_PATH's byte range is noted while walking the
+    attributes, which is free, and it is only decoded into a list of integers
+    for the few dozen records the ticker reservoir keeps.
+    """
+    import random
+    from struct import Struct
+    hdr = Struct(">IHHI").unpack_from
+    u16 = Struct(">H").unpack_from
+    u32 = Struct(">I").unpack_from
+
+    # MRT types and subtypes, RFC 6396 s4.4. Only BGP4MP is ever in an updates
+    # file; the _ET flavour is identical but for four bytes of microseconds
+    # ahead of the body, which is why it is a `+= 4` and not a second parser.
+    BGP4MP, BGP4MP_ET = 16, 17
+    AS4_SUBTYPES = (4, 7)               # MESSAGE_AS4, MESSAGE_AS4_LOCAL
+    AS2_SUBTYPES = (1, 6)               # MESSAGE, MESSAGE_LOCAL
+
+    n = len(data)
+    i = 0
+    records = 0
+    truncated = False
+    ann = wdr = 0
+    t_first = t_last = None
+    ann_sec = {}
+    wdr_sec = {}
+    peers = {}
+    origins = {}
+    reservoir = []
+    seen_lines = 0
+    rng = random.Random()
+
+    while i + 12 <= n:
+        if records >= BGP_MAX_RECORDS:
+            truncated = True
+            break
+        ts, mtype, sub, length = hdr(data, i)
+        i += 12
+        end = i + length
+        if end > n:
+            # A short final record, which is what the decompression cap leaves
+            # behind. Everything before it is intact.
+            truncated = True
+            break
+        j = i
+        i = end
+        if mtype == BGP4MP_ET:
+            j += 4
+        elif mtype != BGP4MP:
+            continue
+        if sub in AS4_SUBTYPES:
+            if j + 8 > end:
+                continue
+            peer_as = u32(data, j)[0]
+            j += 8
+        elif sub in AS2_SUBTYPES:
+            if j + 4 > end:
+                continue
+            peer_as = u16(data, j)[0]
+            j += 4
+        else:
+            continue                     # a state change, not a message
+        j += 2                           # interface index
+        if j + 2 > end:
+            continue
+        afi = u16(data, j)[0]
+        j += 2
+        j += 2 * (4 if afi == 1 else 16)         # peer and local addresses
+
+        # The BGP message itself: sixteen marker bytes, a length and a type.
+        if j + 19 > end:
+            continue
+        if data[j + 18] != 2:            # not an UPDATE (OPEN, KEEPALIVE, ...)
+            continue
+        msg_end = min(j + u16(data, j + 16)[0], end)
+        k = j + 19
+        if k + 2 > msg_end:
+            continue
+        wlen = u16(data, k)[0]
+        k += 2
+        nw, w_first = _bgp_prefixes(data, k, min(k + wlen, msg_end),
+                                    want_first=True)
+        k += wlen
+        if k + 2 > msg_end:
+            continue
+        alen = u16(data, k)[0]
+        k += 2
+        attr_end = min(k + alen, msg_end)
+
+        path_span = None
+        v6_ann = v6_wdr = 0
+        v6_first = None
+        p = k
+        while p + 3 <= attr_end:
+            flags = data[p]
+            atype = data[p + 1]
+            if flags & 0x10:             # extended length
+                if p + 4 > attr_end:
+                    break
+                blen = u16(data, p + 2)[0]
+                p += 4
+            else:
+                blen = data[p + 2]
+                p += 3
+            aend = min(p + blen, attr_end)
+            if atype == 2:                                   # AS_PATH
+                path_span = (p, aend)
+            elif atype == 14 and p + 4 <= aend:              # MP_REACH_NLRI
+                mafi = u16(data, p)[0]
+                nh = data[p + 3]
+                q = p + 4 + nh + 1       # next hop, then one reserved octet
+                c, f = _bgp_prefixes(data, q, aend, v6=(mafi == 2),
+                                     want_first=(mafi == 2))
+                v6_ann += c
+                if v6_first is None:
+                    v6_first = f
+            elif atype == 15 and p + 3 <= aend:              # MP_UNREACH_NLRI
+                mafi = u16(data, p)[0]
+                c, f = _bgp_prefixes(data, p + 3, aend, v6=(mafi == 2),
+                                     want_first=(mafi == 2))
+                v6_wdr += c
+                if w_first is None:
+                    w_first = f
+            p = aend
+
+        na, a_first = _bgp_prefixes(data, attr_end, msg_end, want_first=True)
+        if a_first is None:
+            a_first = v6_first
+        na += v6_ann
+        nw += v6_wdr
+        if not (na or nw):
+            continue                     # a pure keepalive-ish UPDATE
+
+        records += 1
+        ann += na
+        wdr += nw
+        if t_first is None:
+            t_first = ts
+        t_last = ts
+        if na:
+            ann_sec[ts] = ann_sec.get(ts, 0) + na
+        if nw:
+            wdr_sec[ts] = wdr_sec.get(ts, 0) + nw
+        peers[peer_as] = peers.get(peer_as, 0) + 1
+
+        origin = None
+        if path_span is not None and na:
+            # The origin only needs the last ASN of the last segment, so this
+            # walks the segment headers rather than decoding every hop -- the
+            # difference over seventy-five thousand records is most of the
+            # parse. The full path is decoded below, for the ticker only.
+            q, qe = path_span
+            while q + 2 <= qe:
+                count = data[q + 1]
+                q += 2
+                if count and q + 4 * count <= qe:
+                    origin = u32(data, q + 4 * (count - 1))[0]
+                q += 4 * count
+            if origin is not None:
+                origins[origin] = origins.get(origin, 0) + na
+
+        # Reservoir sampling, so the ticker is a fair draw from the whole
+        # window instead of the first forty-eight lines of it. Both kinds of
+        # line go in the same reservoir on purpose: withdrawals are two per
+        # cent of the traffic and they should be two per cent of the ticker,
+        # because the panel's whole claim is that these numbers are real.
+        for kind, pfx, npfx in (("A", a_first, na), ("W", w_first, nw)):
+            if not pfx:
+                continue
+            seen_lines += 1
+            if len(reservoir) < BGP_SAMPLES:
+                slot = len(reservoir)
+                reservoir.append(None)
+            else:
+                slot = rng.randrange(seen_lines)
+                if slot >= BGP_SAMPLES:
+                    continue
+            path = []
+            if path_span is not None:
+                path = _bgp_as_path(data, path_span[0], path_span[1])
+            reservoir[slot] = {
+                "k": kind, "p": pfx, "n": npfx, "peer": peer_as,
+                "o": (path[-1] if path else None), "path": path[-6:],
+                "t": ts,
+            }
+
+    if t_first is None:
+        raise RuntimeError("no BGP UPDATEs in %d bytes of MRT" % n)
+
+    # Bin to a fixed grid anchored on the window's first second, so the demo
+    # can index it with arithmetic rather than searching timestamps.
+    span = max(1, t_last - t_first + 1)
+    nbins = -(-span // BGP_BIN_SECS)
+    ann_bins = [0] * nbins
+    wdr_bins = [0] * nbins
+    for src, dst in ((ann_sec, ann_bins), (wdr_sec, wdr_bins)):
+        for ts, v in src.items():
+            dst[(ts - t_first) // BGP_BIN_SECS] += v
+
+    peak_at, peak = t_first, 0
+    for ts in set(ann_sec) | set(wdr_sec):
+        v = ann_sec.get(ts, 0) + wdr_sec.get(ts, 0)
+        if v > peak:
+            peak, peak_at = v, ts
+
+    top = sorted(origins.items(), key=lambda kv: -kv[1])[:BGP_ORIGINS]
+    reservoir = [s for s in reservoir if s]
+    reservoir.sort(key=lambda s: s["t"])
+    return {
+        "t0": t_first, "t1": t_last, "secs": span,
+        "records": records, "truncated": truncated,
+        "ann": ann, "wdr": wdr,
+        "ann_s": round(ann / float(span), 2), "wdr_s": round(wdr / float(span), 2),
+        "peak": peak, "peak_at": peak_at,
+        "bin_secs": BGP_BIN_SECS, "ann_bins": ann_bins, "wdr_bins": wdr_bins,
+        "peers": sorted(peers.items(), key=lambda kv: -kv[1]),
+        "n_peers": len(peers),
+        "origins": [[a, c] for a, c in top], "n_origins": len(origins),
+        "samples": reservoir,
+    }
+
+
+@product("bgp-sfmix", ttl=BGP_TTL, interval=BGP_INTERVAL,
+         description="BGP churn at %s (RouteViews %s)"
+                     % (BGP_SITE, BGP_COLLECTOR))
+def _bgp_sfmix():
+    """One complete fifteen-minute MRT window from the SFMIX collector."""
+    url, name, size = _bgp_newest()
+    data, raw = _bgp_fetch_mrt(url)
+    payload = _bgp_parse(data)
+    payload.update({
+        "collector": BGP_COLLECTOR, "site": BGP_SITE,
+        "file": name, "bytes": raw, "mrt_bytes": len(data),
+        "units": {"t0": "epoch seconds UTC", "ann_s": "prefixes/second",
+                  "bins": "prefixes per bin_secs seconds",
+                  "ann": "prefixes announced in the window",
+                  "wdr": "prefixes withdrawn in the window"},
+    })
+    return payload, url
+
+
+# --------------------------------------------------------------------------
 # Ship movements at the Port of San Francisco, from the Port's own cruise
 # terminal schedule. ships.py draws them against the Golden Gate tide.
 #
