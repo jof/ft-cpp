@@ -2350,6 +2350,389 @@ def _caiso_mix():
 
 
 # --------------------------------------------------------------------------
+# Where San Francisco's shared bikes have got to. bikes.py draws this.
+#
+# **The fleet is a fluid and the city is a hillside.** Bay Wheels publishes GBFS
+# -- the open standard every bikeshare system speaks -- and the two feeds that
+# matter are a snapshot: how many bikes are in each dock right now, and where the
+# undocked ebikes are lying. Neither of them says the interesting thing, which is
+# that the fleet *moves*: every weekday morning it is ridden downhill and
+# eastward into the financial district, and every evening it comes back up. A
+# station at zero bikes and a station with no free dock are both failures, and
+# both are invisible in a total.
+#
+# So this product does three things the raw feeds do not.
+#
+# **It attaches an altitude to every station.** GBFS carries lat/lon and no
+# elevation, and elevation is the one variable that explains the picture: bikes
+# roll downhill for free and have to be pedalled or trucked back up. The heights
+# come from a committed bake, `demos/bikes-terrain.npz`, so nothing on the wall
+# ever asks a terrain service anything -- see BIKES_TERRAIN below for its
+# provenance and for what happens to a station the bake has never heard of.
+#
+# **It reduces 790 kB to about 10.** Three feeds, 634 stations and 613 loose
+# bikes go in; what comes out is four short arrays over the stations inside the
+# city, sorted by height, plus a couple of dozen scalars. The arrays stay
+# per-station rather than being binned into panel columns here, for the same
+# reason caiso-mix stores thirteen fuels and not five bands: how to bin them is a
+# drawing decision and it belongs where it can be argued with.
+#
+# **It remembers.** The feeds are a snapshot with no history at all, and the
+# commute pump is only visible over a day, so each pass appends one sample to a
+# rolling series kept in the record. Ten-minute buckets keyed on absolute epoch
+# rather than a growing list: a bucket that is fetched twice is overwritten, a
+# bucket that is missed is simply absent, the series is trimmed to 24 hours and
+# 150 entries on every write, and a record restored from before a reboot picks up
+# exactly where it left off. That last part is why this product is deliberately
+# *not* volatile -- the accumulated day is the only thing here that cannot be
+# re-fetched.
+#
+# **Cost.** Three requests, about 790 kB, every ten minutes: 1.3 kB/s averaged,
+# which is half what quake-week costs. station_information is nearly static and
+# could be fetched far more rarely, but re-fetching it is what makes a
+# newly-installed station appear correctly rather than being quietly dropped, and
+# 348 kB per ten minutes is not worth a staleness bug.
+# --------------------------------------------------------------------------
+
+BIKES_PRODUCT = "baywheels"
+
+# gbfs.baywheels.com 301-redirects here; using the destination directly saves a
+# round trip and makes the host visible in the record's `source`.
+BIKES_GBFS = os.environ.get("FT_GBFS_BASE", "https://gbfs.lyftbikes.com/gbfs/en")
+BIKES_STATUS_URL = BIKES_GBFS + "/station_status.json"
+BIKES_INFO_URL = BIKES_GBFS + "/station_information.json"
+BIKES_FREE_URL = BIKES_GBFS + "/free_bike_status.json"
+
+# The crop, as (lat0, lat1, lon0, lon1). Bay Wheels is one system covering four
+# separated cities -- San Francisco, Oakland/Emeryville/Berkeley across the bay,
+# and San Jose fifty miles south -- and they do not share a commute, a terrain or
+# a tide. Mixing them would put a San Jose station at 25 m next to a Nob Hill
+# station at 25 m on the same axis and mean nothing by it. This box is the city
+# and county of San Francisco plus the few Daly City docks on its south edge:
+# 383 of the system's 634 stations, and the ones whose hill is the story.
+BIKES_BBOX = (37.700, 37.840, -122.530, -122.350)
+
+# Half an hour. station_status is regenerated every minute and we take it every
+# ten, so a record this old has missed twenty updates -- which on a Friday
+# evening is enough for the picture to be a lie about which stations are dry.
+# It still draws, with the age on it; see bikes.py.
+BIKES_TTL = 1800
+
+# Ten minutes, matching the history bucket exactly so that one pass fills one
+# bucket. A minute-cadence feed sampled every ten minutes is a deliberate loss:
+# nobody walking past reads a 24-hour strip finely enough to see one sample, and
+# this is a public server with no key on it.
+BIKES_INTERVAL = 600
+
+# The rolling series. Ten-minute buckets, 24 hours, and a hard cap on the entry
+# count that is a little over 24 hours' worth -- belt and braces, because the
+# thing that must never happen to a record that appends to itself is unbounded
+# growth, and a clock that jumps is a real event on a Pi with no RTC.
+BIKES_HIST_BUCKET = 600.0
+BIKES_HIST_HOURS = 24.0
+BIKES_HIST_MAX = 150
+
+# Loose ebikes are binned by the altitude rank of their nearest station rather
+# than stored one by one: 600 lat/lon pairs is most of the record, and what the
+# panel draws is a histogram. Sixty-four bins over 320 columns is five columns a
+# bin, which is about as fine as a haze of dim pixels reads anyway.
+BIKES_LOOSE_BINS = 64
+
+# Ground elevation per station, in metres, baked once and committed.
+#
+#   source     opentopodata.org public API, dataset `ned10m` -- the USGS 3D
+#              Elevation Program 1/3 arc-second seamless DEM, ~10 m posting,
+#              public domain, no key and no signup
+#   stations   gbfs.lyftbikes.com/gbfs/en/station_information.json
+#   retrieved  2026-08-10, all 634 system stations, 100 locations a request
+#   arrays     ids, elev (m), lat, lon, meta (the recipe, as text)
+#
+# Baked rather than fetched because a terrain service is a second thing that can
+# be down, and the ground does not move. A station the bake has never heard of --
+# one installed since -- takes the elevation of the nearest baked station, which
+# in a city with a dock every few blocks is a good deal better than dropping it,
+# and is recorded in the payload as `interpolated` so the number is checkable.
+BIKES_TERRAIN = "bikes-terrain.npz"
+
+
+def _bikes_terrain():
+    """The baked elevation table. numpy only, no network, raises if absent."""
+    import numpy as np
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        BIKES_TERRAIN)
+    with np.load(path) as z:
+        return ({str(k): float(v) for k, v in zip(z["ids"], z["elev"])},
+                z["lat"].astype("float64"), z["lon"].astype("float64"),
+                z["elev"].astype("float64"))
+
+
+def _bikes_elevation(ids, lats, lons):
+    """Metres for each station, and how many had to be guessed.
+
+    Guessed means "installed since the bake": nearest baked station in the
+    plane, with longitude scaled by cos(latitude) so that a degree east and a
+    degree north are the same distance. Exact for every station in the table,
+    which today is all but none of them.
+    """
+    import numpy as np
+    table, blat, blon, belev = _bikes_terrain()
+    out = np.empty(len(ids), np.float64)
+    missing = []
+    for i, sid in enumerate(ids):
+        got = table.get(sid)
+        if got is None:
+            missing.append(i)
+        else:
+            out[i] = got
+    if missing:
+        kx = float(np.cos(np.radians(0.5 * (BIKES_BBOX[0] + BIKES_BBOX[1]))))
+        for i in missing:
+            dy = blat - lats[i]
+            dx = (blon - lons[i]) * kx
+            out[i] = belev[int(np.argmin(dy * dy + dx * dx))]
+    return out, len(missing)
+
+
+def _bikes_history(previous, sample, now):
+    """Append one sample to the rolling series and bound it. Pure arithmetic.
+
+    Keyed on the absolute ten-minute bucket, which is what makes every failure
+    mode benign. A pass that runs twice inside one bucket overwrites rather than
+    lengthening the series. A pass that is missed leaves a hole, and the hole is
+    visible because the epochs are stored rather than assumed to be regular. A
+    clock that jumps backwards -- a Pi with no battery-backed RTC getting NTP
+    for the first time after boot -- would otherwise leave the series in an
+    order the demo would draw as a scribble, so anything at or after the new
+    bucket is dropped before appending.
+    """
+    keys = ("fleet_m", "docks_m", "loose_m", "bikes", "empty", "loose")
+    bucket = float(int(now // BIKES_HIST_BUCKET) * int(BIKES_HIST_BUCKET))
+    hist = {"t": []}
+    for k in keys:
+        hist[k] = []
+
+    old = (previous or {}).get("hist")
+    if isinstance(old, dict) and isinstance(old.get("t"), list):
+        n = len(old["t"])
+        # Every column has to be the same length as `t` or the record is from a
+        # version that stored different things and cannot be extended safely.
+        if all(isinstance(old.get(k), list) and len(old[k]) == n for k in keys):
+            keep = [i for i, t in enumerate(old["t"])
+                    if isinstance(t, (int, float)) and t < bucket
+                    and t > bucket - BIKES_HIST_HOURS * 3600.0]
+            keep = keep[-(BIKES_HIST_MAX - 1):]
+            hist["t"] = [float(old["t"][i]) for i in keep]
+            for k in keys:
+                hist[k] = [old[k][i] for i in keep]
+
+    hist["t"].append(bucket)
+    for k in keys:
+        hist[k].append(sample.get(k))
+    hist["bucket"] = BIKES_HIST_BUCKET
+    hist["hours"] = BIKES_HIST_HOURS
+    hist["n"] = len(hist["t"])
+    return hist
+
+
+def _bikes_round(values, places=None):
+    """A list of numbers as ints (or `places` decimals), passing None through."""
+    if places is None:
+        return [None if v is None else int(round(float(v))) for v in values]
+    return [None if v is None else round(float(v), places) for v in values]
+
+
+@product(BIKES_PRODUCT, ttl=BIKES_TTL, interval=BIKES_INTERVAL,
+         description="Bay Wheels in SF: dock occupancy by altitude, 24 h drift")
+def _baywheels(cache_dir):
+    """Bay Wheels reduced to a hillside: every SF station, sorted by height.
+
+    station_status and station_information are both required -- without the
+    second there are no coordinates and so no altitude, which is the axis.
+    free_bike_status is allowed to fail on its own, because the docked fleet is
+    still the whole ridge and losing it to a hiccup in a feed about a different
+    population would be the failure this file exists to avoid.
+    """
+    import numpy as np
+
+    info_doc = get_json(BIKES_INFO_URL, timeout=30)
+    status_doc = get_json(BIKES_STATUS_URL, timeout=30)
+
+    lat0, lat1, lon0, lon1 = BIKES_BBOX
+    inside = {}
+    for s in info_doc["data"]["stations"]:
+        try:
+            la, lo = float(s["lat"]), float(s["lon"])
+            sid = str(s["station_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if lat0 <= la <= lat1 and lon0 <= lo <= lon1:
+            inside[sid] = (la, lo, int(s.get("capacity") or 0))
+
+    ids, lats, lons = [], [], []
+    caps, bikes, docks, renting, ebikes = [], [], [], [], []
+    for s in status_doc["data"]["stations"]:
+        got = inside.get(str(s.get("station_id")))
+        if got is None:
+            continue
+        la, lo, cap = got
+        # `is_installed` 0 is a dock that has been pulled out of the ground for
+        # the season. It is not an empty station and it is not a station at all.
+        if not int(s.get("is_installed") or 0):
+            continue
+        b = int(s.get("num_bikes_available") or 0)
+        d = int(s.get("num_docks_available") or 0)
+        # Capacity as published, falling back to what the four dock counts add
+        # up to. They agree everywhere today; the fallback is for the station
+        # whose capacity field is missing or zero, where the counts are still a
+        # true denominator and a dropped station is not.
+        c = cap or (b + d + int(s.get("num_bikes_disabled") or 0)
+                    + int(s.get("num_docks_disabled") or 0))
+        if c <= 0:
+            continue
+        ids.append(str(s["station_id"]))
+        lats.append(la)
+        lons.append(lo)
+        caps.append(c)
+        bikes.append(min(b, c))
+        docks.append(d)
+        ebikes.append(int(s.get("num_ebikes_available") or 0))
+        # `is_renting` 0 with the dock still installed is a station taken out of
+        # service -- construction, a street fair, a broken kiosk. Its bikes are
+        # real and its emptiness is not somebody's commute, so it is kept and
+        # flagged rather than either counted or dropped.
+        renting.append(1 if int(s.get("is_renting") or 0) else 0)
+
+    if len(ids) < 20:
+        raise ValueError("only %d Bay Wheels stations inside the SF box"
+                         % len(ids))
+
+    lats = np.asarray(lats, np.float64)
+    lons = np.asarray(lons, np.float64)
+    elev, interpolated = _bikes_elevation(ids, lats, lons)
+
+    # Sorted by altitude once, here, so that every array in the record and every
+    # bin index computed from it agree by construction. `kind="stable"` so that
+    # two stations at the same metre keep a fixed order between passes and the
+    # panel does not shimmer where the hill is flat.
+    order = np.argsort(elev, kind="stable")
+    elev = elev[order]
+    lats, lons = lats[order], lons[order]
+    caps = np.asarray(caps, np.float64)[order]
+    bikes = np.asarray(bikes, np.float64)[order]
+    docks = np.asarray(docks, np.float64)[order]
+    ebikes = np.asarray(ebikes, np.float64)[order]
+    renting = np.asarray(renting, np.int64)[order]
+    n = len(elev)
+
+    total_bikes = float(bikes.sum())
+    total_caps = float(caps.sum())
+    # The two altitudes that make the panel mean something. `fleet_m` is the
+    # mean height of a bike you could go and unlock; `docks_m` is the mean height
+    # of a *parking space*, which is where the fleet would sit if it were spread
+    # evenly. The difference between them is the whole story -- when it goes
+    # negative the fleet has run downhill, and it is a metre count rather than a
+    # count of bikes, so it does not move when the operator adds a hundred bikes.
+    fleet_m = float((elev * bikes).sum() / total_bikes) if total_bikes else None
+    docks_m = float((elev * caps).sum() / total_caps) if total_caps else None
+
+    open_ = renting == 1
+    empty = int(((bikes == 0) & open_).sum())
+    jammed = int(((docks == 0) & open_).sum())
+
+    loose_bins = [0] * BIKES_LOOSE_BINS
+    loose_m = None
+    loose_n = loose_off = 0
+    free_url = None
+    try:
+        free_doc = get_json(BIKES_FREE_URL, timeout=30)
+        free_url = BIKES_FREE_URL
+        fl, fo = [], []
+        for b in free_doc["data"]["bikes"]:
+            try:
+                la, lo = float(b["lat"]), float(b["lon"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not (lat0 <= la <= lat1 and lon0 <= lo <= lon1):
+                continue
+            if int(b.get("is_disabled") or 0) or int(b.get("is_reserved") or 0):
+                loose_off += 1
+                continue
+            fl.append(la)
+            fo.append(lo)
+        if fl:
+            # A loose bike has no dock and therefore no altitude of its own in
+            # this scheme, so it takes the altitude of the nearest station. That
+            # is not a fudge: the point of the bin is "how high up the hill is
+            # this bike", and the nearest dock answers it to within a block.
+            fl = np.asarray(fl, np.float64)
+            fo = np.asarray(fo, np.float64)
+            kx = float(np.cos(np.radians(0.5 * (lat0 + lat1))))
+            dy = fl[:, None] - lats[None, :]
+            dx = (fo[:, None] - lons[None, :]) * kx
+            near = np.argmin(dy * dy + dx * dx, axis=1)
+            loose_m = float(elev[near].mean())
+            loose_n = int(len(fl))
+            slot = np.clip(near * BIKES_LOOSE_BINS // max(n, 1),
+                           0, BIKES_LOOSE_BINS - 1)
+            loose_bins = np.bincount(slot,
+                                     minlength=BIKES_LOOSE_BINS).tolist()
+    except Exception as e:                                   # noqa: BLE001
+        print("ftdata: baywheels free_bike_status unavailable: %r" % e,
+              file=sys.stderr)
+
+    now = time.time()
+    previous = load(BIKES_PRODUCT, cache_dir)
+    sample = {"fleet_m": None if fleet_m is None else round(fleet_m, 2),
+              "docks_m": None if docks_m is None else round(docks_m, 2),
+              "loose_m": None if loose_m is None else round(loose_m, 2),
+              "bikes": int(total_bikes), "empty": empty, "loose": loose_n}
+
+    payload = {
+        "as_of": float(status_doc.get("last_updated") or now),
+        "region": "San Francisco",
+        "bbox": list(BIKES_BBOX),
+        "n": n,
+        # Four arrays over the stations, ascending by altitude. Everything the
+        # panel draws about *now* comes out of these.
+        "elev_m": _bikes_round(elev),
+        "fill_pct": _bikes_round(bikes / np.maximum(caps, 1.0) * 100.0),
+        "free_docks": _bikes_round(docks),
+        "open": [int(v) for v in renting],
+        "loose_bins": loose_bins,
+        "totals": {
+            "stations": n,
+            "closed": int(n - open_.sum()),
+            "capacity": int(total_caps),
+            "bikes": int(total_bikes),
+            "ebikes": int(ebikes.sum()),
+            "free_docks": int(docks.sum()),
+            "empty": empty,
+            "jammed": jammed,
+            "loose": loose_n,
+            "loose_unavailable": loose_off,
+        },
+        "altitude_m": {"fleet": sample["fleet_m"], "docks": sample["docks_m"],
+                       "loose": sample["loose_m"],
+                       "low": round(float(elev[0]), 1),
+                       "high": round(float(elev[-1]), 1)},
+        "interpolated": int(interpolated),
+        "hist": _bikes_history(previous[0] if previous else None, sample, now),
+        "units": {"elev_m": "metres above NAVD88", "fill_pct": "percent",
+                  "hist.t": "epoch seconds, start of a 10 minute bucket"},
+        "sources": [BIKES_INFO_URL, BIKES_STATUS_URL, free_url],
+    }
+    return payload, BIKES_STATUS_URL
+
+
+# Not a flag on product(), for the same reason goes-psw does it this way: the
+# helper stays exactly as the other products use it. This product is not pixels
+# and writes no sidecar -- it needs the cache directory for the other reason,
+# which is that it reads its own previous record to extend the rolling series,
+# and doing that against ftdata's default cache while the fetcher was pointed at
+# another one would silently graft two machines' histories together.
+PRODUCTS[BIKES_PRODUCT]["blob"] = True
+
+# --------------------------------------------------------------------------
 # The ground under the building. quake.py draws this.
 #
 # **One feed, two scales, and a third request that is not a feed.** USGS
