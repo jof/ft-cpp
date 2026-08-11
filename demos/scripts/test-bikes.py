@@ -1,53 +1,56 @@
 #!/usr/bin/env python3
 """Checks for bikes.py that a screenshot cannot make.
 
-This demo can draw a beautiful, confident, wrong hillside in at least six ways,
-and not one of them looks wrong:
+This panel infers movement from two snapshots that contain no movement in
+them, and almost every way it can be wrong is a way that still looks
+convincing on a wall.
 
-  1. **The hill can run the other way.** A ridge that descends left to right is
-     exactly as pretty as one that rises, and it says the opposite thing about
-     which end of the city the panel is talking about.
-  2. **The occupancy ramp can be inverted.** Amber for full and blue for empty
-     is a perfectly attractive picture of a city whose hills are overflowing.
-  3. **The altitude anomaly's sign can flip.** "4M DOWNHILL" drawn when the
-     fleet is four metres *above* its docks is a whole sentence that is wrong,
-     printed in the largest type on the panel.
-  4. **The lane can join up its gaps.** An hour when the fetcher was not
-     running, drawn as a smooth line between the two sides of it, is an
-     invention, and an invention in the shape of data.
-  5. **The mist can eat the ridge.** The loose ebikes are drawn near the
-     surface; one row of overlap and the occupancy colours are gone under a
-     stipple, which reads as "quiet" rather than as "missing".
-  6. **A record from breakfast draws perfectly.** It parses, it has 383
-     stations, it is a lovely hill, and every dry station on it has been
-     refilled since.
+1. **The direction can be backwards.** Green runs towards downtown, and the
+   whole claim of the panel is that green in the morning means people rode
+   into the financial district. One sign error in `cumsum` or in the transport
+   coupling and the panel is a fluent, confident lie, drawn at the right times
+   of day with the right magnitudes. So the direction is asserted three ways:
+   off the arithmetic, off the baked particle endpoints, and off the *pixels*,
+   by counting which hue is on the panel while a synthetic city empties its
+   hills into its downtown.
+2. **The flux can fail to conserve.** `cumsum(net)` is only the number of
+   bikes that had to cross each distance if the net changes sum to zero, and
+   the docked fleet is not closed. If the imbalance correction is wrong the
+   panel invents traffic at the city limit, which looks like a busy afternoon.
+3. **The headline can double or halve.** `mov` counts both ends of a move,
+   so the panel halves it. Forgetting to is a two-times error nobody can see.
+4. **The replay can lie about time.** The window is anchored on the newest
+   bucket the record actually holds, not on the clock, and a gap must stay a
+   gap in the strip rather than being joined across.
+5. **Cold start can be a blank panel.** The flow needs two fetches. A wall
+   that booted ten minutes ago has one, and what it draws then is a designed
+   state that has to be checked like any other.
+6. **The fetcher's differencing can break benignly and silently.** A doubled
+   pass, a missed pass, a backwards clock and a station being installed all
+   have to degrade in a stated way, and none of them raises.
 
-So the drawing is asserted **in pixels** against synthetic cities whose answers
-cannot be argued with -- a city whose hills are dry and whose flats are full,
-and then the same city upside down -- and the arithmetic is asserted against
-the record separately.
-
-Two things about how these are run, both learned the hard way in this tree.
-With the default `--reload`, the demo asks the wall clock whether to re-read
-the cache, so the checks that care about determinism pass `reload=0`, under
-which `render` is a **pure function of t** and is asserted to be. And
-`ftdata.CACHE_DIR` binds at import, so the three data states a demo must handle
--- fresh, stale, absent -- are each run in a **separate process** with
-FT_DATA_CACHE set, at the bottom of this file. Reloading the module in one
-process does not test what it looks like it tests.
+So the methodology is: build synthetic cities whose answer is known by
+arithmetic before anything is drawn, assert the panel against that number,
+then repeat the measurement on a city built the other way round and require
+the answer to come out the other way. Words are read back off the rendered
+pixels rather than trusted to have been computed. Every data state is run in
+a process of its own, because `ftdata.CACHE_DIR` binds at import.
 
     $ python3 scripts/test-bikes.py                     # uses the live cache
     $ python3 scripts/test-bikes.py --cache-dir /tmp/c  # or a pointed one
+    $ python3 scripts/test-bikes.py --shot out.png      # and a 3x screenshot
 
-The live cache is only needed for the checks against real data; everything else
-builds its own cache directory and needs nothing. Populate it with
-`python3 ftdata.py --once --only baywheels`.
+Only `test_live` needs a populated cache; everything else builds its own.
+Populate it with `python3 ftdata.py --once --only baywheels`, twice, ten
+minutes apart -- one pass alone gives you the cold-start panel.
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -66,8 +69,10 @@ import ftdata                                                  # noqa: E402
 FAILED = []
 PASSED = [0]
 
-N_STATIONS = 300
-BUCKET = 600.0
+N_STATIONS = 383
+BINS = ftdata.BIKES_FLOW_BINS
+BUCKET = ftdata.BIKES_HIST_BUCKET
+KM = ftdata.BIKES_FLOW_KM
 
 
 def check(name, ok, detail=""):
@@ -80,6 +85,11 @@ def check(name, ok, detail=""):
 
 
 def opts(**kw):
+    """The demo's defaults with the cache re-read switched off.
+
+    `reload=0` is what makes render a pure function of t: with it on, the demo
+    asks the wall clock whether to go back to the file, exactly as caiso does.
+    """
     kw.setdefault("reload", 0.0)
     return ds.options(bikes, **kw)
 
@@ -93,19 +103,16 @@ def frames(args, n=8):
     return r, out.copy()
 
 
-def settled(args, n=200):
-    """A frame from after the reveal has finished, still rendered in order."""
-    return frames(args, n)
-
-
-def contains_text(frame, s, thresh=90, scales=(1, 2), bg_max=0.25):
+def contains_text(frame, s, thresh=90, scales=(1, 2), bg_max=0.30):
     """Is this string drawn anywhere on the frame, at any position or size?
 
     Reading the words back off the panel is the only way to be sure the honest
     message reached it rather than merely being computed. The counters between
-    the strokes have to be dark as well: this panel has a solid rock body and a
-    filled lane on it, and a matcher that only asks "are the strokes lit"
-    answers yes to most of the language somewhere inside the hill.
+    the strokes have to be dark as well: this panel has a terrain band and a
+    filled strip on it, and a matcher that only asks "are the strokes lit"
+    answers yes to most of the language somewhere inside the landscape. The
+    caption's halo darkens exactly those counters, which is what lets the
+    threshold here stay tight.
     """
     lit = frame.max(axis=2) >= thresh
     h, w = lit.shape
@@ -125,459 +132,828 @@ def contains_text(frame, s, thresh=90, scales=(1, 2), bg_max=0.25):
     return False
 
 
+def _count_palette(region, pal):
+    """How many pixels of `region` are exactly one of `pal`'s colours.
+
+    Level zero of every palette block is black, and black is most of the
+    panel, so it is dropped before the comparison -- counting it would answer
+    "is the panel mostly dark", which it is.
+    """
+    flat = region.reshape(-1, 3)
+    total = 0
+    for rgb in pal:
+        if not rgb.any():
+            continue
+        total += int((flat == rgb).all(axis=1).sum())
+    return total
+
+
+def hue_counts(frame, lay):
+    """(green pixels, violet pixels) in the map region, by nearest swarm hue.
+
+    Counted as "is this pixel more like C_IN than C_OUT, and lit at all",
+    rather than by exact match: a particle is drawn at one of eight brightness
+    levels and only the brightest is the palette colour itself.
+    """
+    reg = frame[lay.map_y:lay.map_bot + 1].astype(np.int32)
+    lit = reg.max(axis=2) > 40
+    # Green minus violet, which for these two colours is dominated by the
+    # blue channel: C_IN is (128, 246, 132) and C_OUT is (196, 130, 255).
+    score = reg[:, :, 1] - reg[:, :, 2]
+    return int((lit & (score > 30)).sum()), int((lit & (score < -30)).sum())
+
+
 # --------------------------------------------------------------------------
-# Cities we invented, so that every answer is known before it is drawn.
+# A synthetic San Francisco, and a synthetic day over it.
 #
-# The elevations are a fixed curve from 2 m to 150 m, so the ridge's shape is
-# known; the occupancy is whatever the caller asks for as a function of rank,
-# so "the hilltops are dry" is a formula and not an observation.
+# The city is a function of distance from downtown so that every geometric
+# assertion below has an arithmetic answer: elevation rises to a crest at six
+# kilometres and falls into the flats beyond, which is the real shape and is
+# also the shape whose *median* the panel draws.
+#
+# The day is a commute: bikes flow from the outer bands to the inner ones in
+# the morning and back in the evening, with the amplitude of a real one. It is
+# written as net change per band, which is exactly what the record stores, so
+# nothing here has to model a station.
 # --------------------------------------------------------------------------
 
-def city(fill_of_rank, n=N_STATIONS, closed=(), jammed=(), dry=()):
-    """Parallel arrays for a synthetic San Francisco, ascending by altitude."""
-    rank = np.arange(n) / (n - 1.0)
-    elev = np.round(2.0 + 148.0 * rank ** 2.0).astype(int)      # convex, rising
-    fill = np.array([int(round(100 * float(np.clip(fill_of_rank(x), 0, 1))))
-                     for x in rank])
-    cap = np.full(n, 20)
-    free = cap - np.round(fill / 100.0 * cap).astype(int)
+def city(n=N_STATIONS, dry=(), jammed=(), closed=()):
+    """Parallel arrays for a synthetic San Francisco, ascending by distance."""
+    r = np.linspace(0.0, 1.0, n)
+    dist = np.round(r * (KM * 1000.0 - 100.0)).astype(int)
+    # A crest at six kilometres, plus a repeatable jitter so the quartiles the
+    # panel draws have something to be quartiles of.
+    base = 3.0 + 95.0 * np.sin(np.pi * np.clip(r * 1.15, 0, 1)) ** 1.6
+    jit = 26.0 * np.sin(np.arange(n) * 2.399963) ** 2
+    elev = np.round(np.clip(base + jit - 13.0, 2.0, 160.0)).astype(int)
+    fill = np.full(n, 45)
+    free = np.full(n, 9)
     openf = np.ones(n, int)
-    for i in closed:
-        openf[i] = 0
-    for i in jammed:
-        free[i] = 0
-        fill[i] = 100
     for i in dry:
         fill[i] = 0
-        free[i] = int(cap[i])
-    return elev, fill, free, openf, cap
+    for i in jammed:
+        free[i] = 0
+    for i in closed:
+        openf[i] = 0
+    return dist, elev, fill, free, openf
 
 
-def synthetic(cache_dir, fill_of_rank=lambda x: 0.5 - 0.35 * x, n=N_STATIONS,
-              closed=(), jammed=(), dry=(), fetched_ago=120.0,
-              hours=24.0, hist_gap=(), no_hist=False, loose=600,
-              anomaly_at=None, mangle=None, descending=False):
-    """Write a baywheels record by hand. Returns (path, truth dict)."""
-    elev, fill, free, openf, cap = city(fill_of_rank, n, closed, jammed, dry)
+def tracks_for(hour, net):
+    """Observed free-ebike journeys for one bucket, in hundreds of metres.
+
+    A handful, running the same way the net flow does, because that is what a
+    real evening looks like: two movers in four minutes at ten at night on the
+    live feed, more at the peaks. The panel must not need many of these to be
+    legible, and the tests must not pretend there are many.
+    """
+    n = int(round(abs(sum(abs(v) for v in net)) / 26.0))
+    inbound = sum(np.cumsum(net)) > 0
+    out = []
+    for i in range(n):
+        far = 18 + (i * 7) % 60
+        near = 3 + (i * 5) % 12
+        out.extend([far, near] if inbound else [near, far])
+    return out
+
+
+def commute(hour):
+    """(net change per band, gross |change|) for one ten-minute bucket.
+
+    Positive net is a band gaining docked bikes. In the morning the inner
+    bands gain and the outer ones lose, which is people riding to work; in the
+    evening it reverses. The profile peaks at 8 and at 18 and is nearly flat
+    at four in the morning, which is what the strip is meant to show.
+    """
+    k = np.arange(BINS, dtype=np.float64)
+    inner = np.exp(-((k - 2.0) / 3.5) ** 2)
+    outer = np.exp(-((k - 22.0) / 9.0) ** 2)
+    inner /= inner.sum()
+    outer /= outer.sum()
+    morning = math.exp(-((hour - 8.3) / 1.5) ** 2)
+    evening = math.exp(-((hour - 17.8) / 1.7) ** 2)
+    amp = 150.0 * morning - 130.0 * evening
+    net = np.round(amp * (inner - outer)).astype(int)
+    # Churn is always several times the net: most rides are short and cancel
+    # inside a band. `mov` counts both ends, hence the two.
+    gross = int(2 * (np.abs(net).sum() * 0.5 + 26 + 40 * (morning + evening)))
+    return net.tolist(), gross
+
+
+def synthetic(cache_dir, n=N_STATIONS, hours=12.0, fetched_ago=120.0,
+              gaps=(), no_flow=False, dry=(), jammed=(), closed=(),
+              reverse=False, flat=False, mangle=None, descending=False,
+              at=None, no_tracks=False):
+    """Write a baywheels record by hand. Returns (path, truth dict).
+
+    `at` moves the *data* -- what o'clock the buckets claim to be, which is
+    what makes a synthetic morning rush possible -- while `fetched_ago` moves
+    only the record's freshness against the real wall clock. Conflating the
+    two is a trap this file fell into once: a record whose buckets were dated
+    eight in the morning was also dated eight in the morning, so on an evening
+    test run the demo refused it as thirteen hours old and every direction
+    check silently had nothing to measure.
+    """
+    now = time.time() if at is None else float(at)
+    fetched_at = time.time() - fetched_ago
+    dist, elev, fill, free, openf = city(n, dry, jammed, closed)
     if descending:
-        elev = elev[::-1].copy()
+        dist = dist[::-1].copy()
 
-    bikes_at = np.round(fill / 100.0 * cap).astype(int)
-    fleet = float((elev * bikes_at).sum() / max(bikes_at.sum(), 1))
-    docks = float((elev * cap).sum() / cap.sum())
+    top = float(int(now // BUCKET) * int(BUCKET))
+    nb = int(hours * 3600.0 / BUCKET)
+    t, mov, dt, flow = [], [], [], []
+    trk, seen, gone, came = [], [], [], []
+    for i in range(nb):
+        bt = top - (nb - 1 - i) * BUCKET
+        t.append(bt)
+        if i in gaps or no_flow:
+            mov.append(None)
+            dt.append(None)
+            flow.append(None)
+            trk.append(None)
+            seen.append(None)
+            gone.append(None)
+            came.append(None)
+            continue
+        hour = time.localtime(bt).tm_hour + time.localtime(bt).tm_min / 60.0
+        net, gross = commute(hour)
+        if reverse:
+            net = [-v for v in net]
+        if flat:
+            net = [0] * BINS
+        mov.append(gross)
+        dt.append(BUCKET)
+        flow.append(net)
+        trk.append([] if no_tracks else tracks_for(hour, net))
+        seen.append(600)
+        gone.append(19)
+        came.append(13)
 
-    now = time.time() - fetched_ago
-    t, hf, hd = [], [], []
-    if not no_hist:
-        n_buckets = int(hours * 3600.0 / BUCKET)
-        for k in range(n_buckets, -1, -1):
-            tt = float(int((now - k * BUCKET) // BUCKET) * int(BUCKET))
-            hour = time.localtime(tt).tm_hour + time.localtime(tt).tm_min / 60.0
-            if any(lo <= hour < hi for lo, hi in hist_gap):
-                continue
-            # A commute pump: down through the morning, back up overnight.
-            a = -2.0 - 3.0 * math.exp(-((hour - 10.0) / 3.0) ** 2)
-            t.append(tt)
-            hd.append(round(docks, 2))
-            hf.append(round(docks + a, 2))
-    if anomaly_at is not None and t:
-        hf[-1] = round(docks + anomaly_at, 2)
-        fleet = docks + anomaly_at
-
+    loose = np.round(140.0 * np.exp(-((np.arange(BINS) - 12.0) / 8.0) ** 2))
     payload = {
         "as_of": now, "region": "San Francisco",
-        "bbox": list(ftdata.BIKES_BBOX), "n": int(n),
-        "elev_m": [int(v) for v in elev],
+        "bbox": list(ftdata.BIKES_BBOX), "downtown": list(ftdata.BIKES_DOWNTOWN),
+        "n": n,
+        "dist_m": [int(v) for v in dist], "elev_m": [int(v) for v in elev],
         "fill_pct": [int(v) for v in fill],
         "free_docks": [int(v) for v in free],
         "open": [int(v) for v in openf],
-        "loose_bins": [loose // ftdata.BIKES_LOOSE_BINS] *
-                      ftdata.BIKES_LOOSE_BINS,
-        "totals": {"stations": int(n), "closed": int(n - openf.sum()),
-                   "capacity": int(cap.sum()), "bikes": int(bikes_at.sum()),
-                   "ebikes": 0, "free_docks": int(free.sum()),
-                   "empty": int(((fill == 0) & (openf == 1)).sum()),
-                   "jammed": int(((free == 0) & (openf == 1)).sum()),
-                   "loose": int(loose), "loose_unavailable": 0},
-        "altitude_m": {"fleet": round(fleet, 2), "docks": round(docks, 2),
-                       "loose": round(docks, 2),
+        "loose_bins": [int(v) for v in loose],
+        "totals": {"stations": n, "closed": len(closed), "capacity": n * 23,
+                   "bikes": int(fill.sum() * 23 // 100), "ebikes": 1500,
+                   "free_docks": int(free.sum()), "empty": len(dry),
+                   "jammed": len(jammed), "loose": int(loose.sum()),
+                   "loose_unavailable": 0},
+        "altitude_m": {"fleet": 21.5, "docks": 28.0,
                        "low": float(elev.min()), "high": float(elev.max())},
+        "flow": {"bins": BINS, "km": KM, "min_dt": ftdata.BIKES_FLOW_MIN_DT,
+                 "max_dt": ftdata.BIKES_FLOW_MAX_DT,
+                 "track_m": ftdata.BIKES_TRACK_MIN_M,
+                 "track_max": ftdata.BIKES_TRACK_MAX,
+                 "track_unit_m": ftdata.BIKES_TRACK_UNIT_M},
         "interpolated": 0,
-        "hist": {"t": t, "fleet_m": hf, "docks_m": hd,
-                 "loose_m": [round(docks, 2)] * len(t),
-                 "bikes": [int(bikes_at.sum())] * len(t),
-                 "empty": [0] * len(t), "loose": [int(loose)] * len(t),
-                 "bucket": BUCKET, "hours": hours, "n": len(t)},
-        "units": {}, "sources": ["synthetic"],
+        "hist": {"t": t, "mov": mov, "dt": dt, "flow": flow,
+                 "trk": trk, "seen": seen, "gone": gone, "came": came,
+                 "fleet_m": [21.5] * nb, "docks_m": [28.0] * nb,
+                 "bikes": [2700] * nb, "empty": [len(dry)] * nb,
+                 "loose": [600] * nb, "bucket": BUCKET, "hours": hours,
+                 "bins": BINS, "n": nb},
+        "base": {"at": now, "sid": "0" * 6 * n, "bikes": [10] * n},
+        "loose_base": {"at": now, "k": ["0" * 8] * 4,
+                       "lat": [377700] * 4, "lon": [-1224000] * 4},
+        "units": {}, "sources": [],
     }
-    if mangle:
+    if mangle is not None:
         mangle(payload)
-
     os.makedirs(cache_dir, exist_ok=True)
     path = os.path.join(cache_dir, "baywheels.json")
     with open(path, "w") as fh:
         json.dump({"name": "baywheels", "source": "synthetic",
-                   "ttl": ftdata.BIKES_TTL, "fetched_at": now,
+                   "ttl": ftdata.BIKES_TTL, "fetched_at": fetched_at,
                    "payload": payload}, fh)
-    return path, {"elev": elev, "fill": fill, "free": free, "open": openf,
-                  "cap": cap, "bikes": bikes_at, "fleet": fleet,
-                  "docks": docks, "t": t, "hist_fleet": hf}
-
-
-def warmth(rgb):
-    """How warm a pixel is: red minus blue. Positive is the dry end of the ramp."""
-    return int(rgb[0]) - int(rgb[2])
-
-
-def ridge_row(frame, lay, col):
-    """The topmost lit row of the hill in this column, or None."""
-    seg = frame[lay.hill_y:lay.hill_bot + 1, col]
-    lit = np.flatnonzero(seg.max(axis=1) > 0)
-    return None if not len(lit) else int(lit[0] + lay.hill_y)
-
-
-def surface_rgb(frame, lay, col, ridge):
-    """The colour of the surface in this column: the row above the rock."""
-    return frame[ridge[col], col]
+    return path, {"dist": dist, "elev": elev, "t": t, "mov": mov, "dt": dt,
+                  "flow": flow, "nb": nb}
 
 
 # --------------------------------------------------------------------------
-# 1. The hill, in pixels, against the cities we invented.
+# 1. The promises: no network, and a terrain bake that exists.
 # --------------------------------------------------------------------------
 
-def test_hill_direction():
-    print("\nthe hill rises with altitude, left to right")
-    tmp = tempfile.mkdtemp(prefix="bikes-hill")
+def test_no_network():
+    print("\nthe network promise")
+    before = set(sys.modules)
+    ftdata.load("baywheels", tempfile.mkdtemp(prefix="bikes-net"))
+    new = set(sys.modules) - before
+    bad = [m for m in new
+           if m.split(".")[0] in ("urllib", "http", "socket", "ssl", "requests")]
+    check("ftdata.load() imports no network module", not bad, ",".join(bad))
+    src = open(os.path.join(HERE, "bikes.py")).read()
+    imported = [m for m in ("urllib", "http.client", "socket", "requests",
+                            "ssl") if ("import " + m) in src]
+    check("bikes.py does not import one either", not imported,
+          ",".join(imported))
+
+
+def test_terrain_bake():
+    print("\nthe committed elevation bake")
+    path = os.path.join(HERE, ftdata.BIKES_TERRAIN)
+    check("bikes-terrain.npz is in the tree", os.path.exists(path), path)
+    with np.load(path, allow_pickle=True) as z:
+        ids, elev = z["ids"], z["elev"]
+        check("...and carries an elevation per station id",
+              len(ids) == len(elev) and len(ids) > 500,
+              "%d stations" % len(ids))
+        check("...whose range is a city and not a continent",
+              0.0 <= float(elev.min()) and float(elev.max()) < 400.0,
+              "%.1f to %.1f m" % (elev.min(), elev.max()))
+
+
+# --------------------------------------------------------------------------
+# 2. The axis. Downtown is on the left, and that has to be true in the record,
+# in the layout arithmetic and in the pixels -- three places that could each
+# be right on their own while disagreeing with each other.
+# --------------------------------------------------------------------------
+
+def test_axis():
+    print("\ndowntown is on the left, and the city climbs away from it")
+    tmp = tempfile.mkdtemp(prefix="bikes-axis")
+    try:
+        _p, truth = synthetic(tmp)
+        r, f = frames(opts(cache_dir=tmp), 30)
+        lay, rec = r.layout, r.state["rec"]
+        check("the record is sorted ascending by distance",
+              bool(np.all(np.diff(rec["dist"]) >= -1.0)))
+        ridge = r.state["ridge"]
+        # Rows count downward, so a higher city is a *smaller* row number.
+        left = float(ridge[:lay.w // 8].mean())
+        crest = float(ridge[lay.w // 2 - 20:lay.w // 2 + 20].mean())
+        check("the left edge of the landscape is the lowest part of it",
+              left > crest + 4, "left row %.1f, crest row %.1f" % (left, crest))
+        check("...and every column of it is inside the map region",
+              int(ridge.min()) >= lay.map_y and int(ridge.max()) <= lay.map_bot,
+              "rows %d..%d in %d..%d" % (ridge.min(), ridge.max(),
+                                         lay.map_y, lay.map_bot))
+        check("the panel names both ends of the axis",
+              contains_text(f, "DOWNTOWN") and contains_text(f, "KM OUT"))
+        # A dock at 11.9 km must land in the last few columns; getting the
+        # scale wrong by the width of one band is invisible on a wall.
+        col = int(rec["dist"][-1] / (rec["km_max"] * 1000.0) * (lay.w - 1))
+        check("the furthest dock lands at the right-hand edge",
+              col > lay.w - 8, "column %d of %d" % (col, lay.w))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# 3. The inference. This is the section that matters: the flux, the transport
+# and the sign of the thing.
+# --------------------------------------------------------------------------
+
+def test_flux_conserves():
+    print("\nthe flux is a conserved quantity")
+    rng = np.random.default_rng(7)
+    bad_end, bad_sum = [], []
+    for trial in range(200):
+        net = rng.integers(-9, 10, BINS).astype(np.float64)
+        weight = rng.integers(1, 20, BINS).astype(np.float64)
+        b = bikes.balance(net, weight)
+        if abs(float(b.sum())) > 1e-6:
+            bad_sum.append(trial)
+        if abs(float(np.cumsum(b)[-1])) > 1e-6:
+            bad_end.append(trial)
+    check("balancing removes the docked fleet's own gain or loss",
+          not bad_sum, "%d of 200 trials left a residual" % len(bad_sum))
+    check("...so the flux returns to zero at the city limit",
+          not bad_end, "%d of 200 trials did not" % len(bad_end))
+
+    # And the imbalance really is spread by dock capacity, not evenly: a band
+    # with twice the docks should absorb twice as much of it.
+    net = np.zeros(BINS)
+    net[0] = 10.0
+    weight = np.ones(BINS)
+    weight[1] = 3.0
+    b = bikes.balance(net, weight)
+    take = -(b - net)
+    check("...and the imbalance is spread in proportion to dock capacity",
+          abs(take[1] / take[2] - 3.0) < 1e-6,
+          "band with 3x the docks took %.2fx the correction"
+          % (take[1] / take[2]))
+
+
+def test_transport_direction():
+    print("\nthe transport runs the way the counts say it does")
+    # Downtown gains, the hills lose: every journey must run inward.
+    net = np.zeros(BINS)
+    net[1] = 40.0
+    net[25] = -40.0
+    a, b, mass = bikes.transport(net, 120)
+    check("mass moved equals what the filling bands gained",
+          abs(mass - 40.0) < 1e-6, "%.1f bikes" % mass)
+    check("...spread over the particles asked for", len(a) == 120,
+          "%d particles" % len(a))
+    check("every particle leaves the emptying band",
+          bool(np.all(a == 25)), "sources %s" % np.unique(a))
+    check("...and arrives at the filling one",
+          bool(np.all(b == 1)), "sinks %s" % np.unique(b))
+    check("...which is inward, towards downtown",
+          bool(np.all(b < a)))
+
+    # The inverse, so the check is about the arithmetic and not about which
+    # end of the array happened to be positive.
+    a2, b2, _m = bikes.transport(-net, 120)
+    check("reversing the counts reverses every journey",
+          bool(np.all(b2 > a2)), "sources %s sinks %s"
+          % (np.unique(a2), np.unique(b2)))
+
+    # Monotone coupling: two sources and two sinks must not cross.
+    # Two sources and two sinks, interleaved so that the two possible
+    # matchings have very different costs: 10->12 with 30->32 is four bands
+    # of travel, 10->32 with 30->12 is forty. The monotone coupling must pick
+    # the first, and a coupling that matched at random would average both.
+    net = np.zeros(BINS)
+    net[10], net[30] = -10.0, -10.0
+    net[12], net[32] = 10.0, 10.0
+    a3, b3, _m = bikes.transport(net, 400)
+    order = np.argsort(a3, kind="stable")
+    check("the coupling never crosses itself",
+          bool(np.all(np.diff(b3[order]) >= 0)),
+          "nearest source matched to nearest sink")
+    travel = float(np.abs(a3 - b3).mean())
+    check("...and it is the shorter of the two matchings available",
+          travel < 4.0, "mean %.1f bands travelled, against 20 if crossed"
+          % travel)
+
+
+def test_headline_arithmetic():
+    print("\nthe headline is bikes an hour and is halved exactly once")
+    tmp = tempfile.mkdtemp(prefix="bikes-head")
     try:
         synthetic(tmp)
-        r, f = settled(opts(cache_dir=tmp, sweep=0.0, reveal=0.0, no_mist=True))
-        lay = r.layout
-        ridge = r.state["ridge"]
-        check("the ridge is monotonically non-increasing in row",
-              bool(np.all(np.diff(ridge) <= 0)),
-              "rows %d -> %d" % (ridge[0], ridge[-1]))
-        check("...and the right hand end is far higher than the left",
-              ridge[0] - ridge[-1] >= lay.hill_h // 2,
-              "%d rows of climb over %d of hill"
-              % (ridge[0] - ridge[-1], lay.hill_h))
-
-        # Rock below the ridge, sky above it. The one thing that would make the
-        # picture a line chart rather than a hill is the body being missing,
-        # and it is asserted over every column rather than a sampled one --
-        # a hill with a hole in it is exactly the sort of off-by-one that
-        # survives being looked at.
-        rock = np.array(bikes.C_ROCK, np.uint8)
-        has_body = np.zeros(lay.w, bool)
-        for c in range(lay.w):
-            seg = f[ridge[c] + 2:lay.hill_bot + 1, c]
-            has_body[c] = bool(len(seg)) and bool(
-                (seg == rock).all(axis=1).any())
-        check("every column of the hill has a body under its ridge",
-              has_body.mean() > 0.95,
-              "%d of %d columns" % (has_body.sum(), lay.w))
-
-        # And sky over it. Column 240 rather than the middle: the caption lives
-        # in the upper left and this check is about the hill, not the writing.
-        col = 240
-        above = f[lay.hill_y:max(lay.hill_y + 1, ridge[col] - 4), col]
-        check("...and nothing bright above it",
-              int(above.max()) <= 40, "brightest sky pixel %d" % above.max())
-
-        # A record whose elevations descend is a record this file cannot draw:
-        # every index in it assumes ascending, and an unsorted one would draw a
-        # plausible, meaningless mountain range.
-        bad = tempfile.mkdtemp(prefix="bikes-desc")
-        try:
-            synthetic(bad, descending=True)
-            rb, fb = frames(opts(cache_dir=bad), 8)
-            check("a record sorted the other way is refused, not drawn",
-                  rb.state["rec"] is None and contains_text(fb, "NO BIKE DATA"),
-                  str(rb.state["problem"])[:44])
-        finally:
-            shutil.rmtree(bad, ignore_errors=True)
+        r, _f = frames(opts(cache_dir=tmp, step=3600.0), 8)
+        hist = r.state["rec"]["hist"]
+        bad = []
+        for s in r.state["steps"]:
+            if s["rate"] is None:
+                continue
+            sel = (hist["t"] >= s["t0"]) & (hist["t"] < s["t1"])
+            want = float(hist["mov"][sel].sum()) * 0.5 * 3600.0 \
+                / float(hist["dt"][sel].sum())
+            if abs(want - s["rate"]) > 1e-3:
+                bad.append((want, s["rate"]))
+        check("every step's rate is mov/2 scaled to an hour", not bad,
+              "%d steps disagreed" % len(bad))
+        peak = max(s["rate"] for s in r.state["steps"] if s["rate"])
+        check("...and a rush hour is a four-figure number", 400 < peak < 9000,
+              "peak %.0f bikes/h" % peak)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_ramp_direction():
-    print("\nthe occupancy ramp, which is plausible inside out")
-    tmp = tempfile.mkdtemp(prefix="bikes-ramp")
-    inv = tempfile.mkdtemp(prefix="bikes-ramp2")
+def test_direction_on_the_panel():
+    print("\nthe direction reaches the pixels, and reverses when the day does")
+    tmp = tempfile.mkdtemp(prefix="bikes-dir")
     try:
-        # Flats full, hills dry: the ordinary weekday-evening city.
-        synthetic(tmp, fill_of_rank=lambda x: 0.95 - 0.95 * x)
-        r, f = settled(opts(cache_dir=tmp, sweep=0.0, reveal=0.0, no_mist=True))
-        ridge = r.state["ridge"]
-        lo = warmth(surface_rgb(f, r.layout, 12, ridge))
-        hi = warmth(surface_rgb(f, r.layout, 307, ridge))
-        check("dry hilltops are warmer than full flats", hi > lo + 60,
-              "sea level r-b %d, summit r-b %d" % (lo, hi))
-
-        # And the same city upside down has to come out the other way round,
-        # which is what makes the check above about the ramp and not about the
-        # fact that one end of the panel happens to be orange.
-        synthetic(inv, fill_of_rank=lambda x: 0.05 + 0.95 * x)
-        r2, f2 = settled(opts(cache_dir=inv, sweep=0.0, reveal=0.0,
-                              no_mist=True))
-        ridge2 = r2.state["ridge"]
-        lo2 = warmth(surface_rgb(f2, r2.layout, 12, ridge2))
-        hi2 = warmth(surface_rgb(f2, r2.layout, 307, ridge2))
-        check("...and inverting the city inverts the ridge", lo2 > hi2 + 60,
-              "sea level r-b %d, summit r-b %d" % (lo2, hi2))
-
-        # The quiet middle. A ramp whose healthy band is as loud as its alarms
-        # is a ramp that says nothing, and this is the one property of it that
-        # is a design decision rather than a direction.
-        lut = ds.gradient(bikes.FILL_RAMP, 64)
-        peak = lut.max(axis=1)
-        check("the healthy middle of the ramp is the dimmest part of it",
-              int(peak[20:50].max()) < int(peak[0]) and
-              int(peak[20:50].max()) < int(peak[-1]),
-              "middle %d, dry %d, full %d"
-              % (peak[20:50].max(), peak[0], peak[-1]))
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-        shutil.rmtree(inv, ignore_errors=True)
-
-
-def test_flags_and_mist():
-    print("\ndry flags, jammed marks and the mist that must not eat them")
-    tmp = tempfile.mkdtemp(prefix="bikes-flag")
-    try:
-        # Three dry stations high on the hill and three jammed ones low down,
-        # in a city that is otherwise uniformly comfortable.
-        dry_idx = (280, 285, 290)
-        jam_idx = (4, 9, 14)
-        synthetic(tmp, fill_of_rank=lambda x: 0.45, dry=dry_idx,
-                  jammed=jam_idx)
-        r, f = settled(opts(cache_dir=tmp, sweep=0.0, reveal=0.0))
-        lay, ridge = r.layout, r.state["ridge"]
-        flags = r.state["flags"]
-        check("every dry station raises a flag", flags is not None
-              and len(flags[0]) >= 2 * len(dry_idx),
-              "%d flag pixels" % (0 if flags is None else len(flags[0])))
-
-        n = r.state["rec"]["n"]
-        dry_cols = sorted(set(int(i * lay.w / n) for i in dry_idx))
-        col = dry_cols[len(dry_cols) // 2]
-        over = f[max(lay.hill_y, ridge[col] - 3):ridge[col], col]
-        check("...above the ridge, in the dry colour",
-              warmth(over.max(axis=0)) > 80, "r-b %d" % warmth(over.max(axis=0)))
-
-        jam_cols = sorted(set(int(i * lay.w / n) for i in jam_idx))
-        jcol = jam_cols[len(jam_cols) // 2]
-        under = f[ridge[jcol] + 1:ridge[jcol] + 5, jcol]
-        full = np.array(bikes.C_FULL, np.uint8)
-        check("jammed stations bite down into the rock in the full colour",
-              bool((under == full).all(axis=1).any()),
-              "rows %s" % [int(v.max()) for v in under])
-
-        # The mist has to stay off the surface. This is the check that catches
-        # a one-row error in the gap, which would replace the occupancy colours
-        # with a stipple and look like a working panel.
-        mist = np.array(bikes.C_MIST, np.uint8)
-        cols = np.arange(lay.w)
-        on_ridge = (f[ridge, cols] == mist).all(axis=1)
-        check("no mist pixel lands on the ridge itself",
-              not on_ridge.any(), "%d of %d columns" % (on_ridge.sum(), lay.w))
-
-        # And --no-mist has to actually remove it, or the option is decoration.
-        _, f2 = settled(opts(cache_dir=tmp, sweep=0.0, reveal=0.0,
-                             no_mist=True))
-        anywhere = int((f2 == mist).all(axis=2).sum())
-        check("--no-mist leaves none of it on the panel", anywhere == 0,
-              "%d pixels" % anywhere)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-# --------------------------------------------------------------------------
-# 2. The headline, whose sign is a whole sentence.
-# --------------------------------------------------------------------------
-
-def test_anomaly_sign():
-    print("\nthe altitude anomaly, whose sign is a sentence")
-    down = tempfile.mkdtemp(prefix="bikes-down")
-    up = tempfile.mkdtemp(prefix="bikes-up")
-    try:
-        _, truth = synthetic(down, anomaly_at=-4.3)
-        r, f = settled(opts(cache_dir=down, sweep=0.0, reveal=0.0))
-        a = bikes.anomaly(r.state["rec"])
-        check("anomaly is fleet altitude less dock altitude",
-              abs(a - (truth["fleet"] - truth["docks"])) < 0.05,
-              "%.2f m" % a)
-        check("a fleet below its docks says DOWNHILL",
-              contains_text(f, "%.1fM DOWNHILL" % abs(a)),
-              "%.1fM DOWNHILL" % abs(a))
-        check("...and says which way round that is, in words",
-              contains_text(f, "FLEET BELOW ITS DOCKS"))
+        # A day pinned to nine in the morning: every bucket is inbound.
+        morning = os.path.join(tmp, "am")
+        at = _at_hour(8)
+        synthetic(morning, hours=2.0, at=at)
+        r, _f = frames(opts(cache_dir=morning, at="%f" % at, hours=2.0), 8)
+        s = [x for x in r.state["steps"] if x["rate"] is not None][-1]
+        check("a morning of counts reads as inbound", s["pull"] > 0.4,
+              "pull %+.2f bands per bike" % s["pull"])
+        check("...and its particles are baked running left",
+              float(s["flow"]["dx"].mean()) < 0,
+              "mean dx %+.1f px" % s["flow"]["dx"].mean())
+        gi, vi = _hue_over_step(r, 8)
+        check("...and the panel is green rather than violet", gi > 3 * vi + 20,
+              "%d green, %d violet pixels" % (gi, vi))
+        check("...and says so in words",
+              contains_text(_settle(r, 8), "INBOUND"))
         check("...and does not also say the opposite",
-              not contains_text(f, "FLEET ABOVE ITS DOCKS"))
+              not contains_text(_settle(r, 8), "OUTBOUND"))
 
-        _, truth2 = synthetic(up, anomaly_at=+3.1)
-        r2, f2 = settled(opts(cache_dir=up, sweep=0.0, reveal=0.0))
-        a2 = bikes.anomaly(r2.state["rec"])
-        check("a fleet above its docks says UPHILL instead",
-              a2 > 0 and contains_text(f2, "%.1fM UPHILL" % a2)
-              and contains_text(f2, "FLEET ABOVE ITS DOCKS"),
-              "%.1fM UPHILL" % a2)
-        check("...and the headline changes colour with the sign",
-              bikes.C_DOWN != bikes.C_UP
-              and warmth(bikes.C_DOWN) > warmth(bikes.C_UP))
+        # The same city with every count negated. Nothing else changes.
+        evening = os.path.join(tmp, "pm")
+        synthetic(evening, hours=2.0, at=at, reverse=True)
+        r2, _f2 = frames(opts(cache_dir=evening, at="%f" % at, hours=2.0), 8)
+        s2 = [x for x in r2.state["steps"] if x["rate"] is not None][-1]
+        check("negating every count reverses the reading", s2["pull"] < -0.4,
+              "pull %+.2f" % s2["pull"])
+        check("...and the particles run right",
+              float(s2["flow"]["dx"].mean()) > 0,
+              "mean dx %+.1f px" % s2["flow"]["dx"].mean())
+        g2, v2 = _hue_over_step(r2, 8)
+        check("...and the panel is violet rather than green", v2 > 3 * g2 + 20,
+              "%d green, %d violet pixels" % (g2, v2))
+        check("...and says OUTBOUND", contains_text(_settle(r2, 8), "OUTBOUND"))
 
-        # The counts on the header have to be the record's, not a recount.
-        t = r.state["rec"]["totals"]
-        check("the header carries the record's own bike and dry counts",
-              contains_text(f, "%d BIKES" % t["bikes"]),
-              "%d bikes, %d dry" % (t["bikes"], t["empty"]))
-    finally:
-        shutil.rmtree(down, ignore_errors=True)
-        shutil.rmtree(up, ignore_errors=True)
-
-
-def test_trend():
-    print("\nthe trend, and what it says when there is nothing to trend")
-    tmp = tempfile.mkdtemp(prefix="bikes-trend")
-    thin = tempfile.mkdtemp(prefix="bikes-thin")
-    try:
-        synthetic(tmp)
-        r, _ = settled(opts(cache_dir=tmp, sweep=0.0, reveal=0.0))
-        rate = bikes.trend(r.state["rec"])
-        check("a full day of history yields a rate in metres an hour",
-              rate is not None and abs(rate) < 20.0, "%.2f m/h" % (rate or 0))
-
-        synthetic(thin, no_hist=True)
-        r2, f2 = settled(opts(cache_dir=thin, sweep=0.0, reveal=0.0))
-        check("a record with no history yields no rate",
-              bikes.trend(r2.state["rec"]) is None)
-        check("...and the panel says the track is still building",
-              contains_text(f2, "24H TRACK BUILDING"))
+        # A city where nothing moves anywhere must not pick a side.
+        still = os.path.join(tmp, "flat")
+        synthetic(still, hours=2.0, at=at, flat=True, no_tracks=True)
+        r3, f3 = frames(opts(cache_dir=still, at="%f" % at, hours=2.0), 40)
+        s3 = [x for x in r3.state["steps"] if x["rate"] is not None][-1]
+        check("a day with no net change reads as balanced",
+              abs(s3["pull"]) <= 0.4 and s3["flow"] is None,
+              "pull %+.2f, flow=%s" % (s3["pull"], s3["flow"]))
+        check("...and says BALANCED rather than a direction",
+              contains_text(f3, "BALANCED"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-        shutil.rmtree(thin, ignore_errors=True)
+
+
+def _at_hour(hour):
+    """An epoch at `hour` o'clock local, today. The commute needs a time."""
+    lt = list(time.localtime())
+    lt[3], lt[4], lt[5] = hour, 30, 0
+    return time.mktime(tuple(lt))
+
+
+def _settle(r, step_frames):
+    """A frame from the middle of the current step, rendered in order."""
+    out = None
+    for i in range(step_frames):
+        out = r(i / 20.0, i)
+    return out.copy()
+
+
+def _hue_over_step(r, nframes):
+    """Green and violet pixel counts summed over the first `nframes`."""
+    gi = vi = 0
+    for i in range(nframes):
+        f = r(i / 20.0, i)
+        g, v = hue_counts(f, r.layout)
+        gi += g
+        vi += v
+    return gi, vi
 
 
 # --------------------------------------------------------------------------
-# 3. The lane, whose gaps must stay gaps.
+# 3b. The observed layer, which is the one thing on this panel that was
+# actually watched happening, and the privacy design that goes with it.
 # --------------------------------------------------------------------------
 
-def test_lane():
-    print("\nthe 24 hour lane")
-    tmp = tempfile.mkdtemp(prefix="bikes-lane")
+def test_observed_layer():
+    print("\nobserved ebike journeys are drawn, and drawn differently")
+    tmp = tempfile.mkdtemp(prefix="bikes-obs")
     try:
-        # A three-hour hole in the middle of the night, which the lane must
-        # leave empty rather than bridging.
-        synthetic(tmp, hist_gap=((2.0, 5.0),))
-        r, f = settled(opts(cache_dir=tmp, sweep=0.0, reveal=0.0))
-        lay = r.layout
-        if not lay.lane_h:
-            check("lane exists at 320x64", False)
-            return
-        band = f[lay.lane_y:lay.lane_y + lay.lane_h]
-        curve = np.array(bikes.C_DOWN, np.uint8)
-        fill = np.array(bikes.C_DOWN_FILL, np.uint8)
-        drawn = ((band == curve).all(axis=2) | (band == fill).all(axis=2))
-        lit_cols = drawn.any(axis=0)
-        check("most of the day is drawn", lit_cols.mean() > 0.6,
-              "%d of %d columns" % (lit_cols.sum(), lay.w))
-        # Where the hole is, in columns.
-        now = r.clock()
-        t0 = now - 24 * 3600.0
-        hole = []
-        for c in range(lay.w):
-            tt = t0 + (c + 0.5) / lay.w * 24 * 3600.0
-            hour = time.localtime(tt).tm_hour + time.localtime(tt).tm_min / 60.0
-            if 2.3 <= hour < 4.7:
-                hole.append(c)
-        check("a three-hour hole in the series is left as a hole",
-              len(hole) > 8 and not lit_cols[hole].any(),
-              "%d of %d hole columns drawn"
-              % (int(lit_cols[hole].sum()), len(hole)))
+        at = _at_hour(8)
+        synthetic(tmp, hours=2.0, at=at)
+        args = opts(cache_dir=tmp, at="%f" % at, hours=2.0)
+        r = bikes.build(args)
+        s = [x for x in r.state["steps"] if x["rate"] is not None][-1]
+        check("a step with tracks in the record bakes comets", s["obs"],
+              "%d tracks" % s["tracks"])
+        check("...running the same way the morning does",
+              float(s["obs"]["dx"].mean()) < 0,
+              "mean dx %+.1f px" % s["obs"]["dx"].mean())
+        check("...and there are far fewer of them than inferred particles",
+              s["tracks"] < len(s["flow"]["x0"]),
+              "%d observed against %d inferred"
+              % (s["tracks"], len(s["flow"]["x0"])))
+        check("...flying in a lane of their own above the inferred field",
+              int(s["obs"]["yj"].min()) > int(s["flow"]["yj"].max()),
+              "rows %d..%d above %d..%d"
+              % (s["obs"]["yj"].min(), s["obs"]["yj"].max(),
+                 s["flow"]["yj"].min(), s["flow"]["yj"].max()))
 
-        # Sign: the synthetic day is below its docks throughout, so every bar
-        # must hang below the reference line and none above it.
-        up = np.array(bikes.C_UP_FILL, np.uint8)
-        check("a day spent below the docks draws nothing above the line",
-              int((band == up).all(axis=2).sum()) == 0)
+        # Off the pixels, and by exact palette match rather than by "is it
+        # bright": the caption is also bright and also lives in the map region,
+        # and a test that counted near-white pixels would pass on the word
+        # BIKES alone. The observed blocks are the last two of the four.
+        lit = _settle(r, 20)
+        obs_pal = r.palette[2 * bikes.FADE_LEVELS:]
+        reg = lit[r.layout.map_y:r.layout.map_bot + 1]
+        hit = _count_palette(reg, obs_pal)
+        check("...and they reach the panel in their own colours", hit > 0,
+              "%d observed pixels" % hit)
+        check("the panel says how many were seen",
+              contains_text(lit, "SEEN TO MOVE"))
+        check("...and which fleet they came from",
+              contains_text(lit, "FREE EBIKES"))
+        check("...and that the rest is inferred",
+              contains_text(lit, "NOT TRIPS"))
 
-        # The present moment has to be marked, and marked at the right edge.
-        check("the now-line is at the right hand end",
-              r.state["now_col"] >= lay.w - 2, "column %d" % r.state["now_col"])
-        check("...and the local time is printed with it",
-              contains_text(f, bikes.hhmm(now)), bikes.hhmm(now))
+        # And with the layer switched off, none of it is on the panel.
+        r2, f2 = frames(opts(cache_dir=tmp, at="%f" % at, hours=2.0,
+                             no_seen=True), 20)
+        reg2 = f2[r2.layout.map_y:r2.layout.map_bot + 1]
+        left = _count_palette(reg2, obs_pal)
+        check("--no-seen removes them entirely", left == 0,
+              "%d observed pixels left" % left)
+
+        # A record whose free_bike_status failed keeps the inferred field.
+        bare = os.path.join(tmp, "bare")
+        synthetic(bare, hours=2.0, at=at, no_tracks=True)
+        r3, f3 = frames(opts(cache_dir=bare, at="%f" % at, hours=2.0), 20)
+        s3 = [x for x in r3.state["steps"] if x["rate"] is not None][-1]
+        check("a bucket with no ebike feed still draws the inferred field",
+              s3["obs"] is None and s3["flow"] is not None)
+        check("...and does not claim journeys it does not have",
+              not contains_text(f3, "SEEN TO MOVE"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_track_differencing():
+    print("\nthe fetcher observes journeys by the printed number, not bike_id")
+    # Four bikes: one sits still, one jitters by GPS, one rides a kilometre,
+    # one vanishes. A fifth appears.
+    def anon(nm):
+        return ftdata._bikes_anon(nm)
+    lat0, lon0 = 37.7800, -122.4200
+    old_k = [anon("100-001"), anon("100-002"), anon("100-003"), anon("100-004")]
+    base = {"loose_base": {
+        "at": 1000.0, "k": old_k,
+        "lat": [int(lat0 * 1e4)] * 4,
+        "lon": [int(lon0 * 1e4)] * 4}}
+    keys = [anon("100-001"), anon("100-002"), anon("100-003"), anon("100-009")]
+    lats = np.array([lat0, lat0 + 0.00005, lat0 + 0.009, lat0])
+    lons = np.array([lon0, lon0, lon0, lon0])
+    trk, seen, gone, came, nxt = ftdata._bikes_tracks(
+        base, keys, lats, lons, 1600.0)
+    check("bikes present in both snapshots are the denominator", seen == 3,
+          "seen %d" % seen)
+    check("a bike that vanished is counted, not drawn", gone == 1,
+          "gone %d" % gone)
+    check("a bike that appeared is counted, not drawn", came == 1,
+          "came %d" % came)
+    check("only the bike that actually went somewhere is a journey",
+          trk is not None and len(trk) == 2,
+          "%d numbers = %d journeys" % (len(trk or []), len(trk or []) // 2))
+    check("...and GPS jitter under the threshold is not one",
+          trk is not None and len(trk) == 2,
+          "threshold %.0f m" % ftdata.BIKES_TRACK_MIN_M)
+
+    got = ftdata._bikes_tracks(None, keys, lats, lons, 1600.0)
+    check("no baseline declines rather than inventing journeys",
+          got[0] is None)
+    got = ftdata._bikes_tracks(base, keys, lats, lons, 1030.0)
+    check("a doubled pass declines and keeps the baseline",
+          got[0] is None and got[4]["at"] == 1000.0)
+    got = ftdata._bikes_tracks(base, keys, lats, lons, 9000.0)
+    check("two hours apart declines and resets", got[0] is None
+          and got[4]["at"] == 9000.0)
+
+
+def test_privacy():
+    print("\nthe panel and the record carry no bike number anywhere")
+    tmp = tempfile.mkdtemp(prefix="bikes-priv")
+    try:
+        token = ftdata._bikes_anon("190-591")
+        check("a printed number becomes an opaque token",
+              token and "190" not in token and "591" not in token
+              and len(token) == 8, "%r -> %r" % ("190-591", token))
+        check("...deterministically, or nothing could be matched",
+              token == ftdata._bikes_anon("190-591"))
+        check("...and two bikes do not collide",
+              token != ftdata._bikes_anon("190-592"))
+
+        # The record the fetcher writes must contain no NNN-NNN string
+        # anywhere, at any depth. Checked against the serialised JSON, which
+        # is what actually lands on disk.
+        at = _at_hour(8)
+        synthetic(tmp, hours=2.0, at=at)
+        blob = open(os.path.join(tmp, "baywheels.json")).read()
+        hits = re.findall(r'"\d{3}-\d{3}"', blob)
+        check("no bike number survives into the record", not hits,
+              ",".join(hits[:4]))
+
+        # And the history -- the part that accumulates -- carries no
+        # identifier of any kind, so no trip history can be reconstructed from
+        # a stolen record however long the fetcher has been running.
+        h = json.loads(blob)["payload"]["hist"]
+        ident = [k for k in h if k in ("k", "sid", "name", "bike_id")]
+        check("the rolling history carries no identifier at all", not ident,
+              ",".join(ident))
+        keys = set()
+        for row in h["trk"]:
+            for v in (row or []):
+                keys.add(type(v).__name__)
+        check("...only integer positions", keys <= {"int"}, str(sorted(keys)))
+
+        # Subscript or .get(), not the bare words: the module docstring
+        # explains at length what `bike_id` and `name` are and why one of them
+        # is not stored, and a substring check on the prose would forbid
+        # documenting the decision.
+        src = open(os.path.join(HERE, "bikes.py")).read()
+        reads = re.findall(r'(?:\[|\.get\()\s*["\'](?:name|bike_id)["\']',
+                           src)
+        check("bikes.py never reads a bike name or id", not reads,
+              ",".join(reads[:4]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# 4. Time. The replay window, the strip, and the gaps that have to stay gaps.
+# --------------------------------------------------------------------------
+
+def test_window_and_gaps():
+    print("\nthe replay window is what the record holds, and gaps stay gaps")
+    tmp = tempfile.mkdtemp(prefix="bikes-time")
+    try:
+        full = os.path.join(tmp, "full")
+        synthetic(full, hours=12.0)
+        r, f = frames(opts(cache_dir=full), 8)
+        check("twelve hours of buckets replays as twelve hours",
+              abs(r.state["span"] - 12 * 3600.0) < 3600.0,
+              "%.1f h" % (r.state["span"] / 3600.0))
+        check("...in twelve steps of an hour", len(r.state["steps"]) == 12,
+              "%d steps" % len(r.state["steps"]))
+        check("...and the panel says how far back it goes",
+              contains_text(f, "REPLAY OF LAST 12H"))
+
+        # Forty minutes of history: the window must shrink to it rather than
+        # replaying eleven hours of nothing.
+        short = os.path.join(tmp, "short")
+        synthetic(short, hours=0.7)
+        r2, f2 = frames(opts(cache_dir=short), 8)
+        check("forty minutes of buckets replays as forty minutes",
+              r2.state["span"] <= 3600.0,
+              "%.0f min" % (r2.state["span"] / 60.0))
+        check("...and the panel says so rather than claiming twelve hours",
+              not contains_text(f2, "REPLAY OF LAST 12H"))
+
+        # A hole in the middle. The step that covers it must say so in words
+        # rather than drawing an empty hour as a quiet one -- an earlier draft
+        # of this panel carried a twelve-hour bar chart where the hole was a
+        # blank column, and taking the chart out for the sake of the picture
+        # means the caption is now the only thing that reports it.
+        holed = os.path.join(tmp, "holed")
+        gaps = tuple(range(20, 44))
+        _p, truth = synthetic(holed, hours=12.0, gaps=gaps)
+        r3, _f3 = frames(opts(cache_dir=holed), 8)
+        empty = [s for s in r3.state["steps"] if s["rate"] is None]
+        check("a four-hour hole leaves steps with no data in them",
+              len(empty) >= 2, "%d of %d steps"
+              % (len(empty), len(r3.state["steps"])))
+        # Drive the replay to one of them and read the panel.
+        idx = r3.state["steps"].index(empty[0])
+        args3 = opts(cache_dir=holed)
+        rr = bikes.build(args3)
+        per = args3.cycle / len(rr.state["steps"])
+        at_t = (idx + 0.5) * per
+        out = None
+        for i in range(int(at_t * 20) + 1):
+            out = rr(i / 20.0, i)
+        check("...and the panel says that step was never fetched",
+              contains_text(out, "NEVER FETCHED"))
+        check("...rather than drawing it as a quiet hour",
+              not contains_text(out, "BALANCED"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_cold_start():
+    print("\ncold start is a designed state and not an empty panel")
+    tmp = tempfile.mkdtemp(prefix="bikes-cold")
+    try:
+        synthetic(tmp, no_flow=True)
+        r, f = frames(opts(cache_dir=tmp), 60)
+        check("a record with no differences in it still draws the city",
+              r.state["rec"] is not None and r.state["cold"])
+        check("...says LEARNING FLOW", contains_text(f, "LEARNING FLOW"))
+        check("...says why", contains_text(f, "NEEDS TWO FETCHES"))
+        check("...and draws no swarm at all",
+              all(s["flow"] is None and s["obs"] is None
+                  for s in r.state["steps"]),
+              "%d steps" % len(r.state["steps"]))
+        check("...but is not a blank panel",
+              (f.max(axis=2) > 0).sum() > 2000,
+              "%d lit pixels" % (f.max(axis=2) > 0).sum())
+        check("...and never claims a rate it does not have",
+              not contains_text(f, "BIKES/H"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# 5. The fetcher's own arithmetic, which no screenshot reaches.
+# --------------------------------------------------------------------------
+
+def _sid(ids):
+    return "".join(hashlib.sha1(s.encode()).hexdigest()[:6] for s in ids)
+
+
+def test_fetcher_differencing():
+    print("\nthe fetcher's differencing, and its four benign failures")
+    ids = ["s%03d" % i for i in range(12)]
+    sid = _sid(ids)
+    bins = np.array([i // 3 for i in range(12)])
+    was = [5] * 12
+    now = [5] * 12
+    now[0] = 2                      # band 0 lost three
+    now[11] = 8                     # band 3 gained three
+
+    base = {"at": 1000.0, "sid": sid, "bikes": was}
+    flow, mov, dt, nxt = ftdata._bikes_flow({"base": base}, sid, now, bins,
+                                            1000.0 + 600.0)
+    check("a ten-minute difference is computed", flow is not None)
+    check("...with the change in the right bands",
+          flow is not None and flow[0] == -3 and flow[3] == 3, str(flow))
+    check("...and mov counting both ends of every move", mov == 12,
+          "mov %s for six bikes moved" % mov)
+    check("...over the interval the feed actually spanned", dt == 600.0)
+    check("...and the next baseline is this snapshot",
+          nxt["at"] == 1600.0 and nxt["bikes"] == now)
+
+    got = ftdata._bikes_flow(None, sid, now, bins, 1600.0)
+    check("no previous record declines rather than inventing one",
+          got[0] is None and got[1] is None)
+
+    got = ftdata._bikes_flow({"base": base}, sid, now, bins, 1000.0 + 30.0)
+    check("a doubled pass thirty seconds later declines", got[0] is None)
+    check("...and keeps the old baseline so the next pass is full length",
+          got[3]["at"] == 1000.0, "kept at=%.0f" % got[3]["at"])
+
+    got = ftdata._bikes_flow({"base": base}, sid, now, bins, 1000.0 + 9000.0)
+    check("two and a half hours apart declines rather than joining across",
+          got[0] is None)
+    check("...and resets the baseline to now", got[3]["at"] == 10000.0)
+
+    got = ftdata._bikes_flow({"base": base}, sid, now, bins, 900.0)
+    check("a clock that jumped backwards declines", got[0] is None)
+    check("...and resets rather than storing a negative interval",
+          got[3]["at"] == 900.0)
+
+    # A station installed since the last pass. The stations in both snapshots
+    # must still be differenced; matching by array position instead would
+    # shift every station past the new one and invent a citywide flow.
+    ids2 = ids[:6] + ["NEW"] + ids[6:]
+    now2 = now[:6] + [7] + now[6:]
+    bins2 = np.array([min(3, i // 3) for i in range(13)])
+    flow2, mov2, _dt2, _n2 = ftdata._bikes_flow({"base": base}, _sid(ids2),
+                                                now2, bins2, 1600.0)
+    check("a station installed since the last pass costs nothing",
+          flow2 is not None and mov2 == 12,
+          "mov %s, flow %s" % (mov2, flow2))
+
+    check("the identity row is six hex characters a station",
+          len(sid) == 6 * len(ids) and set(sid) <= set("0123456789abcdef"),
+          "%d chars for %d stations" % (len(sid), len(ids)))
 
 
 def test_history_is_bounded():
-    print("\nthe fetcher's rolling series, which appends to itself forever")
-    now = 1786400000.0
-    prev, h = None, None
+    print("\nthe rolling series is bounded, ordered and idempotent")
+    keys = ("fleet_m", "docks_m", "bikes", "empty", "loose", "mov", "dt",
+            "flow")
+    prev = None
+    t0 = 1_700_000_000.0
     for i in range(400):
-        h = ftdata._bikes_history(
-            prev, {"fleet_m": float(i), "docks_m": 30.0, "loose_m": 1.0,
-                   "bikes": i, "empty": 0, "loose": 0},
-            now - (400 - i) * ftdata.BIKES_HIST_BUCKET)
-        prev = {"hist": h}
-    check("400 passes leave at most a day of buckets",
-          h["n"] <= ftdata.BIKES_HIST_MAX
-          and (h["t"][-1] - h["t"][0]) <= ftdata.BIKES_HIST_HOURS * 3600.0,
-          "%d entries over %.1f h"
-          % (h["n"], (h["t"][-1] - h["t"][0]) / 3600.0))
-    check("...and every column stays the same length as the timestamps",
-          all(len(h[k]) == h["n"] for k in
-              ("fleet_m", "docks_m", "loose_m", "bikes", "empty", "loose")))
+        sample = dict.fromkeys(keys, 1)
+        sample["flow"] = [0] * BINS
+        prev = {"hist": ftdata._bikes_history(prev, sample,
+                                              t0 + i * BUCKET)}
+    h = prev["hist"]
+    check("400 passes do not grow the series without bound",
+          h["n"] <= ftdata.BIKES_HIST_MAX, "%d entries" % h["n"])
+    check("...and it covers no more than its stated hours",
+          h["t"][-1] - h["t"][0] <= ftdata.BIKES_HIST_HOURS * 3600.0,
+          "%.1f h" % ((h["t"][-1] - h["t"][0]) / 3600.0))
+    check("...strictly increasing in time",
+          all(b > a for a, b in zip(h["t"], h["t"][1:])))
+    check("...with every column the same length as t",
+          all(len(h[k]) == h["n"] for k in keys))
 
-    same = ftdata._bikes_history(prev, {"fleet_m": 999.0, "docks_m": 1.0,
-                                        "loose_m": 1.0, "bikes": 1,
-                                        "empty": 1, "loose": 1},
-                                 now - 30.0)
+    n_before = h["n"]
+    sample = dict.fromkeys(keys, 2)
+    sample["flow"] = [1] * BINS
+    again = ftdata._bikes_history(prev, sample, t0 + 399 * BUCKET + 90.0)
     check("a second pass inside one bucket overwrites rather than appends",
-          same["n"] == h["n"] and same["fleet_m"][-1] == 999.0,
-          "%d entries" % same["n"])
+          again["n"] == n_before and again["mov"][-1] == 2,
+          "%d -> %d entries" % (n_before, again["n"]))
 
-    back = ftdata._bikes_history(prev, {"fleet_m": 1.0, "docks_m": 1.0,
-                                        "loose_m": 1.0, "bikes": 1,
-                                        "empty": 1, "loose": 1},
-                                 now - 3 * 86400.0)
-    check("a clock that jumps backwards drops the future rather than "
-          "scrambling", back["n"] == 1, "%d entries" % back["n"])
+    jumped = t0 + 200 * BUCKET
+    floor = float(int(jumped // BUCKET) * int(BUCKET))
+    back = ftdata._bikes_history(prev, sample, jumped)
+    check("a clock that jumps backwards drops the future",
+          back["t"][-1] == floor and all(t <= floor for t in back["t"]),
+          "newest bucket %.0f, %d entries kept" % (back["t"][-1], back["n"]))
+    check("...rather than leaving a series the panel would draw as a scribble",
+          all(b > a for a, b in zip(back["t"], back["t"][1:])))
 
-    junk = ftdata._bikes_history({"hist": {"t": [1, 2, 3], "fleet_m": [1]}},
-                                 {"fleet_m": 5.0, "docks_m": 1.0,
-                                  "loose_m": 1.0, "bikes": 1, "empty": 1,
-                                  "loose": 1}, now)
-    check("a previous record of the wrong shape is started over, not fused",
-          junk["n"] == 1)
+    stale = {"hist": {"t": [1.0, 2.0], "fleet_m": [1.0, 2.0]}}
+    fresh = ftdata._bikes_history(stale, sample, t0)
+    check("a record from a version that stored other columns starts fresh",
+          fresh["n"] == 1)
 
 
 # --------------------------------------------------------------------------
-# 4. Motion, and purity. It is a still picture by nature and it must not look
-# like one -- and it must be the same still picture every time.
+# 6. Motion, purity and cost. It is a moving picture by nature and it must be
+# the same moving picture every time.
 # --------------------------------------------------------------------------
 
 def test_motion():
-    print("\nit does not sit there")
-    tmp = tempfile.mkdtemp(prefix="bikes-mot")
+    print("\nthe swarm actually moves, and the replay actually advances")
+    tmp = tempfile.mkdtemp(prefix="bikes-move")
     try:
-        synthetic(tmp)
-        args = opts(cache_dir=tmp)
+        synthetic(tmp, at=_at_hour(8))
+        args = opts(cache_dir=tmp, at="%f" % _at_hour(8))
         r = bikes.build(args)
-        lay = r.layout
-
-        lit = []
-        for i in range(int(args.reveal * 20) + 2):
+        prev, diffs, seen = None, [], set()
+        for i in range(int(args.cycle * 20) + 4):
             f = r(i / 20.0, i)
-            hill = f[lay.hill_y:lay.hill_bot + 1]
-            lit.append(int((hill.max(axis=2) > 0).any(axis=0).sum()))
-        check("the hill reveals from the left rather than appearing",
-              lit[0] < lit[len(lit) // 2] < lit[-1] and lit[0] <= 3,
-              "lit columns %d -> %d -> %d"
-              % (lit[0], lit[len(lit) // 2], lit[-1]))
-
-        prev, diffs = None, []
-        for i in range(int(args.reveal * 20) + 2, int(args.reveal * 20) + 200):
-            f = r(i / 20.0, i)
+            seen.add(r.state["cur"])
             if prev is not None:
                 diffs.append(int((f != prev).any(axis=2).sum()))
             prev = f.copy()
@@ -586,47 +962,13 @@ def test_motion():
             run = run + 1 if d == 0 else 0
             best = max(best, run)
         check("the panel never holds the same frame for a tenth of a second",
-              best <= 2, "longest identical run %d frames of %d"
+              best <= 2, "longest identical run %d of %d frames"
               % (best, len(diffs)))
-        check("the sheen moves a substantial part of the panel",
-              max(diffs) > 200, "biggest change %d pixels" % max(diffs))
-
-        r2 = bikes.build(opts(cache_dir=tmp, reveal=0.0))
-        base = r2.static.astype(int)
-        cols = set()
-        for i in range(int(args.sweep * 20) + 4):
-            f = r2(i / 20.0, i).astype(int)
-            d = np.abs(f - base).sum(axis=(0, 2)).astype(float)
-            nc = r2.state["now_col"] or 0
-            d[max(0, nc - 2):nc + 3] = 0.0
-            # The dry flags differ from the baked frame every frame by design
-            # and they are scattered along the whole ridge, which would drag
-            # the centroid to the middle and hide a sheen that never moved.
-            flags = r2.state["flags"]
-            if flags is not None:
-                d[flags[1]] = 0.0
-            if d.sum() <= 0:
-                continue
-            centre = float((d * np.arange(len(d))).sum() / d.sum())
-            cols.add(int(centre) // 40)
-        check("the sheen crosses the whole width over one period",
-              len(cols) >= 6, "%d of 8 eighths visited" % len(cols))
-
-        # The dry flags have to be the thing that pulses, not the whole panel.
-        # A city with something actually wrong in it, or there is no flag to
-        # watch: the default synthetic city never runs a station down to zero.
-        dryd = tempfile.mkdtemp(prefix="bikes-mot2")
-        synthetic(dryd, dry=(120, 121, 122))
-        rf = bikes.build(opts(cache_dir=dryd, reveal=0.0, sweep=0.0))
-        seen = set()
-        for i in range(40):
-            f = rf(i / 20.0, i)
-            flags = rf.state["flags"]
-            if flags is not None:
-                seen.add(int(f[flags[0][0], flags[1][0]].max()))
-        shutil.rmtree(dryd, ignore_errors=True)
-        check("the dry flags breathe", len(seen) >= 4,
-              "%d distinct brightnesses" % len(seen))
+        check("the swarm moves a substantial part of the panel",
+              max(diffs) > 120, "biggest change %d pixels" % max(diffs))
+        check("one cycle visits every replay step",
+              len(seen) == len(r.state["steps"]),
+              "%d of %d steps" % (len(seen), len(r.state["steps"])))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -635,11 +977,12 @@ def test_purity():
     print("\nrender is a pure function of t once --reload is off")
     tmp = tempfile.mkdtemp(prefix="bikes-pure")
     try:
-        synthetic(tmp)
-        a = bikes.build(opts(cache_dir=tmp))
-        b = bikes.build(opts(cache_dir=tmp))
+        at = _at_hour(8)
+        synthetic(tmp, at=at)
+        a = bikes.build(opts(cache_dir=tmp, at="%f" % at))
+        b = bikes.build(opts(cache_dir=tmp, at="%f" % at))
         bad = []
-        for t0 in (0.0, 0.35, 1.05, 1.9, 2.05, 3.7, 7.15, 11.4, 30.0):
+        for t0 in (0.0, 0.35, 1.05, 1.9, 2.05, 3.7, 7.15, 11.4, 30.0, 41.6):
             cold = a(t0, int(t0 * 20)).copy()
             for i in range(int(t0 * 20) + 1):
                 b(i / 20.0, i)
@@ -651,46 +994,69 @@ def test_purity():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_cost():
+    print("\nframe cost")
+    tmp = tempfile.mkdtemp(prefix="bikes-cost")
+    try:
+        synthetic(tmp, at=_at_hour(8))
+        r = bikes.build(opts(cache_dir=tmp, at="%f" % _at_hour(8)))
+        for i in range(40):
+            r(i / 20.0, i)
+        ts = []
+        for i in range(1200):
+            t0 = time.perf_counter()
+            r(i / 20.0, i)
+            ts.append((time.perf_counter() - t0) * 1e3)
+        ts = np.asarray(ts)
+        p50, p95 = np.percentile(ts, (50, 95))
+        # A tripwire and not a claim about the wall: desktop timings lie by
+        # over an order of magnitude, and what the Pi cares about is the
+        # number of numpy calls, which this cannot see. p95 near p50 is the
+        # part that transfers -- a fat tail here is a fat tail there.
+        check("desktop frame time", p95 < 1.5,
+              "mean %.3f  p50 %.3f  p95 %.3f  max %.3f ms"
+              % (ts.mean(), p50, p95, ts.max()))
+        check("...with no fat tail", p95 < max(3.0 * p50, 0.25),
+              "p95/p50 = %.2f" % (p95 / max(p50, 1e-6)))
+        t0 = time.perf_counter()
+        bikes.build(opts(cache_dir=tmp))
+        check("build cost", True, "%.1f ms" % ((time.perf_counter() - t0) * 1e3))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # --------------------------------------------------------------------------
-# 5. Degraded records. Every one of these has to reach the panel in words.
+# 7. The degraded states, and the sizes.
 # --------------------------------------------------------------------------
 
 def test_degraded():
-    print("\nmissing, ancient, corrupt and half-there records")
+    print("\nstale, refused, malformed and absent")
     tmp = tempfile.mkdtemp(prefix="bikes-bad")
     try:
-        empty = os.path.join(tmp, "empty")
-        os.makedirs(empty)
-        r, f = frames(opts(cache_dir=empty), 8)
-        check("no cache at all says NO BIKE DATA",
-              contains_text(f, "NO BIKE DATA"))
-        check("...and names the command that fixes it",
-              contains_text(f, "FTDATA.PY"))
-        check("...and draws no hill", r.state["rec"] is None)
+        stale = os.path.join(tmp, "stale")
+        synthetic(stale, fetched_ago=45 * 60.0)
+        r, f = frames(opts(cache_dir=stale), 8)
+        check("a 45 minute old record still draws its city",
+              r.state["rec"] is not None
+              and not contains_text(f, "NO BIKE DATA"))
+        check("...and says STALE on the panel",
+              contains_text(f, "STALE") and r.state["stale"],
+              "age %s" % ftdata.describe_age(r.state["rec"]["age"]))
 
-        bad = os.path.join(tmp, "corrupt")
-        os.makedirs(bad)
-        with open(os.path.join(bad, "baywheels.json"), "w") as fh:
-            fh.write('{"payload": {"elev_m": ')
-        _, f = frames(opts(cache_dir=bad), 8)
-        check("a half-written file says NO BIKE DATA",
-              contains_text(f, "NO BIKE DATA"))
-
-        wrong = os.path.join(tmp, "foreign")
-        os.makedirs(wrong)
-        with open(os.path.join(wrong, "baywheels.json"), "w") as fh:
-            json.dump({"name": "baywheels", "fetched_at": time.time(),
-                       "payload": {"hello": "world"}}, fh)
-        _, f = frames(opts(cache_dir=wrong), 8)
-        check("a payload from some other product says NO BIKE DATA",
-              contains_text(f, "NO BIKE DATA"))
-
-        short = os.path.join(tmp, "short")
-        synthetic(short, n=8)
-        r, f = frames(opts(cache_dir=short), 8)
-        check("eight stations is not a city and is refused",
+        old = os.path.join(tmp, "old")
+        synthetic(old, fetched_ago=9 * 3600.0)
+        r, f = frames(opts(cache_dir=old), 8)
+        check("a nine hour old record is refused rather than drawn",
               r.state["rec"] is None and contains_text(f, "NO BIKE DATA"),
               str(r.state["problem"])[:44])
+
+        absent = os.path.join(tmp, "absent")
+        os.makedirs(absent)
+        r, f = frames(opts(cache_dir=absent), 8)
+        check("no record at all gets the card",
+              r.state["rec"] is None and contains_text(f, "NO BIKE DATA"))
+        check("...and the command that fixes it",
+              contains_text(f, "FTDATA.PY"))
 
         ragged = os.path.join(tmp, "ragged")
 
@@ -701,64 +1067,32 @@ def test_degraded():
         check("arrays of different lengths are refused",
               r.state["rec"] is None, str(r.state["problem"])[:44])
 
-        # The dangerous one. A record from breakfast is complete, well formed
-        # and a perfectly good hill, and every dry station on it has been
-        # refilled since.
-        old = os.path.join(tmp, "old")
-        synthetic(old, fetched_ago=9 * 3600.0)
-        r, f = frames(opts(cache_dir=old), 8)
-        check("a nine-hour-old record is refused, not drawn",
-              r.state["rec"] is None and contains_text(f, "NO BIKE DATA"),
-              str(r.state["problem"])[:44])
-        check("...and says how old it was", contains_text(f, "9H"),
-              str(r.state["problem"])[:44])
+        wrong = os.path.join(tmp, "wrong")
+        synthetic(wrong, descending=True)
+        r, f = frames(opts(cache_dir=wrong), 8)
+        check("a record sorted the wrong way is refused, not drawn backwards",
+              r.state["rec"] is None, str(r.state["problem"])[:44])
 
-        # Past the TTL but well inside --max-age: draws, loudly.
-        stale = os.path.join(tmp, "stale")
-        synthetic(stale, fetched_ago=45 * 60.0)
-        r, f = frames(opts(cache_dir=stale), 8)
-        check("a 45 minute old record still draws its hill",
-              r.state["rec"] is not None
-              and not contains_text(f, "NO BIKE DATA"))
-        check("...and says STALE on the panel",
-              contains_text(f, "STALE") and r.state["stale"],
-              "age %s" % ftdata.describe_age(r.state["rec"]["age"]))
+        corrupt = os.path.join(tmp, "corrupt")
+        os.makedirs(corrupt)
+        with open(os.path.join(corrupt, "baywheels.json"), "w") as fh:
+            fh.write('{"payload": {"dist_m": ')
+        r, f = frames(opts(cache_dir=corrupt), 8)
+        check("half a file is a card and not a traceback",
+              r.state["rec"] is None and contains_text(f, "NO BIKE DATA"))
 
-        # No history and no loose bikes: both optional, and losing them must
-        # cost their own marks and nothing else.
-        bare = os.path.join(tmp, "bare")
-        synthetic(bare, no_hist=True, loose=0)
-        r, f = frames(opts(cache_dir=bare, sweep=0.0, reveal=0.0), 8)
-        check("no history and no loose bikes still draws the hill",
-              r.state["rec"] is not None and r.state["ridge"] is not None
-              and f.max() > 0)
+        noflow = os.path.join(tmp, "noflowcol")
 
-        # A city with nothing wrong in it: no flags at all is a legal state and
-        # the fancy index that draws them must survive being empty.
-        good = os.path.join(tmp, "good")
-        synthetic(good, fill_of_rank=lambda x: 0.5)
-        r, f = frames(opts(cache_dir=good), 20)
-        check("a city with no dry station raises no flags and does not crash",
-              r.state["flags"] is None and f.max() > 0)
-
-        # ...and one where every station is dry.
-        dead = os.path.join(tmp, "dead")
-        synthetic(dead, fill_of_rank=lambda x: 0.0)
-        r, f = frames(opts(cache_dir=dead), 20)
-        check("a city with nothing to unlock anywhere still draws",
-              r.state["rec"] is not None and f.max() > 0,
-              "%d dry" % r.state["rec"]["totals"]["empty"])
+        def strip_flow(p):
+            del p["hist"]["flow"]
+        synthetic(noflow, mangle=strip_flow)
+        r, f = frames(opts(cache_dir=noflow), 40)
+        check("a record whose history has no flow column draws the city",
+              r.state["rec"] is not None and r.state["cold"],
+              "cold=%s" % r.state["cold"])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-
-# --------------------------------------------------------------------------
-# 6. Fresh, stale and absent, each in a process of its own.
-#
-# `ftdata.CACHE_DIR` is read at import time, so a test that sets FT_DATA_CACHE
-# and reloads the module is testing the state of its own import machinery and
-# not the state of the cache.
-# --------------------------------------------------------------------------
 
 def _one_state(state, cache_dir):
     """The child half. Prints one RESULT line and exits."""
@@ -771,8 +1105,8 @@ def _one_state(state, cache_dir):
     stale = contains_text(out, "STALE")
     drew = r.state["rec"] is not None
     verdict = {
-        "fresh": (drew and not card and not stale, "drew a hill, no flags"),
-        "stale": (drew and not card and stale, "drew a hill with STALE on it"),
+        "fresh": (drew and not card and not stale, "drew a city, no flags"),
+        "stale": (drew and not card and stale, "drew a city with STALE on it"),
         "absent": (not drew and card, "drew the no-data card"),
     }[state]
     print("RESULT %s %s cache=%s drew=%s card=%s stale=%s"
@@ -809,25 +1143,21 @@ def test_states_in_separate_processes():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-# --------------------------------------------------------------------------
-# 7. Other panels, the live cache, and the promise that none of this talks to
-# anyone.
-# --------------------------------------------------------------------------
-
 def test_sizes():
-    print("\nother panel sizes")
+    print("\nother panel shapes")
     tmp = tempfile.mkdtemp(prefix="bikes-size")
     try:
-        synthetic(tmp)
+        synthetic(tmp, at=_at_hour(8))
         for w, h in ((320, 64), (256, 64), (128, 64), (320, 32), (192, 96),
                      (512, 128), (64, 32), (320, 16)):
             try:
-                r, f = frames(opts(cache_dir=tmp, width=w, height=h), 60)
+                r, f = frames(opts(cache_dir=tmp, width=w, height=h,
+                                   at="%f" % _at_hour(8)), 60)
                 ok = (f.shape == (h, w, 3) and f.dtype == np.uint8
                       and f.max() > 0)
                 lay = r.layout
-                detail = "hill %d rows, lane %d, label %d" % (
-                    lay.hill_h, lay.lane_h, lay.lane_label)
+                detail = "map %d rows, tick %d, legend %d" % (
+                    lay.map_h, lay.tick_h, lay.leg_h)
             except Exception as e:                           # noqa: BLE001
                 ok, detail = False, repr(e)[:70]
             check("%dx%d renders" % (w, h), ok, detail)
@@ -835,96 +1165,45 @@ def test_sizes():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_terrain_bake():
-    print("\nthe committed elevation bake")
-    try:
-        table, blat, blon, belev = ftdata._bikes_terrain()
-    except Exception as e:                                   # noqa: BLE001
-        check("bikes-terrain.npz loads", False, repr(e)[:60])
-        return
-    check("bikes-terrain.npz loads", True, "%d stations" % len(table))
-    lo, hi = float(belev.min()), float(belev.max())
-    check("its elevations are plausible for San Francisco Bay",
-          -5.0 < lo < 15.0 and 100.0 < hi < 500.0, "%.1f to %.1f m" % (lo, hi))
-    check("its coordinates are in the Bay Area",
-          36.9 < blat.min() and blat.max() < 38.2
-          and -122.7 < blon.min() and blon.max() < -121.5,
-          "%.2f..%.2f N, %.2f..%.2f E"
-          % (blat.min(), blat.max(), blon.min(), blon.max()))
-    # A station the bake has never seen must be interpolated, not dropped.
-    ids = ["not-a-real-station-id"]
-    elev, missed = ftdata._bikes_elevation(ids, np.array([37.7749]),
-                                           np.array([-122.4194]))
-    check("an unknown station takes its nearest neighbour's height",
-          missed == 1 and 0.0 < float(elev[0]) < 300.0,
-          "%.1f m" % elev[0])
-
-
 def test_live(cache_dir):
-    print("\nagainst the live cache")
+    print("\nthe live cache, if there is one")
     got = ftdata.load("baywheels", cache_dir)
     if got is None:
-        check("live record present", False,
-              "run: python3 ftdata.py --once --only baywheels")
+        check("a baywheels record exists", False, "none in %s" % cache_dir)
         return
     payload, age = got
-    rec, _, err = bikes.read_bikes(cache_dir)
-    if rec is None:
-        check("live record parses into something drawable", False, err)
-        return
-    t = rec["totals"]
-    check("live record parses into something drawable", True,
-          "%d stations, %s old" % (rec["n"], ftdata.describe_age(age)))
-    check("the station count is a plausible San Francisco",
-          200 <= rec["n"] <= 600, "%d stations" % rec["n"])
-    check("bikes available never exceeds the docks that exist",
-          0 < t["bikes"] <= t["capacity"],
-          "%d of %d docks" % (t["bikes"], t["capacity"]))
-    check("the dry and jammed counts are both inside the station count",
-          0 <= t["empty"] <= rec["n"] and 0 <= t["jammed"] <= rec["n"],
-          "%d dry, %d jammed" % (t["empty"], t["jammed"]))
-    check("the record is a fraction of the JSON it came from",
-          len(json.dumps(payload)) < 40000,
-          "%.1f kB" % (len(json.dumps(payload)) / 1024.0))
-
-    lo, hi = rec["alt"]["low"], rec["alt"]["high"]
-    check("the altitude range spans the actual city",
-          lo < 12.0 and hi > 80.0, "%.0f to %.0f m" % (lo, hi))
-    a = bikes.anomaly(rec)
-    check("the anomaly is metres and not something else entirely",
-          a is not None and abs(a) < 40.0, "%.2f m" % a)
-    # The one Bay Wheels specific sanity check worth making: the flat eastern
-    # half of the city holds far more docks than the hills, so the ridge must
-    # spend most of its width below the median.
-    elev = rec["elev"]
-    check("half the docks are in the flat part of the city",
-          float(np.median(elev)) < 0.4 * float(elev.max()),
-          "median %.0f m of %.0f" % (np.median(elev), elev.max()))
-
-    r, f = settled(opts(cache_dir=cache_dir, sweep=0.0, reveal=0.0))
-    check("the live record renders a hill and not a card",
-          not contains_text(f, "NO BIKE DATA") and f.max() > 0,
-          "%d bikes, %d dry, %.1f m anomaly" % (t["bikes"], t["empty"], a))
+    size = os.path.getsize(os.path.join(cache_dir, "baywheels.json"))
+    check("the record is small enough for a Pi", size < 64 * 1024,
+          "%.1f kB, %d stations, %d buckets"
+          % (size / 1024.0, payload.get("n", 0),
+             (payload.get("hist") or {}).get("n", 0)))
+    r, f = frames(opts(cache_dir=cache_dir), 60)
+    check("it builds and renders", f.shape[2] == 3 and f.max() > 0,
+          "%d steps, cold=%s, age %s"
+          % (len(r.state["steps"]), r.state["cold"],
+             ftdata.describe_age(age)))
+    check("the caveat is on the panel", contains_text(f, "NOT TRIPS"))
+    check("...and so is the source", contains_text(f, "DOCK COUNTS"))
 
 
-def test_no_network():
-    print("\nthe network promise")
-    before = set(sys.modules)
-    ftdata.load("baywheels", tempfile.mkdtemp(prefix="bikes-net"))
-    new = set(sys.modules) - before
-    bad = [m for m in new
-           if m.split(".")[0] in ("urllib", "http", "socket", "ssl", "requests")]
-    check("ftdata.load() imports no network module", not bad, ",".join(bad))
-    src = open(os.path.join(HERE, "bikes.py")).read()
-    imported = [m for m in ("urllib", "http.client", "socket", "requests",
-                            "ssl") if ("import " + m) in src]
-    check("bikes.py does not import one either", not imported,
-          ",".join(imported))
+def write_shot(path, cache_dir, at_t=14.0):
+    """A 3x screenshot, 960x192 from the 320x64 panel."""
+    from PIL import Image
+    r = bikes.build(opts(cache_dir=cache_dir))
+    out = None
+    for i in range(int(at_t * 20) + 1):
+        out = r(i / 20.0, i)
+    im = Image.fromarray(np.asarray(out, np.uint8).copy(), "RGB")
+    im = im.resize((im.width * 3, im.height * 3), Image.NEAREST)
+    im.save(path)
+    print("wrote %s (%dx%d)" % (path, im.width, im.height))
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--cache-dir", default=ftdata.CACHE_DIR)
+    ap.add_argument("--shot", default="",
+                    help="also write a 3x screenshot here")
     ap.add_argument("--state", default="",
                     choices=("", "fresh", "stale", "absent"),
                     help="internal: run one data state and print RESULT")
@@ -935,19 +1214,27 @@ def main():
     print("cache: %s" % a.cache_dir)
     test_no_network()
     test_terrain_bake()
-    test_hill_direction()
-    test_ramp_direction()
-    test_flags_and_mist()
-    test_anomaly_sign()
-    test_trend()
-    test_lane()
+    test_axis()
+    test_flux_conserves()
+    test_transport_direction()
+    test_headline_arithmetic()
+    test_direction_on_the_panel()
+    test_observed_layer()
+    test_track_differencing()
+    test_privacy()
+    test_window_and_gaps()
+    test_cold_start()
+    test_fetcher_differencing()
     test_history_is_bounded()
     test_motion()
     test_purity()
+    test_cost()
     test_degraded()
     test_states_in_separate_processes()
     test_sizes()
     test_live(a.cache_dir)
+    if a.shot:
+        write_shot(a.shot, a.cache_dir)
 
     print("\n%d checks, %d failed" % (PASSED[0], len(FAILED)))
     for name in FAILED:

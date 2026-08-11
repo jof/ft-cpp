@@ -2722,42 +2722,71 @@ def _caiso_mix():
 
 
 # --------------------------------------------------------------------------
-# Where San Francisco's shared bikes have got to. bikes.py draws this.
+# Which way San Francisco's shared bikes are moving. bikes.py draws this.
 #
-# **The fleet is a fluid and the city is a hillside.** Bay Wheels publishes GBFS
-# -- the open standard every bikeshare system speaks -- and the two feeds that
-# matter are a snapshot: how many bikes are in each dock right now, and where the
-# undocked ebikes are lying. Neither of them says the interesting thing, which is
-# that the fleet *moves*: every weekday morning it is ridden downhill and
-# eastward into the financial district, and every evening it comes back up. A
-# station at zero bikes and a station with no free dock are both failures, and
-# both are invisible in a total.
+# **GBFS publishes no trips, and this product does not pretend otherwise.** Bay
+# Wheels speaks GBFS -- the open standard every bikeshare system speaks -- and
+# every feed in it is a *snapshot*: how many bikes are in each dock at this
+# instant, and where the undocked ebikes are lying. There is no origin in it, no
+# destination, no journey and no rider. Anything anybody says about bikes moving
+# from A to B is inferred from how the counts changed between two snapshots, and
+# the whole design of this record is about making that inference small, checkable
+# and impossible to mistake for observation.
 #
-# So this product does three things the raw feeds do not.
+# So the fetcher takes a snapshot every ten minutes, differences it against the
+# one before, and stores two derived quantities per interval and nothing else:
+#
+#   mov    the sum of |change| over every station, matched by station. One bike
+#          ridden from one dock to another contributes 2 to it -- minus one at
+#          the dock it left, plus one at the dock it reached -- so `mov / 2` is a
+#          count of docked bikes that changed place. It is a **floor** and not a
+#          trip count: two riders swapping a dock inside one ten-minute window
+#          cancel and are invisible, a bike that leaves a dock and is left loose
+#          at the kerb is a departure with no matching arrival, and an operator's
+#          van moving fifteen bikes at once looks exactly like fifteen riders.
+#
+#   flow   the *net* change in docked bikes for each of forty bands of distance
+#          from the Ferry Building. This is the only thing here that is a field:
+#          its running sum along the axis is the net number of bikes that had to
+#          cross each distance, which is a conserved quantity and is what a swarm
+#          can honestly be drawn from. Churn inside a band cancels out of it by
+#          construction, which is the point -- what survives is structure.
+#
+# **The axis is distance from downtown, and that is a choice with a reason.**
+# San Francisco's 383 docks are a blob 11.9 km by 12.4 km, so a map of them on a
+# panel five times wider than it is tall would spend three hundred columns saying
+# that the city is square. Distance from the Ferry Building is instead the one
+# spatial variable the data actually varies along: the commute is in and out of
+# it, and it happens to run downhill, which is why the ground elevation is kept
+# alongside. `bikes.py` draws the pair as a cross-section -- how far out, and how
+# high up -- and the flow as a swarm over it.
 #
 # **It attaches an altitude to every station.** GBFS carries lat/lon and no
-# elevation, and elevation is the one variable that explains the picture: bikes
-# roll downhill for free and have to be pedalled or trucked back up. The heights
-# come from a committed bake, `demos/bikes-terrain.npz`, so nothing on the wall
-# ever asks a terrain service anything -- see BIKES_TERRAIN below for its
-# provenance and for what happens to a station the bake has never heard of.
+# elevation. The heights come from a committed bake, `demos/bikes-terrain.npz`,
+# so nothing on the wall ever asks a terrain service anything -- see
+# BIKES_TERRAIN below for its provenance and for what happens to a station the
+# bake has never heard of.
 #
-# **It reduces 790 kB to about 10.** Three feeds, 634 stations and 613 loose
-# bikes go in; what comes out is four short arrays over the stations inside the
-# city, sorted by height, plus a couple of dozen scalars. The arrays stay
-# per-station rather than being binned into panel columns here, for the same
-# reason caiso-mix stores thirteen fuels and not five bands: how to bin them is a
-# drawing decision and it belongs where it can be argued with.
+# **It reduces 790 kB to about twenty.** Three feeds, 634 stations and 600-odd
+# loose bikes go in. What comes out is five short arrays over the stations inside
+# the city sorted by distance, a rolling twelve hours of forty-number flow
+# vectors, and a couple of dozen scalars. The arrays stay per-station rather than
+# being binned into panel columns here, for the same reason caiso-mix stores
+# thirteen fuels and not five bands: how to bin them is a drawing decision and it
+# belongs where it can be argued with. The *flow* is binned here, because a
+# rolling day of 383 numbers per interval would not be small and forty is enough
+# resolution for a field whose shortest real feature is a neighbourhood.
 #
-# **It remembers.** The feeds are a snapshot with no history at all, and the
-# commute pump is only visible over a day, so each pass appends one sample to a
-# rolling series kept in the record. Ten-minute buckets keyed on absolute epoch
-# rather than a growing list: a bucket that is fetched twice is overwritten, a
-# bucket that is missed is simply absent, the series is trimmed to 24 hours and
-# 150 entries on every write, and a record restored from before a reboot picks up
-# exactly where it left off. That last part is why this product is deliberately
-# *not* volatile -- the accumulated day is the only thing here that cannot be
-# re-fetched.
+# **It remembers, and it has to.** A snapshot feed cannot answer "what happened
+# in the last hour" at all, so each pass appends one entry to a rolling series
+# kept in the record. Ten-minute buckets keyed on absolute epoch rather than a
+# growing list: a bucket fetched twice is overwritten, a bucket that is missed is
+# simply absent, the series is trimmed to twelve hours and 80 entries on every
+# write, and a record restored from before a reboot picks up where it left off.
+# That is why this product is deliberately *not* volatile -- the accumulated half
+# day is the only thing here that cannot be re-fetched. On a cold cache there is
+# no flow at all until the second pass lands, which is a state bikes.py draws in
+# words rather than hiding.
 #
 # **Cost.** Three requests, about 790 kB, every ten minutes: 1.3 kB/s averaged,
 # which is half what quake-week costs. station_information is nearly static and
@@ -2778,11 +2807,17 @@ BIKES_FREE_URL = BIKES_GBFS + "/free_bike_status.json"
 # The crop, as (lat0, lat1, lon0, lon1). Bay Wheels is one system covering four
 # separated cities -- San Francisco, Oakland/Emeryville/Berkeley across the bay,
 # and San Jose fifty miles south -- and they do not share a commute, a terrain or
-# a tide. Mixing them would put a San Jose station at 25 m next to a Nob Hill
-# station at 25 m on the same axis and mean nothing by it. This box is the city
+# a downtown. Mixing them would put a San Jose station 4 km from "downtown" on
+# the same axis as a Mission station and mean nothing by it. This box is the city
 # and county of San Francisco plus the few Daly City docks on its south edge:
-# 383 of the system's 634 stations, and the ones whose hill is the story.
+# 383 of the system's 634 stations, and the ones whose commute is the story.
 BIKES_BBOX = (37.700, 37.840, -122.530, -122.350)
+
+# The origin of the distance axis: the Ferry Building at the foot of Market
+# Street. Not the geometric centre of the city and not the centre of the dock
+# network -- the place the morning peak is pointed at. Every `dist_m` in the
+# record is a great-circle distance from here.
+BIKES_DOWNTOWN = (37.7955, -122.3937)
 
 # Half an hour. station_status is regenerated every minute and we take it every
 # ten, so a record this old has missed twenty updates -- which on a Friday
@@ -2791,24 +2826,103 @@ BIKES_BBOX = (37.700, 37.840, -122.530, -122.350)
 BIKES_TTL = 1800
 
 # Ten minutes, matching the history bucket exactly so that one pass fills one
-# bucket. A minute-cadence feed sampled every ten minutes is a deliberate loss:
-# nobody walking past reads a 24-hour strip finely enough to see one sample, and
-# this is a public server with no key on it.
+# bucket and one bucket is one difference. A minute-cadence feed sampled every
+# ten minutes is a deliberate loss, and it is the loss that sets what `mov` can
+# mean: anything that happens and un-happens inside ten minutes is invisible to
+# this record. Sampling faster would raise the floor and cost the public server
+# more; ten minutes is where the two arguments met.
 BIKES_INTERVAL = 600
 
-# The rolling series. Ten-minute buckets, 24 hours, and a hard cap on the entry
-# count that is a little over 24 hours' worth -- belt and braces, because the
+# The rolling series. Ten-minute buckets, twelve hours, and a hard cap on the
+# entry count a little over twelve hours' worth -- belt and braces, because the
 # thing that must never happen to a record that appends to itself is unbounded
 # growth, and a clock that jumps is a real event on a Pi with no RTC.
+#
+# Twelve hours rather than the twenty-four this used to keep: the panel replays
+# the window as a swarm and half a day is already one whole commute plus both
+# of its shoulders, while the flow vector is forty numbers a bucket and 144 of
+# them would double the record to buy a second night nobody watches.
 BIKES_HIST_BUCKET = 600.0
-BIKES_HIST_HOURS = 24.0
-BIKES_HIST_MAX = 150
+BIKES_HIST_HOURS = 12.0
+BIKES_HIST_MAX = 80
 
-# Loose ebikes are binned by the altitude rank of their nearest station rather
-# than stored one by one: 600 lat/lon pairs is most of the record, and what the
-# panel draws is a histogram. Sixty-four bins over 320 columns is five columns a
-# bin, which is about as fine as a haze of dim pixels reads anyway.
-BIKES_LOOSE_BINS = 64
+# Bands of distance from downtown, for the flow field and for the loose bikes.
+# Forty over twelve kilometres is a band every 300 m, which is eight columns of
+# a 320-wide panel and about ten docks. Finer would be storing noise: the median
+# ten-minute interval moves a couple of dozen docked bikes across the whole city.
+BIKES_FLOW_BINS = 40
+BIKES_FLOW_KM = 12.0
+
+# How far apart two snapshots have to be before their difference is worth
+# calling a flow, and how far apart before it stops being one.
+#
+# The floor exists because the timer can fire twice in quick succession -- a
+# manual `--once` next to a running loop -- and a four-minute difference scaled
+# up to an hourly rate is mostly quantisation. The ceiling is four missed passes:
+# past that the two snapshots straddle enough of a commute that "net change"
+# stops describing a flow and starts describing a different time of day.
+BIKES_FLOW_MIN_DT = 240.0
+BIKES_FLOW_MAX_DT = 2400.0
+
+# --------------------------------------------------------------------------
+# Observed journeys, for the free-floating ebikes only, and the privacy design
+# that goes with them.
+#
+# **What was measured.** free_bike_status carries two identifiers per undocked
+# ebike: `bike_id`, an opaque 32-hex token, and `name`, the number printed on
+# the physical bike ("190-591"). GBFS rotates `bike_id` between rentals
+# specifically so that trips cannot be reconstructed, and it does: across two
+# snapshots 36 minutes apart, 0 of 634 tokens survived, and across two four
+# minutes apart 590 of 624 survived but *not one of the survivors had moved* --
+# the token is stable exactly while the bike sits still. `name` is not rotated:
+# 585 of 620 survived 36 minutes, with a median displacement of 4.5 m and a
+# 90th percentile of 11 m, which is GPS jitter, and nine bikes that had plainly
+# been ridden somewhere.
+#
+# So for this subset -- and only this subset -- a journey is *observable*: the
+# same physical bike seen at two places at two times. That is a materially
+# better thing to draw than an inference, and it is what the panel now leads
+# with. What it is not is the whole system: about 620 free-floating ebikes
+# against 383 docks and some 2 700 docked bikes, and a bike that docks simply
+# vanishes from this feed. The panel says which fleet it is drawing.
+#
+# **The privacy design, which is deliberate and not boilerplate.** The spec
+# rotates `bike_id` to stop exactly what `name` makes possible again, and this
+# record is going to live on a wall in a public makerspace. So:
+#
+#   * The printed number is hashed the moment it is read and the raw string
+#     never reaches a variable that is stored. Nothing anywhere in the payload,
+#     and nothing on the panel, is a bike number.
+#   * The tokens live in `loose_base` only, which holds *one* snapshot and is
+#     overwritten on every pass. No identifier of any kind enters `hist`. So
+#     the record cannot link a bike across more than a single ten-minute
+#     interval, however long the fetcher has been running -- there is no
+#     accumulating trip history in it to obtain.
+#   * What survives into the history is a pair of positions on the panel's own
+#     distance axis, rounded to 100 m, with no way back to which bike made it.
+#
+# The hash is not itself the control and is not claimed as one: six-digit bike
+# numbers are a small enough space to enumerate, so an attacker holding a
+# record could recover the current snapshot's numbers -- which the public feed
+# already gives them. The control is that history carries no identifier at all.
+#
+# **The threshold.** 120 m, against a measured 90th-percentile jitter of 11 m.
+# Below it a bike has not moved; above it, it has been somewhere.
+BIKES_TRACK_MIN_M = 120.0
+
+# Most journeys kept per bucket. Two movers in four minutes at ten on a Monday
+# night; the morning peak is far busier, and the cap is what stops one
+# extraordinary interval from doubling the record. `seen`, `moved`, `gone` and
+# `came` are counted before the cap, so the panel's number is the true one even
+# when the drawn tracks are a sample of it.
+BIKES_TRACK_MAX = 48
+
+# The two ends of a journey are stored in hundreds of metres along the distance
+# axis, 0..119 over the twelve kilometre crop. That is three characters a
+# number in JSON against the panel's own 37 m per column, and the tracks are
+# drawn as motion between two neighbourhoods rather than as a GPS trace, which
+# is also the resolution the panel should be claiming.
+BIKES_TRACK_UNIT_M = 100.0
 
 # Ground elevation per station, in metres, baked once and committed.
 #
@@ -2865,6 +2979,223 @@ def _bikes_elevation(ids, lats, lons):
     return out, len(missing)
 
 
+def _bikes_distance(lats, lons):
+    """Metres from BIKES_DOWNTOWN, as a float array.
+
+    Equirectangular and not haversine, deliberately: the longest distance in
+    this box is twelve kilometres and the flat-earth error over that is under a
+    metre, against a 300 m band width. quake.py uses haversine because its
+    radius reaches Cape Mendocino, which is a different argument.
+    """
+    import numpy as np
+    kx = float(np.cos(np.radians(BIKES_DOWNTOWN[0])))
+    dy = (lats - BIKES_DOWNTOWN[0]) * 111320.0
+    dx = (lons - BIKES_DOWNTOWN[1]) * 111320.0 * kx
+    return np.hypot(dx, dy)
+
+
+def _bikes_bin(dist_m):
+    """Which distance band each station falls in. Clipped, never dropped."""
+    import numpy as np
+    edge = BIKES_FLOW_KM * 1000.0
+    idx = (dist_m / edge * BIKES_FLOW_BINS).astype(np.int64)
+    return np.clip(idx, 0, BIKES_FLOW_BINS - 1)
+
+
+def _bikes_sid(ids):
+    """Six hex characters per station id, concatenated into one string.
+
+    The record has to carry enough of each station's identity to difference the
+    next snapshot against this one, and it must not carry 383 UUIDs to do it --
+    that is fourteen kilobytes of the same text every ten minutes forever. Six
+    hex digits is sixteen million buckets for 383 stations, so a collision is a
+    one-in-thirty-thousand event, and a collision merely misattributes one
+    station's change to another rather than corrupting anything.
+
+    Matching on a hash rather than on array position is what makes a station
+    being installed, removed or renumbered cost nothing: the stations that are
+    in both snapshots are differenced and the rest are simply not, whereas
+    position matching would silently shift every station past the new one and
+    invent a citywide flow out of an insertion.
+    """
+    import hashlib
+    return "".join(hashlib.sha1(s.encode("utf-8")).hexdigest()[:6]
+                   for s in ids)
+
+
+def _bikes_unsid(blob):
+    """The inverse of _bikes_sid: a string back into a list of six-hex keys."""
+    if not isinstance(blob, str) or len(blob) % 6:
+        return []
+    return [blob[i:i + 6] for i in range(0, len(blob), 6)]
+
+
+def _bikes_flow(previous, sid, bikes, bins, as_of):
+    """Difference this snapshot against the last one in the record.
+
+    Returns (flow, mov, dt, base), where `flow` is the net change in docked
+    bikes per distance band, `mov` is the sum of |change| over every station
+    matched by identity, `dt` is the seconds the difference covers, and `base`
+    is what the *next* pass should difference against.
+
+    The three ways this can decline to answer are all real and all benign:
+
+      no baseline      first pass after a cold start or a version change. One
+                       bucket with no flow in it, and bikes.py says so.
+      too close        the timer fired twice inside four minutes. The old
+                       baseline is *kept* rather than replaced, so the next
+                       ordinary pass still gets a full-length difference
+                       instead of inheriting a ten-second one.
+      too far or back  four missed passes, or a clock that jumped. The baseline
+                       is reset to now and the next pass starts clean; joining
+                       across the gap would draw an hour of commute as if it
+                       had happened in ten minutes.
+    """
+    import numpy as np
+    here = {"at": float(as_of), "sid": sid, "bikes": [int(v) for v in bikes]}
+    old = (previous or {}).get("base")
+    if not isinstance(old, dict):
+        return None, None, None, here
+    keys = _bikes_unsid(old.get("sid"))
+    counts = old.get("bikes")
+    try:
+        at = float(old["at"])
+    except (KeyError, TypeError, ValueError):
+        return None, None, None, here
+    if not keys or not isinstance(counts, list) or len(counts) != len(keys):
+        return None, None, None, here
+
+    dt = float(as_of) - at
+    if dt < BIKES_FLOW_MIN_DT:
+        # Too close together to mean anything -- and, crucially, keep the old
+        # baseline. Replacing it here is the bug that makes a doubled pass
+        # erase a good interval; see the docstring.
+        return None, None, None, (old if dt >= 0.0 else here)
+    if dt > BIKES_FLOW_MAX_DT:
+        return None, None, None, here
+
+    was = dict(zip(keys, counts))
+    now_keys = _bikes_unsid(sid)
+    flow = np.zeros(BIKES_FLOW_BINS, np.int64)
+    mov = 0
+    for i, k in enumerate(now_keys):
+        before = was.get(k)
+        if before is None:
+            continue
+        d = int(bikes[i]) - int(before)
+        if d:
+            mov += abs(d)
+            flow[bins[i]] += d
+    # `mov` counts both ends of a move, so it is even for anything that stayed
+    # inside the city and odd only where a bike joined or left the docked fleet.
+    # Halving happens in the demo, where the caveat can be printed next to it.
+    return [int(v) for v in flow], int(mov) * 2, round(dt, 1), here
+
+
+def _bikes_anon(name):
+    """A printed bike number as an opaque token, or None.
+
+    Called at the moment the feed is parsed, so that the number itself lives
+    only inside the parsing loop. See the BIKES_TRACK_* block for why this is
+    not the privacy control on its own and what is.
+    """
+    import hashlib
+    if not name:
+        return None
+    return hashlib.sha1(str(name).encode("utf-8")).hexdigest()[:8]
+
+
+def _bikes_tracks(previous, keys, lats, lons, as_of):
+    """Journeys observed for the free-floating ebikes since the last snapshot.
+
+    Returns (tracks, seen, gone, came, base):
+
+      tracks  a flat list [from, to, from, to, ...] in hundreds of metres
+              along the distance axis, one pair per bike that moved further
+              than BIKES_TRACK_MIN_M, capped at BIKES_TRACK_MAX by displacement
+              so that what is dropped is the shortest hops and not a slice of
+              the city. None if no comparison could be made.
+      seen    bikes present in both snapshots -- the denominator.
+      gone    bikes in the old snapshot and not the new one. Almost always a
+              bike that was docked or picked up by a van; occasionally one
+              rented and in flight. A journey with one end unobservable.
+      came    the reverse: undocked, released, or a rental ending.
+
+    `gone` and `came` are counted and never drawn. They are real events and
+    they are half-observations, and drawing a half-observation as a journey is
+    the one thing this whole product is arranged to avoid; a dot appearing out
+    of nothing on a map is read as a bike arriving from somewhere, which is
+    exactly the claim that cannot be made.
+    """
+    import numpy as np
+    n = len(keys)
+    here = {"at": float(as_of), "k": [], "lat": [], "lon": []}
+    if n:
+        here["k"] = [k for k in keys]
+        here["lat"] = [int(round(v * 1e4)) for v in lats]
+        here["lon"] = [int(round(v * 1e4)) for v in lons]
+    old = (previous or {}).get("loose_base")
+    if not isinstance(old, dict) or not n:
+        return None, 0, 0, 0, here
+    try:
+        at = float(old["at"])
+        ok, olat, olon = old["k"], old["lat"], old["lon"]
+    except (KeyError, TypeError, ValueError):
+        return None, 0, 0, 0, here
+    if not (isinstance(ok, list) and len(ok) == len(olat) == len(olon)):
+        return None, 0, 0, 0, here
+    dt = float(as_of) - at
+    if not (BIKES_FLOW_MIN_DT <= dt <= BIKES_FLOW_MAX_DT):
+        # The same three windows the docked flow uses, and for the same
+        # reasons; a doubled pass keeps the older baseline so the next
+        # ordinary one still sees a full-length interval.
+        return None, 0, 0, 0, (old if 0.0 <= dt < BIKES_FLOW_MIN_DT else here)
+
+    was = {}
+    for i, k in enumerate(ok):
+        if k is not None:
+            was[k] = (olat[i] * 1e-4, olon[i] * 1e-4)
+    now_keys = set(k for k in keys if k is not None)
+    seen = gone = 0
+    a_lat, a_lon, b_lat, b_lon = [], [], [], []
+    for i, k in enumerate(keys):
+        if k is None:
+            continue
+        before = was.get(k)
+        if before is None:
+            continue
+        seen += 1
+        a_lat.append(before[0])
+        a_lon.append(before[1])
+        b_lat.append(float(lats[i]))
+        b_lon.append(float(lons[i]))
+    gone = sum(1 for k in was if k not in now_keys)
+    came = len(now_keys) - seen
+    if not seen:
+        return [], 0, gone, came, here
+
+    a_lat = np.asarray(a_lat, np.float64)
+    a_lon = np.asarray(a_lon, np.float64)
+    b_lat = np.asarray(b_lat, np.float64)
+    b_lon = np.asarray(b_lon, np.float64)
+    kx = float(np.cos(np.radians(BIKES_DOWNTOWN[0])))
+    step = np.hypot((b_lat - a_lat) * 111320.0,
+                    (b_lon - a_lon) * 111320.0 * kx)
+    moved = np.flatnonzero(step >= BIKES_TRACK_MIN_M)
+    if len(moved) > BIKES_TRACK_MAX:
+        moved = moved[np.argsort(step[moved])[::-1][:BIKES_TRACK_MAX]]
+    da = _bikes_distance(a_lat[moved], a_lon[moved])
+    db = _bikes_distance(b_lat[moved], b_lon[moved])
+    cap = int(BIKES_FLOW_KM * 1000.0 / BIKES_TRACK_UNIT_M) - 1
+    qa = np.clip(np.round(da / BIKES_TRACK_UNIT_M), 0, cap).astype(int)
+    qb = np.clip(np.round(db / BIKES_TRACK_UNIT_M), 0, cap).astype(int)
+    tracks = []
+    for x0, x1 in zip(qa, qb):
+        tracks.append(int(x0))
+        tracks.append(int(x1))
+    return tracks, int(seen), int(gone), int(came), here
+
+
 def _bikes_history(previous, sample, now):
     """Append one sample to the rolling series and bound it. Pure arithmetic.
 
@@ -2876,8 +3207,15 @@ def _bikes_history(previous, sample, now):
     for the first time after boot -- would otherwise leave the series in an
     order the demo would draw as a scribble, so anything at or after the new
     bucket is dropped before appending.
+
+    `flow` is a list per entry rather than a scalar, which the length check
+    below handles without knowing that: every column is required to be a list as
+    long as `t`, and a record written by a version that stored different columns
+    simply fails that and starts a fresh series rather than being extended into
+    a shape the demo would misread.
     """
-    keys = ("fleet_m", "docks_m", "loose_m", "bikes", "empty", "loose")
+    keys = ("fleet_m", "docks_m", "bikes", "empty", "loose", "mov", "dt",
+            "flow", "trk", "seen", "gone", "came")
     bucket = float(int(now // BIKES_HIST_BUCKET) * int(BIKES_HIST_BUCKET))
     hist = {"t": []}
     for k in keys:
@@ -2902,6 +3240,7 @@ def _bikes_history(previous, sample, now):
         hist[k].append(sample.get(k))
     hist["bucket"] = BIKES_HIST_BUCKET
     hist["hours"] = BIKES_HIST_HOURS
+    hist["bins"] = BIKES_FLOW_BINS
     hist["n"] = len(hist["t"])
     return hist
 
@@ -2914,15 +3253,16 @@ def _bikes_round(values, places=None):
 
 
 @product(BIKES_PRODUCT, ttl=BIKES_TTL, interval=BIKES_INTERVAL,
-         description="Bay Wheels in SF: dock occupancy by altitude, 24 h drift")
+         description="Bay Wheels in SF: net bike flow by distance from downtown")
 def _baywheels(cache_dir):
-    """Bay Wheels reduced to a hillside: every SF station, sorted by height.
+    """Bay Wheels reduced to a flow field: net docked-bike change by distance.
 
     station_status and station_information are both required -- without the
-    second there are no coordinates and so no altitude, which is the axis.
-    free_bike_status is allowed to fail on its own, because the docked fleet is
-    still the whole ridge and losing it to a hiccup in a feed about a different
-    population would be the failure this file exists to avoid.
+    second there are no coordinates, and so neither an altitude nor a distance
+    from downtown, which are the two axes. free_bike_status is allowed to fail
+    on its own, because the docked fleet is the entire flow field and losing it
+    to a hiccup in a feed about a different population would be the failure this
+    file exists to avoid.
     """
     import numpy as np
 
@@ -2981,12 +3321,17 @@ def _baywheels(cache_dir):
     lats = np.asarray(lats, np.float64)
     lons = np.asarray(lons, np.float64)
     elev, interpolated = _bikes_elevation(ids, lats, lons)
+    dist = _bikes_distance(lats, lons)
 
-    # Sorted by altitude once, here, so that every array in the record and every
-    # bin index computed from it agree by construction. `kind="stable"` so that
-    # two stations at the same metre keep a fixed order between passes and the
-    # panel does not shimmer where the hill is flat.
-    order = np.argsort(elev, kind="stable")
+    # Sorted by distance from downtown once, here, so that every array in the
+    # record and every band index computed from it agree by construction. That
+    # is a change of axis from the version of this product that sorted by
+    # altitude, and it is the axis the panel now draws along. `kind="stable"` so
+    # two stations at the same metre keep a fixed order between passes, which is
+    # what stops the panel shimmering where the docks are dense.
+    order = np.argsort(dist, kind="stable")
+    ids = [ids[i] for i in order]
+    dist = dist[order]
     elev = elev[order]
     lats, lons = lats[order], lons[order]
     caps = np.asarray(caps, np.float64)[order]
@@ -2995,15 +3340,16 @@ def _baywheels(cache_dir):
     ebikes = np.asarray(ebikes, np.float64)[order]
     renting = np.asarray(renting, np.int64)[order]
     n = len(elev)
+    bins = _bikes_bin(dist)
 
     total_bikes = float(bikes.sum())
     total_caps = float(caps.sum())
-    # The two altitudes that make the panel mean something. `fleet_m` is the
+    # The two altitudes the old version of this panel was built on, kept because
+    # they cost four numbers a bucket and they are the one sentence about
+    # gravity that survives without a hillside to draw it on. `fleet_m` is the
     # mean height of a bike you could go and unlock; `docks_m` is the mean height
     # of a *parking space*, which is where the fleet would sit if it were spread
-    # evenly. The difference between them is the whole story -- when it goes
-    # negative the fleet has run downhill, and it is a metre count rather than a
-    # count of bikes, so it does not move when the operator adds a hundred bikes.
+    # evenly. The difference goes negative when the fleet has run downhill.
     fleet_m = float((elev * bikes).sum() / total_bikes) if total_bikes else None
     docks_m = float((elev * caps).sum() / total_caps) if total_caps else None
 
@@ -3011,10 +3357,10 @@ def _baywheels(cache_dir):
     empty = int(((bikes == 0) & open_).sum())
     jammed = int(((docks == 0) & open_).sum())
 
-    loose_bins = [0] * BIKES_LOOSE_BINS
-    loose_m = None
+    loose_bins = [0] * BIKES_FLOW_BINS
     loose_n = loose_off = 0
     free_url = None
+    free_key, free_lat, free_lon = [], [], []
     try:
         free_doc = get_json(BIKES_FREE_URL, timeout=30)
         free_url = BIKES_FREE_URL
@@ -3031,41 +3377,53 @@ def _baywheels(cache_dir):
                 continue
             fl.append(la)
             fo.append(lo)
+            # See _bikes_anon() and the BIKES_TRACK_* block: the printed bike
+            # number is read here and turned into an opaque token immediately.
+            # It is never put in a variable that reaches the payload.
+            free_key.append(_bikes_anon(b.get("name")))
         if fl:
-            # A loose bike has no dock and therefore no altitude of its own in
-            # this scheme, so it takes the altitude of the nearest station. That
-            # is not a fudge: the point of the bin is "how high up the hill is
-            # this bike", and the nearest dock answers it to within a block.
-            fl = np.asarray(fl, np.float64)
-            fo = np.asarray(fo, np.float64)
-            kx = float(np.cos(np.radians(0.5 * (lat0 + lat1))))
-            dy = fl[:, None] - lats[None, :]
-            dx = (fo[:, None] - lons[None, :]) * kx
-            near = np.argmin(dy * dy + dx * dx, axis=1)
-            loose_m = float(elev[near].mean())
-            loose_n = int(len(fl))
-            slot = np.clip(near * BIKES_LOOSE_BINS // max(n, 1),
-                           0, BIKES_LOOSE_BINS - 1)
-            loose_bins = np.bincount(slot,
-                                     minlength=BIKES_LOOSE_BINS).tolist()
+            # Binned on the same distance axis as everything else, which for a
+            # loose bike is exact rather than approximate: it has a position of
+            # its own and the axis is a function of position. The old version
+            # had to borrow the altitude of the nearest dock; nothing is
+            # borrowed here.
+            free_lat = np.asarray(fl, np.float64)
+            free_lon = np.asarray(fo, np.float64)
+            fd = _bikes_distance(free_lat, free_lon)
+            loose_n = int(len(fd))
+            loose_bins = np.bincount(_bikes_bin(fd),
+                                     minlength=BIKES_FLOW_BINS).tolist()
     except Exception as e:                                   # noqa: BLE001
         print("ftdata: baywheels free_bike_status unavailable: %r" % e,
               file=sys.stderr)
 
     now = time.time()
+    # The feed's own timestamp, not ours: `dt` is the interval the difference
+    # actually covers, and the fetch can sit behind a slow request or a retry.
+    # Falling back to the wall clock keeps a feed that omits it working.
+    as_of = float(status_doc.get("last_updated") or now)
     previous = load(BIKES_PRODUCT, cache_dir)
+    prev_payload = previous[0] if previous else None
+    sid = _bikes_sid(ids)
+    flow, mov, dt, base = _bikes_flow(prev_payload, sid, bikes, bins, as_of)
+    tracks, seen, gone, came, loose_base = _bikes_tracks(
+        prev_payload, free_key, free_lat, free_lon, as_of)
+
     sample = {"fleet_m": None if fleet_m is None else round(fleet_m, 2),
               "docks_m": None if docks_m is None else round(docks_m, 2),
-              "loose_m": None if loose_m is None else round(loose_m, 2),
-              "bikes": int(total_bikes), "empty": empty, "loose": loose_n}
+              "bikes": int(total_bikes), "empty": empty, "loose": loose_n,
+              "mov": mov, "dt": dt, "flow": flow,
+              "trk": tracks, "seen": seen, "gone": gone, "came": came}
 
     payload = {
-        "as_of": float(status_doc.get("last_updated") or now),
+        "as_of": as_of,
         "region": "San Francisco",
         "bbox": list(BIKES_BBOX),
+        "downtown": list(BIKES_DOWNTOWN),
         "n": n,
-        # Four arrays over the stations, ascending by altitude. Everything the
-        # panel draws about *now* comes out of these.
+        # Five arrays over the stations, ascending by distance from downtown.
+        # Everything the panel draws about *now* comes out of these.
+        "dist_m": _bikes_round(dist),
         "elev_m": _bikes_round(elev),
         "fill_pct": _bikes_round(bikes / np.maximum(caps, 1.0) * 100.0),
         "free_docks": _bikes_round(docks),
@@ -3084,13 +3442,34 @@ def _baywheels(cache_dir):
             "loose_unavailable": loose_off,
         },
         "altitude_m": {"fleet": sample["fleet_m"], "docks": sample["docks_m"],
-                       "loose": sample["loose_m"],
-                       "low": round(float(elev[0]), 1),
-                       "high": round(float(elev[-1]), 1)},
+                       "low": round(float(elev.min()), 1),
+                       "high": round(float(elev.max()), 1)},
+        "flow": {"bins": BIKES_FLOW_BINS, "km": BIKES_FLOW_KM,
+                 "min_dt": BIKES_FLOW_MIN_DT, "max_dt": BIKES_FLOW_MAX_DT,
+                 "track_m": BIKES_TRACK_MIN_M, "track_max": BIKES_TRACK_MAX,
+                 "track_unit_m": 100.0},
         "interpolated": int(interpolated),
-        "hist": _bikes_history(previous[0] if previous else None, sample, now),
-        "units": {"elev_m": "metres above NAVD88", "fill_pct": "percent",
-                  "hist.t": "epoch seconds, start of a 10 minute bucket"},
+        "hist": _bikes_history(prev_payload, sample, now),
+        # Not for drawing. These two are the snapshot the *next* pass
+        # differences against, and they are the only things in this payload
+        # that are state rather than observation. Kept in the record and not in
+        # a sidecar because a sidecar lives in tmpfs and a reboot would cost a
+        # bucket every time. `loose_base` is overwritten on every pass and
+        # never enters `hist`, which is the whole of the privacy design; see
+        # the BIKES_TRACK_* block above.
+        "base": base,
+        "loose_base": loose_base,
+        "units": {"dist_m": "metres from the Ferry Building",
+                  "elev_m": "metres above NAVD88", "fill_pct": "percent",
+                  "hist.t": "epoch seconds, start of a 10 minute bucket",
+                  "hist.dt": "seconds the flow difference covers",
+                  "hist.mov": "sum of |change| over stations; /2 is bikes moved",
+                  "hist.flow": "net docked-bike change per distance band",
+                  "hist.trk": "observed free-ebike journeys, [from, to, ...] "
+                              "in hundreds of metres from downtown",
+                  "hist.seen": "free ebikes present in both snapshots",
+                  "hist.gone": "free ebikes that vanished: docked or taken",
+                  "hist.came": "free ebikes that appeared: undocked or freed"},
         "sources": [BIKES_INFO_URL, BIKES_STATUS_URL, free_url],
     }
     return payload, BIKES_STATUS_URL
@@ -3099,9 +3478,10 @@ def _baywheels(cache_dir):
 # Not a flag on product(), for the same reason goes-psw does it this way: the
 # helper stays exactly as the other products use it. This product is not pixels
 # and writes no sidecar -- it needs the cache directory for the other reason,
-# which is that it reads its own previous record to extend the rolling series,
-# and doing that against ftdata's default cache while the fetcher was pointed at
-# another one would silently graft two machines' histories together.
+# which is that it reads its own previous record both to extend the rolling
+# series and to difference this snapshot against the last one, and doing that
+# against ftdata's default cache while the fetcher was pointed at another one
+# would silently graft two machines' histories together.
 PRODUCTS[BIKES_PRODUCT]["blob"] = True
 
 # --------------------------------------------------------------------------
