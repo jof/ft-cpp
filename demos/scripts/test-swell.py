@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
 """Checks for swell.py that a screenshot cannot make.
 
-This panel's whole claim is that the picture *is* the measurement: the crests
-on the wall are spaced at the wavelength the reported period implies and cross
-the panel at the speed that follows from it. Every part of that claim can be
-wrong while the panel still looks like a beautiful moving ocean:
+This panel's whole claim is that the picture *is* the measurement: the water
+drawn on the wall is as high as the water at the buoy, spaced at the wavelength
+the reported period implies, and moving at the speed that follows from it. Every
+part of that claim can be wrong while the panel still looks like a beautiful
+moving ocean, so every part of it is measured off the rendered frames:
 
-  1. **The waves can run the wrong way.** NDBC report the direction a wave
-     arrives *from*; drawing that as the direction it travels puts a northwest
-     swell running out to sea, and nothing on screen looks wrong.
-  2. **The period can be decorative.** A wave train that moves at a
-     hand-tuned speed rather than at c = L/T is a screensaver with a number
-     printed over it. So the crest rate is *measured off the rendered frames*
-     and asserted against the reported period.
-  3. **The strip can bridge an outage.** Short holes are filled on purpose;
+  1. **The height can be decorative.** Now that the surface is drawn in
+     profile, amplitude *is* height, and that is only true if the pixels say
+     so: the surface elevation is measured and asserted against Hs and against
+     the bracket that labels it. A panel whose waves are a fixed prettiness
+     with a number printed over it would pass every other check here.
+  2. **The period can be decorative too.** A train moving at a hand-tuned
+     speed rather than at c = L/T is a screensaver. So the crest rate is
+     measured at one column and asserted against the reported period, and the
+     phase speed is measured against the wavelength divided by it.
+  3. **The chop can be drawn as a groundswell.** Keying the zoom on whichever
+     train is biggest did exactly that, and a four-second windsea that looks
+     like an eighteen-second swell defeats the point of the panel. So the
+     crest spacing is asserted for a swell-driven sea *and* a chop-driven one.
+  4. **The strip can bridge an outage.** Short holes are filled on purpose;
      a long one must stay a hole, or the panel invents a sea that nobody saw.
-  4. **A silent buoy can draw perfectly.** Station 46237 was a week stale
+  5. **A silent buoy can draw perfectly.** Station 46237 was a week stale
      while this was written, and a week-old record parses, animates and lies.
 
-So the rhythm is measured in pixels, the direction is measured in pixels, and
-the degraded states are each run in a **separate process** with FT_DATA_CACHE
+The degraded states are each run in a **separate process** with FT_DATA_CACHE
 set -- `ftdata.CACHE_DIR` binds at import, and reloading the module in one
 process does not test what it looks like it tests.
 
@@ -32,7 +38,6 @@ builds its own. Populate it with `python3 ftdata.py --once --only ndbc-46026`.
 
 import argparse
 import json
-import math
 import os
 import shutil
 import subprocess
@@ -155,19 +160,68 @@ def synthetic(cache_dir, station="99999", hs=2.0, dpd=12.0, mwd=270.0,
 
 
 # --------------------------------------------------------------------------
-# 1. The rhythm. The one claim the panel makes that nothing else checks.
+# 1. Reading the water back off the panel.
+#
+# Everything in this section works from the *rendered pixels*, which means it
+# has to find the surface in them, and the overlay -- the bracket, the caption,
+# the compass inset -- is brighter than any crest. See surface() for how the
+# water is told apart from the writing on it; the alternative, a threshold and
+# a hope, quietly measures the letter S in "SEC" as a wave.
 # --------------------------------------------------------------------------
 
-def crest_rate(r, lay, seconds=40.0, fps=20.0, col=None, row=None):
-    """Crests per second past one pixel, measured off the rendered frames."""
-    row = lay.sea_y + lay.sea_h // 2 if row is None else row
-    col = lay.w // 2 if col is None else col
+def ink_mask(r, lay):
+    """Only the bright marks, not their dark halo -- used to measure the
+    height bracket, which is a legend and has to be the length it claims."""
+    idx, col = r.state["ovl"]
+    m = np.zeros(lay.sea_h * lay.w, bool)
+    m[idx] = np.all(col == np.array(swell.C_INK, np.uint8), axis=1)
+    return m.reshape(lay.sea_h, lay.w)
+
+
+RUN = 6                     # rows of water that make a column wet, not a letter
+
+
+def surface(f, r, lay, thresh=60):
+    """The row of the water surface in every column, in band coordinates.
+
+    "Topmost lit pixel" is not good enough: the caption over the water is
+    brighter than any crest, and measuring the top of the letter S as a wave is
+    exactly the kind of confident wrong answer this file exists to catch. Water
+    is *thick* -- the surface has a dozen rows of lit water under it, where a
+    glyph has at most five -- so the surface is the topmost row with RUN lit
+    rows below it. The two pieces of furniture that are genuinely as thick as
+    water, the height bracket at the left and the compass inset at the right,
+    are cut out by position.
+    """
+    band = f[lay.sea_y:lay.sea_y + lay.sea_h]
+    lit = band[:, :, 2] >= thresh
+    run = lit.copy()
+    for k in range(1, RUN):
+        run[:-k] &= lit[k:]
+    rows = np.argmax(run, axis=0).astype(np.float64)
+    rows[~run.any(axis=0)] = np.nan
+    rows[:26] = np.nan
+    rows[max(0, lay.w - 40):] = np.nan
+    return rows
+
+
+def elevation(f, r, lay):
+    """Surface elevation in pixels above still water, NaN where masked."""
+    return r.state["still"] - surface(f, r, lay)
+
+
+def crest_rate(r, lay, seconds=40.0, fps=20.0, col=None):
+    """Crests per second past one column, measured off the rendered frames."""
+    col = lay.w // 3 if col is None else col
     v = []
     n = int(seconds * fps)
     for i in range(n):
         f = r(i / fps, i)
-        v.append(float(f[row, col].sum()))
+        v.append(elevation(f, r, lay)[col])
     v = np.asarray(v, np.float64)
+    v = v[np.isfinite(v)]
+    if len(v) < 4:
+        return 0.0
     v -= v.mean()
     # Count upward zero crossings: one per crest, and immune to the shape of
     # the palette, which an FFT peak is not.
@@ -184,112 +238,252 @@ def test_period():
         for p in (7.0, 12.0, 18.0):
             synthetic(tmp, swp=p, dpd=p, wwh=0.0, hs=2.5, swh=2.5)
             r, _ = frames(opts(cache_dir=tmp, station="99999"), 1)
-            rate = crest_rate(r, r.layout, seconds=6 * p)
+            rate = crest_rate(r, r.layout, seconds=8 * p)
             got = 1.0 / rate if rate else 0.0
             check("%.0f s swell puts a crest past every %.1f s" % (p, got),
-                  abs(got - p) < 0.6, "measured %.2f s" % got)
+                  abs(got - p) < 0.8, "measured %.2f s" % got)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _upcrossings(v, frac=0.35):
+    """Indices where `v` crosses zero going up, with hysteresis.
+
+    A bare sign test counts a dozen crossings per wave: the surface is a whole
+    number of pixels, so it sits on the mean for a run of columns and jitters
+    across it. Requiring the signal to go properly negative before the next
+    crossing counts is the difference between measuring the wavelength and
+    measuring the quantisation.
+    """
+    amp = float(np.percentile(np.abs(v), 90)) if len(v) else 0.0
+    hi, lo = frac * amp, -frac * amp
+    out, armed = [], False
+    for i in range(len(v)):
+        if v[i] < lo:
+            armed = True
+        elif armed and v[i] > hi:
+            out.append(i)
+            armed = False
+    return out
+
+
+def crest_spacing(f, r, lay):
+    """Pixels between crests across the panel, off the rendered surface."""
+    e = elevation(f, r, lay)
+    ok = np.isfinite(e)
+    if ok.sum() < 20:
+        return 0.0
+    # The longest contiguous run of measurable columns: a spacing measured
+    # across the gap where the compass inset is would be a spacing between two
+    # different waves.
+    best = (0, 0)
+    i = 0
+    while i < len(ok):
+        if ok[i]:
+            j = i
+            while j < len(ok) and ok[j]:
+                j += 1
+            if j - i > best[1] - best[0]:
+                best = (i, j)
+            i = j
+        else:
+            i += 1
+    v = e[best[0]:best[1]]
+    v = v - v.mean()
+    up = _upcrossings(v)
+    return float(np.mean(np.diff(up))) if len(up) > 1 else 0.0
 
 
 def test_wavelength():
     print("\nthe spacing is the wavelength")
     tmp = tempfile.mkdtemp(prefix="swell-lam")
     try:
+        # A swell-driven sea: the zoom is `--waves` swell wavelengths across,
+        # so the crest spacing is fixed by the geometry and not by the period.
+        want = opts().width / opts().waves
         for p in (8.0, 16.0):
-            synthetic(tmp, swp=p, dpd=p, wwh=0.0, swd="N", mwd=0.0)
-            # Tall, so there are two whole wavelengths to measure; see
-            # test_direction() on why the geometry does not change with it.
+            synthetic(tmp, swp=p, dpd=p, wwh=0.0, swh=2.5, hs=2.5, swd="W",
+                      mwd=270.0)
+            # Deliberately on a tall panel. The geometry is set by the width,
+            # so this is the same wave train, but with amplitude enough that a
+            # crest is not four pixels of staircase and clear of the caption
+            # written across the top of the water.
             r, fr = frames(opts(cache_dir=tmp, station="99999",
-                                width=320, height=320), 1)
-            lay = r.layout
-            # A swell from the north runs down the panel, so a column of it is
-            # one full cycle per wavelength and the row profile is the wave.
-            colv = fr[0][lay.sea_y + 2:lay.sea_y + lay.sea_h - 2,
-                         lay.w // 2].sum(1)
-            colv = colv.astype(np.float64) - colv.mean()
-            # Deep water: L = g T^2 / 2pi, and the panel is `--waves`
-            # wavelengths wide, so the crest spacing in *rows* is fixed by the
-            # geometry and not by the period -- which is the point of the
-            # fixed-zoom decision, and worth asserting.
-            want = lay.w / opts().waves
-            up = np.flatnonzero((colv[:-1] <= 0) & (colv[1:] > 0))
-            got = float(np.mean(np.diff(up))) if len(up) > 1 else 0.0
-            check("%.0f s swell: %d px between crests down the panel" % (p, want),
-                  abs(got - want) < max(4.0, want * 0.12),
-                  "measured %.1f px, band is %d rows" % (got, lay.sea_h))
+                                width=320, height=192), 1)
+            got = crest_spacing(fr[0], r, r.layout)
+            check("%.0f s swell: %d px between crests" % (p, want),
+                  abs(got - want) < max(6.0, want * 0.15),
+                  "measured %.1f px" % got)
+
+        # A chop-driven sea: the zoom stays on the swell, so the chop must draw
+        # *short*. Keying it on the biggest train instead drew this as three
+        # smooth bands -- the same picture as a groundswell -- which is the bug
+        # this check exists for.
+        synthetic(tmp, swh=0.8, swp=13.0, swd="WSW", wwh=2.0, wwp=4.5,
+                  wwd="WNW", hs=2.2, dpd=4.5, mwd=300.0)
+        r, fr = frames(opts(cache_dir=tmp, station="99999",
+                            width=320, height=192), 1)
+        got = crest_spacing(fr[0], r, r.layout)
+        check("a chop-driven sea draws chop and not swell bands",
+              0 < got < want * 0.5, "measured %.1f px against %.0f px of swell"
+              % (got, want))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_direction():
-    print("\nthe waves go where the buoy says they came from")
-    tmp = tempfile.mkdtemp(prefix="swell-dir")
+def test_speed():
+    print("\nthe speed is the wavelength over the period")
+    tmp = tempfile.mkdtemp(prefix="swell-spd")
     try:
-        # From the north: the pattern must move *south*, i.e. down the panel.
-        # This is the sign error that looks perfect on screen.
-        dt = 0.5
-        for pt, axis, want in (("N", 0, +1), ("S", 0, -1), ("W", 1, +1),
-                               ("E", 1, -1)):
-            synthetic(tmp, swd=pt, mwd=swell.POINTS.index(pt) * 22.5,
-                      wwh=0.0, swp=9.0, dpd=9.0)
-            # Deliberately on a tall panel: a train from due north has crests
-            # that are straight lines across the wall, and thirty-one rows of
-            # them is a quarter of a wavelength -- not enough of a profile to
-            # match a shift against. The geometry is set by the width, so this
-            # is the same wave train with more of it visible.
+        for p in (9.0, 15.0):
+            synthetic(tmp, swp=p, dpd=p, wwh=0.0, swh=2.5, hs=2.5, swd="W",
+                      mwd=270.0)
             r, _ = frames(opts(cache_dir=tmp, station="99999",
                                width=320, height=192), 1)
             lay = r.layout
-            sea = slice(lay.sea_y + 2, lay.sea_y + lay.sea_h - 2)
-
-            def profile(f):
-                band = f[sea, 30:lay.w - 40].astype(np.float64).sum(axis=2)
-                p = band.mean(axis=1 - axis)
-                return p - p.mean()
-
-            a, b = profile(r(0.0, 0)), profile(r(dt, 10))
+            dt = 0.5
+            a = elevation(r(0.0, 0), r, lay)
+            b = elevation(r(dt, 10), r, lay)
+            ok = np.isfinite(a) & np.isfinite(b)
+            a = np.where(ok, a - np.nanmean(a[ok]), 0.0)
+            b = np.where(ok, b - np.nanmean(b[ok]), 0.0)
             n = len(a)
-            reach = min(n // 3, 30)
             best, score = 0, -1e18
-            for s in range(-reach, reach + 1):
-                # Not a circular correlation: wrapping the end of the panel
-                # onto the start would match a shift of one wavelength as
-                # readily as the true one.
-                v = (float(np.dot(a[:n - s], b[s:])) if s >= 0
-                     else float(np.dot(a[-s:], b[:n + s]))) / (n - abs(s))
+            for sh in range(-40, 41):
+                # Not circular: wrapping the end of the panel onto the start
+                # would match a shift of one wavelength as readily as the true
+                # one, and one wavelength is exactly the wrong answer.
+                v = (float(np.dot(a[:n - sh], b[sh:])) if sh >= 0
+                     else float(np.dot(a[-sh:], b[:n + sh]))) / (n - abs(sh))
                 if v > score:
-                    best, score = s, v
-            check("swell from %s moves %s along axis %d"
-                  % (pt, "+" if want > 0 else "-", axis),
-                  best * want > 0, "best shift %+d px in %.1f s" % (best, dt))
+                    best, score = sh, v
+            # The section is cut along the way the water is running, so the
+            # pattern must move towards +x, and it must move one wavelength in
+            # one period: c = L/T, in pixels per second.
+            want = (lay.w / opts().waves) / p * dt
+            check("%.0f s swell moves %+.1f px in %.1f s" % (p, want, dt),
+                  best > 0 and abs(best - want) < max(2.0, want * 0.35),
+                  "measured %+d px" % best)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------
-# 2. The numbers on the panel, read back off the panel.
+# 2. Height, which in a profile view is the whole argument.
+# --------------------------------------------------------------------------
+
+def rms_elevation(r, lay, seconds=30.0, fps=20.0):
+    """Root mean square surface elevation in pixels over a whole loop."""
+    acc = []
+    for i in range(int(seconds * fps)):
+        e = elevation(r(i / fps, i), r, lay)
+        acc.append(e[np.isfinite(e)])
+    v = np.concatenate(acc)
+    return float(np.sqrt(np.mean((v - v.mean()) ** 2)))
+
+
+def test_height_is_height():
+    print("\nheight is height")
+    tmp = tempfile.mkdtemp(prefix="swell-hgt")
+    try:
+        got = []
+        for hs in (0.8, 1.6, 2.4):
+            synthetic(tmp, hs=hs, swh=hs, wwh=0.0, swp=11.0, dpd=11.0)
+            r, _ = frames(opts(cache_dir=tmp, station="99999",
+                               width=320, height=192), 1)
+            got.append(rms_elevation(r, r.layout, seconds=12.0))
+        # A fixed linear scale: twice the sea is twice the wave on the wall,
+        # and the ratios say so to a pixel or two. This is the check that
+        # would fail if the amplitude were ever normalised to the day.
+        r1, r2 = got[1] / max(1e-6, got[0]), got[2] / max(1e-6, got[0])
+        check("twice the sea is twice the wave",
+              abs(r1 - 2.0) < 0.3 and abs(r2 - 3.0) < 0.45,
+              "rms %s px -> ratios %.2f %.2f"
+              % ([round(g, 2) for g in got], r1, r2))
+
+        # And the bracket that labels the vertical scale is the length it
+        # claims: the ink at x=4 spans Hs at the panel's pixels per metre.
+        for hs in (1.2, 2.4):
+            synthetic(tmp, hs=hs, swh=hs, wwh=0.2, swp=11.0, dpd=11.0)
+            r, _ = frames(opts(cache_dir=tmp, station="99999"), 2)
+            lay = r.layout
+            ink = ink_mask(r, lay)
+            rows = np.flatnonzero(ink[:, 4])
+            span = (rows.max() - rows.min()) if len(rows) > 1 else 0
+            want = hs * r.state["px_per_m"]
+            check("the %.1f m bracket is %.1f px of the scale" % (hs, want),
+                  abs(span - want) <= 2.0, "measured %d px" % span)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_calm():
+    print("\na flat calm still looks deliberate")
+    tmp = tempfile.mkdtemp(prefix="swell-calm")
+    try:
+        synthetic(tmp, hs=0.3, swh=0.25, wwh=0.1, swp=13.0, dpd=13.0)
+        r, fr = frames(opts(cache_dir=tmp, station="99999"), 4)
+        lay = r.layout
+        e = elevation(fr[-1], r, lay)
+        e = e[np.isfinite(e)]
+        check("the surface stays inside a couple of pixels of still water",
+              float(np.abs(e).max()) <= 3.0,
+              "peak %.1f px" % float(np.abs(e).max()))
+        band = fr[-1][lay.sea_y:lay.sea_y + lay.sea_h]
+        check("there is still water in the band", band[:, :, 2].max() > 150,
+              "brightest blue %d" % band[:, :, 2].max())
+        check("and it still says how big that is",
+              contains_text(fr[-1], "1FT"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# 2b. The words on the panel, read back off the panel.
+#
+# The complaint that started the rewrite was "I am not really sure what the
+# numbers are showing", so what the panel now says -- and what it no longer
+# says twice -- is asserted rather than eyeballed.
 # --------------------------------------------------------------------------
 
 def test_numbers():
-    print("\nthe headline numbers")
+    print("\nthe words on the panel")
     tmp = tempfile.mkdtemp(prefix="swell-num")
     try:
         synthetic(tmp, hs=1.9, swh=1.9, swp=9.0, dpd=9.0, swd="NW",
-                  mwd=315.0, wwh=0.4, wwp=4.0)
+                  mwd=315.0, wwh=0.4, wwp=4.0, obs_age=45 * 60.0)
         _, fr = frames(opts(cache_dir=tmp, station="99999"), 4)
         f = fr[-1]
-        check("height in feet", contains_text(f, "6.2FT"))
-        check("height in metres", contains_text(f, "1.9M"))
-        check("period in seconds", contains_text(f, "9S"))
-        check("direction as a compass point", contains_text(f, "NW"))
-        check("direction in degrees", contains_text(f, "FROM 315"))
-        check("the swell half of the split", contains_text(f, "SWL 6.2FT 9S"))
-        check("the windsea half of the split", contains_text(f, "SEA 1.3FT 4S"))
+        check("the headline is a sentence",
+              contains_text(f, "6FT WAVES EVERY 9 SEC"))
+        check("the swell half of the split named in words",
+              contains_text(f, "SWELL 6FT"))
+        check("the windsea half named in words",
+              contains_text(f, "CHOP 1FT"))
         check("a verdict on the sea state", contains_text(f, "CLEAN"))
-        check("water temperature", contains_text(f, "59F"))
-        check("the observation age, not just the fetch age",
-              contains_text(f, "OBS"))
+        check("and something for the verdict to lean on",
+              contains_text(f, "MOSTLY SWELL"))
+        check("the direction, spelled out beside the compass",
+              contains_text(f, "FROM NW", bg_max=0.5))
+        check("the period tied to the picture",
+              contains_text(f, "9 SEC BETWEEN CRESTS", bg_max=0.5))
+        check("the height as a scale on the water",
+              contains_text(f, "6FT", bg_max=0.5))
+        check("the observation age says it is an age and says minutes",
+              contains_text(f, "45 MIN AGO"))
+        check("the strip says what it is and how long it runs",
+              contains_text(f, "PAST 24 HOURS"))
+        # Both axis labels are written over their own trace, so the counters
+        # between the strokes are not dark and the matcher has to be told so.
+        check("the strip axes name their quantity",
+              contains_text(f, "HEIGHT", bg_max=0.7)
+              and contains_text(f, "PERIOD 20 SEC", bg_max=0.7))
+
+        # The other half of the complaint: the same fact printed twice, in two
+        # units, and jargon nobody outside a surf forecast reads.
+        for gone in ("1.9M", "FROM 315", "SWL 6.2FT", "OBS 45M", "129M",
+                     "WIND W"):
+            check("no longer says %s" % gone, not contains_text(f, gone))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -304,27 +498,6 @@ def test_verdict():
             _, fr = frames(opts(cache_dir=tmp, station="99999"), 3)
             check("%.1fm swell under %.1fm windsea reads %s"
                   % (swh, wwh, word), contains_text(fr[-1], word))
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-def test_height_contrast():
-    print("\nheight is contrast")
-    tmp = tempfile.mkdtemp(prefix="swell-amp")
-    try:
-        spread = []
-        for hs in (0.3, 1.5, 4.0):
-            synthetic(tmp, hs=hs, swh=hs, wwh=0.0)
-            r, fr = frames(opts(cache_dir=tmp, station="99999"), 2)
-            lay = r.layout
-            # Clear of the compass, the arrow and the scale bar: the overlay is
-            # white on near-black by design and would swamp any measurement of
-            # the water's own range.
-            band = fr[-1][lay.sea_y + 12:lay.sea_y + 20, 60:240].astype(int)
-            spread.append(float(band.max() - band.min()))
-        check("a bigger sea uses more of the ramp",
-              spread[0] < spread[1] < spread[2],
-              "peak-to-peak %s" % [round(s) for s in spread])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -424,7 +597,7 @@ def test_degraded():
         check("silent buoy: blames the buoy, not the fetcher",
               contains_text(fr[-1], "SILENT"))
         check("silent buoy: draws no wave train",
-              not contains_text(fr[-1], "FROM"))
+              not contains_text(fr[-1], "BETWEEN CRESTS"))
 
         # Fetched hours ago, buoy fine: draws, but says STALE.
         synthetic(tmp, fetch_age=6 * 3600.0)
@@ -436,9 +609,9 @@ def test_degraded():
         synthetic(tmp, spec=False)
         r, fr = frames(opts(cache_dir=tmp, station="99999"), 3)
         check("no .spec: falls back to one train",
-              len(r.state["idx"]) == 1 and fr[-1].max() > 100)
+              len(r.state["trains"]) == 1 and fr[-1].max() > 100)
         check("no .spec: does not claim a windsea",
-              not contains_text(fr[-1], "SWL"))
+              not contains_text(fr[-1], "CHOP"))
 
         # A record that is not what we expect at all.
         os.makedirs(tmp, exist_ok=True)
@@ -607,10 +780,11 @@ def main():
     test_no_network()
     test_period()
     test_wavelength()
-    test_direction()
+    test_speed()
+    test_height_is_height()
+    test_calm()
     test_numbers()
     test_verdict()
-    test_height_contrast()
     test_trend()
     test_purity()
     test_motion()
