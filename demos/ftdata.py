@@ -4123,6 +4123,473 @@ def _quake_usgs():
 
 
 # --------------------------------------------------------------------------
+# California's water year: what is in the reservoirs and what is still on the
+# mountain. wateryear.py draws this.
+#
+# The state's whole hydrology is one annual cycle. Everything it will get falls
+# between October and April, most of it lands as snow on the Sierra, and the
+# snow is a second reservoir -- bigger than any of the concrete ones -- that
+# releases itself over the following three months. So the interesting quantity
+# is never today's number: it is *the shape of the year so far*, which is why
+# this record is a whole water year of daily samples rather than a snapshot.
+#
+# **CDEC is the source and it is keyless.** The California Data Exchange Center
+# has served the same JSON servlet for a decade:
+#
+#   /dynamicapp/req/JSONDataServlet?Stations=SHA,ORO&SensorNums=15
+#                                  &dur_code=D&Start=2025-10-01&End=2026-08-11
+#
+# Stations are comma-separated and it will happily take twenty of them in one
+# request, which is the only reason the snow index below is affordable. Sensor
+# 15 is reservoir storage in acre-feet; sensor 82 is the revised daily snow
+# water equivalent at a snow pillow, in inches. `dur_code=D` is the daily
+# series. Sixteen years of one station is a megabyte and comes back in half a
+# second, which is what makes the normals bake below possible at all.
+#
+# Three things about the responses that cost time to find out:
+#
+#   * **Missing is `-9999`, not null.** Every row that exists has a `value`,
+#     and the sentinel for "the gauge did not report" is -9999. There is also
+#     the string "m" in some sensors' output. Both become None here, and so
+#     does any storage that reads as zero -- Shasta does not empty.
+#   * **The date field is not ISO.** It is `"2026-8-11 00:00"`: no zero
+#     padding on the month or the day. Anything that slices fixed columns out
+#     of it works for ten days of the month and then quietly stops.
+#   * **Rows for days a station never reported are simply absent**, so the
+#     response length is not the number of days asked for and the series has to
+#     be built by date and not by position.
+#
+# CDEC is a state service on a state budget and it times out. Everything here
+# is written so that one dead station costs one vessel on the panel and one
+# dead region costs one third of the snow band; nothing is fatal but a total
+# failure of the reservoir request, and even that leaves yesterday's record in
+# place because `fetch()` does not overwrite on an exception.
+#
+# **Capacities are a constant table, not a lookup.** Percent of capacity needs
+# each reservoir's gross pool, and CDEC does publish it -- in the `RES` report,
+# which is 116 kB of HTML wrapped around the number. The capacities themselves
+# are physical facts about dams that were finished between 1945 and 1979 and
+# have not changed in this century, so they are written down here with the
+# report they came from cited, and the panel does not spend a request and an
+# HTML parser on re-learning that Shasta is still 4,552,000 acre-feet.
+#
+# **Percent of average is derived here, not fetched, and it is the number the
+# panel is for.** The same `RES` report carries CDEC's own "% of historical
+# average", but against an unstated period of record, and it exists only for
+# today -- there is no way to ask it what average storage on the 3rd of
+# February looks like, which is what a panel that animates the year needs. So
+# the normals are baked once, from complete past water years pulled through
+# this same servlet, into demos/wateryear-normals.npz:
+#
+#   $ python3 -c "import ftdata; ftdata.wateryear_bake_normals()"
+#
+# That is a few minutes of fetching, run by hand, and the result is committed.
+# Nothing in the timer path ever fetches history. The baseline period is
+# written into the file so the panel can say what it is comparing against,
+# which CDEC's own figure cannot.
+#
+# **Eight reservoirs, north to south**, which is the panel's horizontal axis:
+# Trinity, Shasta, Oroville, Folsom, New Melones, Don Pedro, McClure, Pine
+# Flat. Between them they are 17.9 million acre-feet of the state's roughly 42,
+# and they run from the Trinity Alps to the southern Sierra in monotonic
+# latitude order, so left-to-right on the panel is north-to-south on the map.
+# San Luis is deliberately not among them: it is off-stream, it is filled by
+# pumping rather than by a river, and its curve is a delivery schedule rather
+# than a watershed.
+#
+# **Snow is three regional indices**, which is how the Cooperative Snow Surveys
+# report it: North, Central and South Sierra. Six snow pillows each, chosen for
+# a spread of basins and elevations and for having reported continuously since
+# 2011 -- checked, station by station, against this servlet before the list was
+# written down. The index is the mean of whichever of the six answered that
+# day, which is exactly what CDEC's own `DLYSWEQ` summary does with its 32, 54
+# and 25 stations; the count is stored alongside so the demo can tell a real
+# zero in October from a region that went dark. `DLYSWEQ` itself is not used
+# because it only serves dates inside the snow season and freezes on the last
+# one -- in August it will cheerfully hand you June's numbers.
+# --------------------------------------------------------------------------
+
+CDEC_URL = os.environ.get(
+    "FT_CDEC_URL", "https://cdec.water.ca.gov/dynamicapp/req/JSONDataServlet")
+
+# A day and a bit. CDEC's daily values land some time each morning and are
+# occasionally a day late; a record that has missed two mornings is one the
+# panel should be flagging, and one that has missed three days of a February
+# storm is actively misleading about the snow.
+WY_TTL = 108000                                          # 30 hours
+
+# Six hours. The underlying numbers move once a day, so this is four chances to
+# catch the morning update and no more -- four requests and 1.4 MB between
+# them, which is not something to do on shop wifi every quarter hour.
+WY_INTERVAL = 21600
+
+# Every second day, plus whatever the last day is. 320 columns over a 365-day
+# year is under a pixel a day, and a reservoir does not do anything in 48 hours
+# that a display a pixel a day can show; this halves the record for nothing
+# anybody can see. The day indices are stored explicitly rather than implied by
+# position, so the uneven last step is not a special case for the demo.
+WY_STRIDE = 2
+
+# (CDEC id, three-letter label, gross capacity in acre-feet, latitude).
+#
+# Capacities from CDEC's RES report, "Reservoir Storage Summary", read
+# 2026-08-11; they are the same numbers DWR's Bulletin 132 carries. Latitudes
+# are the dam sites, and they are here only so the panel can order the vessels
+# and put the wall's own latitude among them -- they are monotonic, which is
+# the property the drawing relies on.
+WY_RESERVOIRS = (
+    ("CLE", "TRI", 2447650, 40.80),     # Trinity Lake, Trinity River
+    ("SHA", "SHA", 4552000, 40.72),     # Shasta, Sacramento River
+    ("ORO", "ORO", 3424753, 39.54),     # Oroville, Feather River
+    ("FOL", "FOL",  977000, 38.71),     # Folsom, American River
+    ("NML", "NML", 2400000, 37.95),     # New Melones, Stanislaus River
+    ("DNP", "DNP", 2030000, 37.70),     # Don Pedro, Tuolumne River
+    ("EXC", "EXC", 1024600, 37.59),     # McClure, Merced River
+    ("PNF", "PNF", 1000000, 36.83),     # Pine Flat, Kings River
+)
+
+# Snow pillows, six a region. Basins in the comments because the spread across
+# basins is the point: six pillows in one canyon is one measurement repeated.
+WY_SNOW = (
+    ("north", ("GRZ",      # Grizzly Ridge, Feather
+               "CSL",      # Central Sierra Snow Lab, Yuba
+               "IDP",      # Independence Camp, Truckee
+               "FRN",      # Forni Ridge, American
+               "SIL",      # Silver Lake, American
+               "HGM")),    # Hagans Meadow, Tahoe
+    ("central", ("BLK",    # Blue Lakes, Mokelumne
+                 "EBB",    # Ebbetts Pass, Carson
+                 "GNL",    # Gianelli Meadow, Stanislaus
+                 "HRS",    # Horse Meadow, Tuolumne
+                 "STR",    # Tenaya Lake / Snow Flat area, Merced
+                 "TMR")),  # Tamarack Summit, San Joaquin
+    ("south", ("BSH",      # Bishop Pass, Kings
+               "UBC",      # Upper Burnt Corral, Kings
+               "MTM",      # Mitchell Meadow, Kings
+               "QUA",      # Quaking Aspen, Tule
+               "CBT",      # Cottonwood Pass, Kern
+               "MHP")),    # Mammoth Pass, Owens
+)
+
+WY_STORAGE_SENSOR = 15
+WY_SNOW_SENSOR = 82
+
+# How many complete water years go into the normals. Fifteen is a compromise
+# between "long enough that one 2017 does not own the curve" and "recent enough
+# that it is the same climate and the same operating rules". It spans 2011-2025
+# as this is written, which includes the 2012-16 drought, the 2017 and 2023
+# record years and the 2021-22 hole -- a period nobody could call cherry-picked.
+WY_NORMAL_YEARS = 15
+
+WY_NORMALS_FILE = "wateryear-normals.npz"
+
+
+def _wy_water_year(epoch):
+    """(water year, epoch of its 1 October) for a moment in time.
+
+    Water year 2026 runs 1 October 2025 to 30 September 2026, which is the
+    convention every California water agency uses and the reason this panel
+    starts its axis in October rather than in January.
+    """
+    lt = time.localtime(epoch)
+    wy = lt.tm_year + (1 if lt.tm_mon >= 10 else 0)
+    start = time.mktime((wy - 1, 10, 1, 0, 0, 0, 0, 0, -1))
+    return wy, start
+
+
+# Day-of-water-year on a leap template. The years being averaged are not all
+# the same length, so "days since 1 October" means a different date in a leap
+# year than in a common one and averaging by that index smears every normal
+# after February by a day. Indexing by the calendar date instead fixes it: the
+# template is the leap water year 2024, so 29 February always lands on 152 and
+# common years simply leave that slot empty for the mean to skip.
+_WY_MONTH_DAYS = ((10, 31), (11, 30), (12, 31), (1, 31), (2, 29), (3, 31),
+                  (4, 30), (5, 31), (6, 30), (7, 31), (8, 31), (9, 30))
+WY_DAYS = 366
+
+_WY_DOY = {}
+_wy_i = 0
+for _wy_m, _wy_n in _WY_MONTH_DAYS:
+    for _wy_d in range(1, _wy_n + 1):
+        _WY_DOY[(_wy_m, _wy_d)] = _wy_i
+        _wy_i += 1
+del _wy_i, _wy_m, _wy_n, _wy_d
+
+
+def wateryear_doy(month, day):
+    """0..365 for a calendar date, counting from 1 October. See _WY_DOY."""
+    return _WY_DOY.get((int(month), int(day)))
+
+
+def _wy_num(v):
+    """CDEC's value field as a float, or None. -9999 and 'm' both mean absent."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        v = v.strip()
+        if not v or v in ("m", "M", "---", "--"):
+            return None
+        try:
+            v = float(v)
+        except ValueError:
+            return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    v = float(v)
+    # -9999 is the documented sentinel; anything near it is the same thing with
+    # a scale factor applied by some upstream step.
+    return None if v <= -998.0 else v
+
+
+def _wy_date(s):
+    """CDEC's '2026-8-11 00:00' to (year, month, day). None if it is not that.
+
+    Not strptime: this is called a few thousand times per fetch and the format
+    is unpadded, which %m and %d accept but only by accident of the platform's
+    C library. Splitting is both faster and portable.
+    """
+    try:
+        y, m, d = s.split(" ")[0].split("-")
+        return int(y), int(m), int(d)
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+def _wy_fetch_days(stations, sensor, start, end, timeout=90):
+    """{station: {(y, m, d): value}} for a date range. One request.
+
+    `start` and `end` are 'YYYY-MM-DD'. Stations that answered nothing are
+    simply absent from the result, which is what lets every caller here treat a
+    dead gauge and an unknown station identically.
+    """
+    url = ("%s?Stations=%s&SensorNums=%d&dur_code=D&Start=%s&End=%s"
+           % (CDEC_URL, ",".join(stations), sensor, start, end))
+    out = {}
+    for row in get_json(url, timeout):
+        try:
+            sta = row["stationId"]
+            when = _wy_date(row["date"])
+        except Exception:                                    # noqa: BLE001
+            continue
+        if when is None:
+            continue
+        value = _wy_num(row.get("value"))
+        if value is None:
+            continue
+        out.setdefault(sta, {})[when] = value
+    return out, url
+
+
+def _wy_datestr(epoch):
+    return time.strftime("%Y-%m-%d", time.localtime(epoch))
+
+
+def _wy_dates(start_epoch, n_days):
+    """[(y, m, d)] for n_days from start_epoch, walking real calendar days.
+
+    A day is not 86400 seconds twice a year, and the two days it is not are in
+    November and March -- both inside this window. Stepping by noon rather than
+    by midnight makes the arithmetic immune to it.
+    """
+    out = []
+    for i in range(n_days):
+        lt = time.localtime(start_epoch + i * 86400.0 + 43200.0)
+        out.append((lt.tm_year, lt.tm_mon, lt.tm_mday))
+    return out
+
+
+@product("wateryear", ttl=WY_TTL, interval=WY_INTERVAL,
+         description="CA reservoir storage and Sierra snowpack, water year to "
+                     "date, every second day")
+def _wateryear():
+    """This water year so far: eight reservoirs and three snow indices.
+
+    Four requests, 1.4 MB off the wire, and a 13 kB record: eleven series of
+    about a hundred and sixty samples each, measured 2026-08-11.
+    That is more than most products here store, and it is the product -- a
+    panel whose entire subject is the shape of a year cannot be handed a
+    snapshot.
+
+    Not `volatile`. The payload is the year so far, so a record that survives a
+    reboot is the difference between coming back up with the winter on the
+    panel and coming back up with one column of it.
+    """
+    now = time.time()
+    wy, start = _wy_water_year(now)
+    n_days = int(round((now - start) / 86400.0)) + 1
+    n_days = max(1, min(n_days, WY_DAYS))
+    dates = _wy_dates(start, n_days)
+
+    # Every second day, counted back from today rather than forward from
+    # October, so the leading edge of the panel is genuinely the latest day
+    # CDEC has. Anchoring the stride at the start instead loses whichever of
+    # the last two days has the wrong parity, which on the mornings CDEC is
+    # running late is the only one of them with a number in it.
+    # Both of the last two days regardless of parity: CDEC's daily values for
+    # today land some time in the morning and until they do, yesterday is the
+    # leading edge, so dropping one of the pair to the stride would cost the
+    # panel its now-marker for half of every day.
+    idx = sorted(set(range(n_days - 1, -1, -WY_STRIDE)) | {max(0, n_days - 2)})
+    keep = [dates[i] for i in idx]
+
+    first, last = _wy_datestr(start), _wy_datestr(start + (n_days - 1) * 86400.0)
+
+    codes = [c for c, _l, _cap, _lat in WY_RESERVOIRS]
+    storage, url = _wy_fetch_days(codes, WY_STORAGE_SENSOR, first, last)
+
+    res = {}
+    for code in codes:
+        got = storage.get(code, {})
+        # Zero is not a storage reading, it is a gauge with nothing to say.
+        # Thousands of acre-feet, integer: an acre-foot of resolution on a
+        # four-million-acre-foot lake is six digits of noise per sample.
+        res[code] = [None if got.get(d) is None or got[d] <= 0.0
+                     else int(round(got[d] / 1000.0)) for d in keep]
+
+    snow, snow_n = {}, {}
+    for region, stations in WY_SNOW:
+        try:
+            got, _ = _wy_fetch_days(stations, WY_SNOW_SENSOR, first, last)
+        except Exception as e:                               # noqa: BLE001
+            # One region of the snow band, and nothing else. The reservoirs are
+            # already in hand by this point and are the half of the panel that
+            # is there every day of the year.
+            print("ftdata: wateryear %s snow unavailable: %r" % (region, e),
+                  file=sys.stderr)
+            got = {}
+        values, counts = [], []
+        for d in keep:
+            have = [got[s][d] for s in stations
+                    if s in got and d in got[s]]
+            counts.append(len(have))
+            # Three of six is the floor. Two pillows out of six is not a
+            # regional index, it is two mountains, and in a melt-out week the
+            # two that still report are the two that are highest.
+            values.append(round(sum(have) / len(have), 1)
+                          if len(have) >= 3 else None)
+        snow[region] = values
+        snow_n[region] = counts
+
+    # The last day any reservoir reported. The panel draws its now-marker here
+    # rather than at the wall clock, so a fetcher that stopped on Tuesday shows
+    # a year that stops on Tuesday instead of one that quietly flatlines.
+    asof = None
+    for j in range(len(keep) - 1, -1, -1):
+        if any(res[c][j] is not None for c in codes):
+            asof = start + idx[j] * 86400.0
+            break
+
+    return {
+        "wy": wy,
+        "start": start,
+        "n_days": n_days,
+        "days": idx,
+        "asof": asof,
+        "res_order": codes,
+        "res_label": {c: l for c, l, _cap, _lat in WY_RESERVOIRS},
+        "res_lat": {c: lat for c, _l, _cap, lat in WY_RESERVOIRS},
+        "cap_kaf": {c: int(round(cap / 1000.0))
+                    for c, _l, cap, _lat in WY_RESERVOIRS},
+        "res_kaf": res,
+        "snow_order": [r for r, _s in WY_SNOW],
+        "snow_in": snow,
+        "snow_n": snow_n,
+        "snow_stations": {r: len(s) for r, s in WY_SNOW},
+        "units": {"storage": "thousand acre-feet",
+                  "snow": "inches of snow water equivalent"},
+    }, url
+
+
+def wateryear_bake_normals(path=None, years=WY_NORMAL_YEARS, end_wy=None,
+                           verbose=True):
+    """Fetch complete past water years and bake the day-of-year normals.
+
+    **Run by hand, once, and commit the result.** Nothing on the timer calls
+    this: it is thirty-odd requests and a hundred megabytes of history, and the
+    answer changes once a year.
+
+        $ python3 -c "import ftdata; ftdata.wateryear_bake_normals()"
+
+    It writes demos/wateryear-normals.npz beside the demo, holding the mean
+    storage and the mean snow index for every day of the water year across the
+    last `years` complete ones. Averaging is by calendar date on the leap
+    template (see wateryear_doy), and any date no year could fill -- 29
+    February has only three or four contributors, and a gauge can be out for a
+    whole season -- is filled by interpolating its neighbours, because a hole
+    in a normals curve is a vessel whose reference line vanishes for a week.
+
+    The current water year is excluded on purpose. A normal that includes the
+    year being compared against it is a normal that moves when the year does.
+    """
+    import numpy as np
+
+    if end_wy is None:
+        end_wy = _wy_water_year(time.time())[0]
+    first_wy = end_wy - years                      # ..end_wy - 1 inclusive
+    wys = list(range(first_wy, end_wy))
+
+    def blank():
+        return np.full((len(wys), WY_DAYS), np.nan, np.float64)
+
+    codes = [c for c, _l, _cap, _lat in WY_RESERVOIRS]
+    res = {c: blank() for c in codes}
+    snow = {r: blank() for r, _s in WY_SNOW}
+
+    for row, wy in enumerate(wys):
+        start = "%d-10-01" % (wy - 1)
+        end = "%d-09-30" % wy
+        if verbose:
+            print("wateryear normals: WY%d %s..%s" % (wy, start, end))
+        got, _ = _wy_fetch_days(codes, WY_STORAGE_SENSOR, start, end,
+                                timeout=180)
+        for code in codes:
+            for (y, m, d), v in got.get(code, {}).items():
+                i = wateryear_doy(m, d)
+                if i is not None and v > 0.0:
+                    res[code][row, i] = v / 1000.0
+        for region, stations in WY_SNOW:
+            sgot, _ = _wy_fetch_days(stations, WY_SNOW_SENSOR, start, end,
+                                     timeout=180)
+            byday = {}
+            for sta in stations:
+                for when, v in sgot.get(sta, {}).items():
+                    byday.setdefault(when, []).append(v)
+            for (y, m, d), have in byday.items():
+                i = wateryear_doy(m, d)
+                if i is not None and len(have) >= 3:
+                    snow[region][row, i] = sum(have) / len(have)
+
+    def mean_fill(rows):
+        # nanmean over the years, then interpolate whatever no year filled.
+        # errstate: an all-NaN column is a legitimate answer here (a station
+        # set that never reported that date), and it is about to be filled.
+        with np.errstate(invalid="ignore"):
+            m = np.nanmean(rows, axis=0)
+        ok = np.isfinite(m)
+        if not ok.any():
+            return np.zeros(WY_DAYS)
+        x = np.arange(WY_DAYS)
+        return np.interp(x, x[ok], m[ok])
+
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            WY_NORMALS_FILE)
+    np.savez_compressed(
+        path,
+        res_codes=np.array(codes),
+        res_norm=np.stack([mean_fill(res[c]) for c in codes]).astype(np.float32),
+        snow_regions=np.array([r for r, _s in WY_SNOW]),
+        snow_norm=np.stack([mean_fill(snow[r]) for r, _s in WY_SNOW]
+                           ).astype(np.float32),
+        years=np.array(wys, np.int32),
+    )
+    if verbose:
+        print("wateryear normals: wrote %s (%d bytes, WY%d-%d)"
+              % (path, os.path.getsize(path), wys[0], wys[-1]))
+    return path
+
+
+# --------------------------------------------------------------------------
 # Raw ground motion, from the seismometer ten miles from the wall.
 # helicorder.py draws these as a drum recorder.
 #
