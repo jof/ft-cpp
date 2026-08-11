@@ -41,7 +41,7 @@
       "module": "wateryear",
       "seconds": 40.0,
       "fps": 20,
-      "ms": 4.7,
+      "ms": 3.1,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -434,7 +434,7 @@
       "module": "sun",
       "seconds": 30.0,
       "fps": 20,
-      "ms": 0.8,
+      "ms": 0.9,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -851,7 +851,7 @@
       "module": "air",
       "seconds": 40.0,
       "fps": 20,
-      "ms": 16.2,
+      "ms": 12.1,
       "enabled": true,
       "solo": false,
       "options": {}
