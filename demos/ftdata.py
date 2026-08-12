@@ -5778,6 +5778,179 @@ def _sats():
 
 
 # --------------------------------------------------------------------------
+# An hour of solar wind in flight between L1 and the Earth. solarwind.py draws
+# it as a picture rather than a readout: the stream across the panel, the
+# interplanetary field carried in it, and the magnetosphere it runs into.
+#
+# **Why the geospace file and not the plasma/mag pair.** The obvious endpoints
+# are `/products/solar-wind/plasma-*.json` and `mag-*.json`, and every tutorial
+# on the internet still names them. They 404. So does the whole
+# `/products/solar-wind/` directory -- the same disappearance that made
+# swpc_solarwind above fall back to the two sixty-byte summary files. What is
+# still served, and is far better than either, is
+# `/products/geospace/propagated-solar-wind-1-hour.json`: one 6.6 kB table,
+# one row a minute for the last hour, with speed, density, temperature, the
+# full field vector in GSM, |B|, and -- the part that matters here -- a
+# `propagated_time_tag` saying when each sample will actually reach the bow
+# shock. It is the input to SWPC's own geospace model, so it is the tidiest
+# and least gap-ridden solar wind series they publish.
+#
+# **The window is the transit time, which is a gift.** A sample measured at L1
+# reaches the Earth roughly forty-five to fifty minutes later at typical wind
+# speeds, and the file holds sixty minutes. So the file is, almost exactly, the
+# plasma currently in flight: its oldest row is arriving at the magnetosphere
+# about now and its newest row has just been measured a million and a half
+# kilometres upstream. A panel that lays the rows out left to right is
+# therefore not a chart with a time axis pretending to be a picture -- it is a
+# picture, of where the plasma is. That coincidence is the whole reason
+# solarwind.py exists in the shape it does, and it is why the arrival stamps
+# are kept in the record rather than trimmed away: the demo prints how far
+# ahead the leading edge is.
+#
+# The rows carry nulls when an instrument drops out, and they are stored as
+# nulls rather than filled here. The gap is real information -- three minutes
+# of missing density during a shock arrival is exactly when it happens -- and
+# the demo can draw a hole more honestly than the fetcher can invent a value.
+#
+# The aurora power rides along because it is 14 kB of text and the alternative
+# is not. `ovation_aurora_latest.json` is the gridded oval, and it is 900 kB of
+# JSON, every fetch, to be reduced to two numbers by the time it reaches a
+# panel where the Earth is five pixels across. `aurora-nowcast-hemi-power.txt`
+# is the same model's hemispheric integral, in gigawatts, at five-minute
+# cadence, and two numbers is all this panel can draw. Ten quiet gigawatts, a
+# hundred in a storm.
+# --------------------------------------------------------------------------
+
+L1_WIND_URL = ("https://services.swpc.noaa.gov/products/geospace/"
+               "propagated-solar-wind-1-hour.json")
+AURORA_POWER_URL = ("https://services.swpc.noaa.gov/text/"
+                    "aurora-nowcast-hemi-power.txt")
+
+# One column of a 320 px panel is worth about three minutes of this; sixty
+# samples is one a minute, which is finer than anything downstream can show and
+# still only about a kilobyte and a half of JSON.
+L1_WIND_SAMPLES = 60
+
+
+def _l1_num(value, places):
+    """A rounded float, or None for null, empty, '(n/a)' and NaN alike."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    f = round(f, places)
+    return int(f) if places <= 0 else f
+
+
+def _aurora_hemispheric_power():
+    """The last row of the Ovation hemispheric power table, in gigawatts.
+
+    Fixed-width text with a comment header, five-minute cadence, one file a
+    day -- so shortly after 00:00 UTC the file has a header and one row in it,
+    and the last data line is the only line worth having. It is read by taking
+    the last line that parses rather than by counting from the end, because the
+    file sometimes ends in a blank line and sometimes does not.
+    """
+    text = get(AURORA_POWER_URL).decode("ascii", "replace")
+    out = {"north_gw": None, "south_gw": None, "t": None}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        north, south = _l1_num(parts[2], 0), _l1_num(parts[3], 0)
+        if north is None or south is None:
+            continue
+        out = {"north_gw": north, "south_gw": south, "t": parts[0]}
+    return out
+
+
+@product("swpc_l1_wind", ttl=3600, interval=600,
+         description="an hour of propagated L1 solar wind, plus aurora power")
+def _swpc_l1_wind():
+    """Sixty minutes of wind in flight, as four parallel arrays.
+
+    The file is a header row followed by data rows, which is SWPC's usual
+    `/products/` shape and the reason for the column-name lookup: the column
+    order has moved before and reading `row[6]` for bz would fail silently and
+    draw a beautiful wrong picture rather than raise.
+
+    Parallel arrays rather than a list of records, because at sixty samples the
+    repeated keys are two thirds of the file. Speed to the nearest km/s,
+    density and field to a tenth: that is finer than a 320 px panel can
+    resolve, and the float64 reprs would triple the record for nothing.
+
+    Arrays are oldest first, which is the order the file is in and also the
+    order of *distance from the Sun*: the oldest sample is the one nearest the
+    Earth. Anything drawing this wants it that way round; anything printing
+    'now' wants the last element, which is what `latest` is for.
+    """
+    rows = get_json(L1_WIND_URL)
+    if not rows or not isinstance(rows[0], list):
+        raise ValueError("propagated solar wind: no header row")
+    col = {}
+    for i, name in enumerate(rows[0]):
+        col[str(name)] = i
+    for key in ("time_tag", "speed", "density", "bz", "bt",
+                "propagated_time_tag"):
+        if key not in col:
+            raise ValueError("propagated solar wind: no %r column" % key)
+    data = [r for r in rows[1:] if isinstance(r, list) and len(r) >= len(col)]
+    if not data:
+        raise ValueError("propagated solar wind: no data rows")
+
+    # Thin from the newest end, so the most recent minute is always kept: it is
+    # the one the panel prints as the current wind speed.
+    step = max(1, -(-len(data) // L1_WIND_SAMPLES))
+    keep = list(reversed(data[::-step]))[-L1_WIND_SAMPLES:]
+
+    def column(key, places):
+        return [_l1_num(r[col[key]], places) for r in keep]
+
+    speed = column("speed", 0)
+    density = column("density", 1)
+    bz = column("bz", 1)
+    bt = column("bt", 1)
+
+    latest = {"t": None, "speed": None, "density": None, "bz": None,
+              "bt": None, "arrival": None}
+    for i in range(len(keep) - 1, -1, -1):
+        if speed[i] is not None and bz[i] is not None:
+            latest = {"t": keep[i][col["time_tag"]],
+                      "speed": speed[i], "density": density[i],
+                      "bz": bz[i], "bt": bt[i],
+                      "arrival": keep[i][col["propagated_time_tag"]]}
+            break
+
+    try:
+        aurora = _aurora_hemispheric_power()
+    except Exception:                                        # noqa: BLE001
+        # The oval's power is a garnish -- it sets how brightly the poles glow
+        # and nothing else. A panel with a stream, a field and a magnetopause
+        # is still the panel; one that failed to draw because a text file was
+        # briefly a 500 is not.
+        aurora = {"north_gw": None, "south_gw": None, "t": None}
+
+    return {
+        "speed": speed, "density": density, "bz": bz, "bt": bt,
+        "t_first": keep[0][col["time_tag"]],
+        "t_last": keep[-1][col["time_tag"]],
+        "arrival_first": keep[0][col["propagated_time_tag"]],
+        "arrival_last": keep[-1][col["propagated_time_tag"]],
+        "samples": len(keep), "minutes_per_sample": step,
+        "latest": latest, "aurora": aurora,
+        "units": {"speed": "km/s", "density": "protons/cm^3",
+                  "bz": "nT GSM", "bt": "nT", "aurora": "GW",
+                  "t": "UTC, measured at L1",
+                  "arrival": "UTC, propagated to the bow shock"},
+    }, L1_WIND_URL
+
+
+# --------------------------------------------------------------------------
 # The global routing table, churning, as San Francisco hears it. bgp.py draws
 # it as a per-second chart of the last quarter hour with a ticker of the actual
 # prefixes underneath.
