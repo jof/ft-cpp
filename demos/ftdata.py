@@ -2623,6 +2623,715 @@ def _adsb_bay():
 
 
 # --------------------------------------------------------------------------
+# The 19, 22 and 55 at our own front door, as a timetable. muni.py draws these.
+#
+# **This is the schedule, not a prediction, and that is not a design choice.**
+# Muni has no real-time feed this wall may honestly use. 511.org's SIRI and
+# GTFS-RT endpoints are the documented public source of Muni vehicle positions
+# and both answer 401 without a free-but-registered key -- a key nobody had
+# when this was written. The legacy NextBus feed at retro.umoiq.com is still
+# keyless but its agency list is down to eighteen agencies and SF Muni is not
+# among them; gtfs.sfmta.com does not answer at all; api.sfmta.com does not
+# resolve; sfmta.com's own /status/gtfs-rt/*.pb are 404 Drupal pages; and
+# Swiftly's api.goswift.ly wants credentials. The BART block further down this
+# file reaches the same conclusion from the other end -- it exists because BART
+# publishes GTFS-RT for free and Muni does not.
+#
+# There is one more door, and it is deliberately left shut. SFMTA's own route
+# pages embed a live Umo IQ vehicle API -- `webservices.umoiq.com/api/pub/v1`,
+# under the *unlisted* agency id `sfmta-cis` -- and it does answer 200 with a
+# thousand buses and their GPS times. It answers because the page ships a
+# `key=` query parameter in the clear, and that key is SFMTA's: issued to
+# SFMTA, metered against SFMTA, and rotatable by either party the moment
+# somebody notices a light display in Potrero Hill polling it. Lifting a
+# credential out of somebody else's front end is not the same thing as a
+# keyless feed, and a panel that dies the week the token rotates is not one
+# anybody wants to own. The clean route to live Muni predictions is a 511.org
+# token -- free, a minute to request, rate-limited to sixty calls an hour. If
+# one ever lands in this tree, this product grows a sibling and `muni.py`
+# grows a live mode. Until then the panel shows what the timetable says, it
+# says "SCHEDULE" on the wall in as many words, and nobody is invited to
+# believe a drawn bus is a tracked one.
+#
+# **Where the schedule comes from.** San Francisco's open data portal carries
+# SFMTA's static GTFS as a Socrata blob asset, dataset `dni7-qpv3`, and it is
+# genuinely keyless: 10.4 MB of zip, HTTP 200, no token, no click-through
+# despite the licence text inside the archive. It is the same file SFMTA hands
+# Google. The portal's metadata endpoint is 2 KB and carries `blobFilename`,
+# which is the published schedule's own name -- `SFMTA_GTFS_20260723_20260828v5
+# .zip`, service period baked into it. That name is used as a version: the
+# daily fetch pulls the metadata, and only downloads the archive when the name
+# has changed. On the days it has not -- which is most days, since SFMTA signs
+# up a new schedule roughly quarterly -- the fetch costs two kilobytes and the
+# previous payload is re-stored under a fresh timestamp. That is honest: the
+# payload really is still the currently published schedule, and the record's
+# age really is how long ago we last confirmed it.
+#
+# **The reduction is severe and it has to be.** `stop_times.txt` alone is 97 MB
+# uncompressed and about three million rows -- a hundred times the whole rest
+# of this cache put together. What the panel needs out of it is six stops: the
+# nearest stop for each of routes 19, 22 and 55 in each of its two directions,
+# and the departure times at those six. That is about 1900 integers. So the
+# archive is never unpacked to disk and `stop_times.txt` is streamed through a
+# csv reader straight out of the zip, keeping only rows whose stop_id is one of
+# the few dozen within 800 m of the installation. The pass takes half a minute
+# and happens on the days the schedule changes, which is a handful a year.
+#
+# **The stops are found, not hardcoded.** The makerspace wiki names the 19, 22
+# and 55 as its buses and those three route ids are hardcoded here, with the
+# wiki as the citation -- but *which* stop each one uses is derived, by taking
+# every stop within 800 m, asking `stop_times` which route and direction
+# actually serves it, and keeping the nearest per (route, direction). Today
+# that resolves to De Haro & 18th and Rhode Island & 18th for the 19, both
+# Connecticut & 18th platforms for the 55, and the two 16th & Wisconsin
+# platforms for the 22 -- 140 m, 187 m and 413 m away respectively, which is
+# the whole point of the panel, because that spread is a spread in walking
+# time. A stop moving in a future sign-up fixes itself.
+#
+# **Calendars, because GTFS service ids are a trap here.** SFMTA's
+# `calendar.txt` declares the obvious weekday/Saturday/Sunday triple, and then
+# `calendar_dates.txt` removes service 1 on every single weekday of the period
+# and adds `M11` or `M21` in its place. Nothing in `trips.txt` references
+# service 1 at all. A fetcher that read only calendar.txt would produce a
+# perfectly well-formed record with no weekday service in it. So the calendar
+# is resolved here, date by date across the feed's whole period, into a plain
+# map of "20260812" -> the service ids running that day, and the demo does no
+# GTFS reasoning whatsoever -- it looks today up in a dict.
+#
+# Times are kept as minutes after midnight and are allowed past 1440, which is
+# how GTFS spells "this is still Tuesday's service": the 22 runs to 30:09, and
+# a naive modulo would file its 06:09 owl trips under the wrong day.
+# --------------------------------------------------------------------------
+
+MUNI_PRODUCT = "muni-18th"
+
+# Three days, because that is how long a static schedule stays true enough to
+# draw -- and a fetcher that has been down that long is a bigger problem than
+# a bus time being from Monday. The panel prints the age either way.
+MUNI_TTL = 259200
+MUNI_INTERVAL = 86400
+
+# Socrata: the metadata view (cheap, gives the version) and the blob itself.
+MUNI_DATASET = "dni7-qpv3"
+MUNI_META_URL = "https://data.sfgov.org/api/views/%s.json" % MUNI_DATASET
+MUNI_ZIP_URL = ("https://data.sfgov.org/download/%s/application/x-zip-compressed"
+                % MUNI_DATASET)
+
+# The routes the space's own wiki names as serving 1736 18th St. Route *ids*,
+# which for SFMTA happen to equal the numbers on the front of the bus.
+MUNI_ROUTES = ("19", "22", "55")
+
+# How far to look for a stop. 800 m is comfortably past the 16th St pair the 22
+# uses at 413 m and comfortably short of the Potrero Ave stops at 671 m, which
+# are a different corridor and not this panel's business.
+MUNI_SEARCH_M = 800.0
+
+# Walking. 1.25 m/s is an unhurried adult; 1.30 is the detour factor for the
+# fact that Potrero Hill is a street grid and not a field, and that the 22's
+# stop is two blocks over and one block down rather than 413 m of straight
+# line. Both are here rather than in the demo because the demo must not be in
+# the business of deciding how fast you walk -- it draws what it is given.
+MUNI_WALK_MPS = 1.25
+MUNI_WALK_DETOUR = 1.30
+
+# Refuse a zip that has grown implausible rather than unpacking it on a Pi.
+MUNI_MAX_ZIP = 64 << 20
+
+# Payload shape version. Bumping it makes the version-skip below re-download
+# rather than re-store a payload the demo can no longer read.
+MUNI_SCHEMA = 1
+
+
+# Headsigns that will not survive being trimmed by rule. 'UCSF Mission Bay'
+# reduced mechanically lands on 'UCSF MSNBAY', which is eleven characters of
+# nothing anybody says out loud; the 22 goes to UCSF and that is what it should
+# read. Everything not named here falls through to the generic trimming, so a
+# sign-up that renames a terminal degrades to something ugly but truthful
+# rather than to a KeyError.
+MUNI_TERMINALS = {
+    "UCSF MISSION BAY": "UCSF",
+    "BEACH STREET": "BEACH",
+    "BAY STREET": "BAY",
+    "SUTTER FILLMORE": "SUTTER",
+}
+
+
+def _muni_short(name):
+    """A headsign trimmed to the eight characters the panel's gutter holds.
+
+    'Beach Street' -> 'BEACH', '16th St & Mission' -> '16TH/MSN'. Purely
+    cosmetic, and done here rather than in the demo so that the demo is handed
+    a label instead of a parser.
+    """
+    s = " ".join(str(name or "").upper().split())
+    if s in MUNI_TERMINALS:
+        return MUNI_TERMINALS[s]
+    for long, short in ((" STREET", ""), (" ST", ""), (" AVENUE", ""),
+                        (" AVE", ""), ("MISSION", "MSN")):
+        s = s.replace(long, short)
+    s = s.replace(" & ", "/").replace("&", "/")
+    return " ".join(s.split())[:8] or "?"
+
+
+def _muni_metres(lat, lon, lat0, lon0):
+    """Flat-earth metres between two nearby points. Good to centimetres here."""
+    import math
+    return math.hypot((lat - lat0) * 111320.0,
+                      (lon - lon0) * 111320.0 * math.cos(math.radians(lat0)))
+
+
+def _muni_hhmmss(s):
+    """'25:09:00' -> 1509 minutes after midnight. None if unparseable."""
+    try:
+        h, m, _sec = str(s).split(":")
+        return int(h) * 60 + int(m)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _muni_rows(zf, member):
+    """Stream one GTFS table out of the zip as dicts, never touching disk."""
+    import csv
+    import io
+    with zf.open(member) as fh:
+        for row in csv.DictReader(io.TextIOWrapper(fh, "utf-8-sig")):
+            yield row
+
+
+def _muni_calendar(zf, routes_services):
+    """Resolve calendar.txt + calendar_dates.txt into date -> [service_id].
+
+    Only service ids that some trip we care about actually references are kept,
+    which is what stops the map carrying the phantom service 1 that
+    calendar.txt declares and calendar_dates.txt then removes from every day of
+    the period.
+    """
+    weekly = []
+    lo = hi = None
+    for row in _muni_rows(zf, "calendar.txt"):
+        sid = row.get("service_id")
+        start, end = row.get("start_date"), row.get("end_date")
+        if not (sid and start and end):
+            continue
+        days = [row.get(d) == "1" for d in
+                ("monday", "tuesday", "wednesday", "thursday", "friday",
+                 "saturday", "sunday")]
+        weekly.append((sid, days, start, end))
+        lo = start if lo is None or start < lo else lo
+        hi = end if hi is None or end > hi else hi
+
+    exceptions = {}
+    try:
+        for row in _muni_rows(zf, "calendar_dates.txt"):
+            sid, date, kind = (row.get("service_id"), row.get("date"),
+                               row.get("exception_type"))
+            if not (sid and date and kind):
+                continue
+            exceptions.setdefault(date, []).append((sid, kind))
+            lo = date if lo is None or date < lo else lo
+            hi = date if hi is None or date > hi else hi
+    except KeyError:
+        pass                            # calendar_dates.txt is optional in GTFS
+
+    if lo is None or hi is None:
+        raise ValueError("GTFS has neither calendar.txt nor calendar_dates.txt")
+
+    out = {}
+    day = time.mktime(time.strptime(lo + " 12:00:00", "%Y%m%d %H:%M:%S"))
+    last = time.mktime(time.strptime(hi + " 12:00:00", "%Y%m%d %H:%M:%S"))
+    # Noon steps so a DST boundary cannot skip or repeat a date.
+    while day <= last + 1.0:
+        stamp = time.localtime(day)
+        date = time.strftime("%Y%m%d", stamp)
+        wd = int(time.strftime("%w", stamp))        # 0 = Sunday
+        wd = 6 if wd == 0 else wd - 1               # 0 = Monday, as GTFS orders
+        active = set()
+        for sid, days, start, end in weekly:
+            if start <= date <= end and days[wd]:
+                active.add(sid)
+        for sid, kind in exceptions.get(date, ()):
+            if kind == "1":
+                active.add(sid)
+            elif kind == "2":
+                active.discard(sid)
+        active &= routes_services
+        if active:
+            out[date] = sorted(active)
+        day += 86400.0
+    return out, lo, hi
+
+
+@product(MUNI_PRODUCT, ttl=MUNI_TTL, interval=MUNI_INTERVAL,
+         description="SFMTA timetable for the 19/22/55 stops nearest the "
+                     "installation, from the keyless GTFS on data.sfgov.org")
+def _muni_18th():
+    """The six nearest 19/22/55 stops and every departure the timetable gives.
+
+    Two requests at most: the Socrata metadata, and -- only when the published
+    schedule's filename has changed since last time -- the 10.4 MB archive.
+    """
+    import io
+    import zipfile
+
+    meta = get_json(MUNI_META_URL, timeout=30)
+    version = str(meta.get("blobFilename") or "").strip()
+    if not version:
+        raise ValueError("%s published no blobFilename to version by"
+                         % MUNI_DATASET)
+
+    # The cheap path: same published schedule as last time, so re-store what we
+    # already parsed rather than pulling ten megabytes to reach the same answer.
+    got = load(MUNI_PRODUCT)
+    if got is not None:
+        old = got[0]
+        if (isinstance(old, dict) and old.get("feed_version") == version
+                and old.get("schema") == MUNI_SCHEMA
+                and old.get("stops")):
+            payload = dict(old)
+            payload["revalidated"] = True
+            return payload, MUNI_META_URL
+
+    raw = get(MUNI_ZIP_URL, timeout=180)
+    if len(raw) > MUNI_MAX_ZIP:
+        raise RuntimeError("SFMTA GTFS is %d bytes, over the %d cap"
+                           % (len(raw), MUNI_MAX_ZIP))
+    zf = zipfile.ZipFile(io.BytesIO(raw))
+
+    lat0, lon0 = ftsite.LAT, ftsite.LON
+
+    # Every stop within walking-ish distance, by id. A few dozen of the 3500.
+    near = {}
+    for row in _muni_rows(zf, "stops.txt"):
+        try:
+            lat, lon = float(row["stop_lat"]), float(row["stop_lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        metres = _muni_metres(lat, lon, lat0, lon0)
+        if metres <= MUNI_SEARCH_M:
+            near[row["stop_id"]] = {
+                "stop_id": row["stop_id"],
+                "code": (row.get("stop_code") or "").strip(),
+                "name": " ".join((row.get("stop_name") or "").split()),
+                "lat": round(lat, 6), "lon": round(lon, 6),
+                "metres": int(round(metres)),
+            }
+    if not near:
+        raise ValueError("no GTFS stop within %g m of the site" % MUNI_SEARCH_M)
+
+    # trip_id -> (route, direction, headsign, service) for the three routes.
+    wanted = {}
+    for row in _muni_rows(zf, "trips.txt"):
+        if row.get("route_id") in MUNI_ROUTES:
+            wanted[row["trip_id"]] = (row["route_id"],
+                                      str(row.get("direction_id") or "0"),
+                                      row.get("trip_headsign") or "",
+                                      row.get("service_id") or "")
+    if not wanted:
+        raise ValueError("GTFS has no trips for routes %s"
+                         % ", ".join(MUNI_ROUTES))
+
+    # The one expensive pass. Three million rows in, a few thousand out.
+    # (stop_id, route, direction) -> {service_id: [minute, ...]}, plus a
+    # headsign tally so the gutter label is the usual destination rather than
+    # whichever variant happened to come first.
+    times = {}
+    signs = {}
+    for row in _muni_rows(zf, "stop_times.txt"):
+        stop_id = row.get("stop_id")
+        if stop_id not in near:
+            continue
+        trip = wanted.get(row.get("trip_id"))
+        if trip is None:
+            continue
+        route, direction, headsign, service = trip
+        minute = _muni_hhmmss(row.get("departure_time")
+                              or row.get("arrival_time"))
+        if minute is None:
+            continue
+        key = (stop_id, route, direction)
+        times.setdefault(key, {}).setdefault(service, []).append(minute)
+        tally = signs.setdefault(key, {})
+        tally[headsign] = tally.get(headsign, 0) + 1
+
+    if not times:
+        raise ValueError("none of the %d nearby stops is served by %s"
+                         % (len(near), ", ".join(MUNI_ROUTES)))
+
+    # Nearest stop per (route, direction). Ties cannot happen -- two stops at
+    # exactly the same distance would be the same stop -- but sorting on the
+    # id as well keeps a re-fetch from ever reordering the panel.
+    best = {}
+    for key in times:
+        stop_id, route, direction = key
+        metres = near[stop_id]["metres"]
+        rank = (metres, stop_id)
+        if (route, direction) not in best or rank < best[(route, direction)][0]:
+            best[(route, direction)] = (rank, key)
+
+    stops = []
+    services_used = set()
+    for route in MUNI_ROUTES:
+        for direction in ("1", "0"):        # inbound first: it reads as "up"
+            picked = best.get((route, direction))
+            if picked is None:
+                continue
+            key = picked[1]
+            stop = dict(near[key[0]])
+            walk_s = (stop["metres"] * MUNI_WALK_DETOUR) / MUNI_WALK_MPS
+            tally = signs.get(key, {})
+            headsign = max(tally, key=lambda h: (tally[h], h)) if tally else ""
+            by_service = {}
+            for service, mins in times[key].items():
+                by_service[service] = sorted(set(mins))
+                services_used.add(service)
+            stop.update({
+                "route": route,
+                "dir": int(direction),
+                "headsign": " ".join(headsign.split()),
+                "label": _muni_short(headsign),
+                "walk_s": int(round(walk_s)),
+                "times": by_service,
+            })
+            stops.append(stop)
+
+    if not stops:
+        raise ValueError("resolved no (route, direction) stops at all")
+
+    services, feed_lo, feed_hi = _muni_calendar(zf, services_used)
+    if not services:
+        raise ValueError("calendar resolved to no service days for %s"
+                         % ", ".join(sorted(services_used)))
+
+    return {
+        "schema": MUNI_SCHEMA,
+        "feed_version": version,
+        "feed_start": feed_lo,
+        "feed_end": feed_hi,
+        "site": [round(lat0, 6), round(lon0, 6)],
+        "tz": "America/Los_Angeles",
+        "routes": list(MUNI_ROUTES),
+        "walk_mps": MUNI_WALK_MPS,
+        "walk_detour": MUNI_WALK_DETOUR,
+        "search_m": MUNI_SEARCH_M,
+        "n_near": len(near),
+        "services": services,
+        "stops": stops,
+        "source": "SFMTA GTFS, data.sfgov.org/%s" % MUNI_DATASET,
+    }, MUNI_ZIP_URL
+
+
+# --------------------------------------------------------------------------
+# Live Muni arrivals at those same six stops. muni.py draws these over the
+# timetable above.
+#
+# **The key.** 511.org is the Bay Area's transit clearing house and the only
+# public source of Muni vehicle predictions. It needs a token, free, from
+# https://511.org/open-data/token -- an email address and about a minute. This
+# fetcher reads it from the environment as `FT_511_KEY`, and there is no
+# default and no fallback: an unset key is not an error, it is simply this
+# product not existing, and `muni.py` falls back to the timetable product above
+# and says on the wall that it has done so. That is deliberate. The token
+# belongs to the installation, not to the source tree, and a checkout that has
+# never heard of it must still draw a real panel. It is never written into a
+# record either -- only into the query string of a request.
+#
+# **The rate limit is the whole design, and it is not ours alone to spend.**
+# The response headers say `RateLimit-Limit: 60`, and watching
+# `RateLimit-Remaining` recover shows a rolling hour: sixty in hand, about one
+# back per minute. StopMonitoring filters by exactly one `stopCode` -- a
+# comma-separated pair was tried and returns zero visits rather than two stops
+# -- so six stops is six requests a pass, and the arithmetic is fixed:
+#
+#     requests/hour = stops * 3600 / (interval * 0.9)
+#
+# The 0.9 is not decoration. `is_due()` deliberately fires a hair early so a
+# product does not miss every other timer tick, so the *worst case* cadence is
+# nine tenths of the interval and that is what a budget has to be built on.
+#
+# The wall does not start with sixty. It has a pre-existing cron job
+# (`/home/pi/muni.sh`, every five minutes from 10:00 to 22:00) polling the same
+# API for three stops, which is **36 requests an hour** through the whole
+# operating day and leaves roughly **24** for this. Six stops at 1080 s comes
+# to 22.2 an hour, which fits under that with real margin rather than sitting
+# on the line. Eighteen minutes is a long time for a bus prediction and it is
+# the honest consequence of sharing a sixty-an-hour key with an existing job.
+#
+# **The single knob, for whoever integrates this.** That cron job is polling
+# three of these six stops to print text in a terminal, and this product
+# supersedes it. Retiring it returns 36 requests an hour, at which point
+# `MUNI_LIVE_INTERVAL` drops to 360 and the panel refreshes every six minutes
+# -- 40 an hour, still inside sixty on its own. Nothing else has to change.
+#
+# **Eighteen minutes is survivable because of what is stored.** What goes in
+# the record is **absolute arrival timestamps, not countdowns**. "17:34:54" is
+# still 17:34:54 a quarter of an hour later; the panel subtracts the wall clock
+# every frame and counts down smoothly between fetches. What ages is the
+# *revision* -- a bus that got stuck after the last fetch is still drawn on its
+# old promise -- and the age on screen is what that is for. The far end of the
+# panel's horizon is barely affected, because a bus twenty minutes out gets
+# refreshed before it is the one you are running for.
+#
+# **429 is expected, not exceptional.** Sharing a key means eventually losing a
+# race for it. On a 429 the pass stops dead -- the remaining stops are not
+# asked, because hammering a rate limiter is how a soft limit becomes a hard
+# one -- `Retry-After` is recorded, and whatever stops did answer are stored.
+# If none did, the fetch fails and the previous record stays put with an honest
+# age on it, which is exactly what `fetch()` is designed to do.
+#
+# **Unfiltered, this endpoint is a trap.** `StopMonitoring?agency=SF` with no
+# stopCode returns every monitored visit in the system: 35,573 of them, 2.6 MB
+# gzipped and 32 MB decoded, sixty times this entire cache, onto a Raspberry Pi
+# over shop wifi. Filtered to one stop it is 630 bytes on the wire. The filter
+# is not an optimisation, it is the difference between a product and an outage,
+# which is why an oversized body is treated as a failed filter and refused.
+#
+# **Two things about the response that each cost an afternoon if you meet them
+# cold.** It is gzipped whether or not you asked -- `urlopen` does not
+# transparently decode -- and it carries a UTF-8 byte order mark, so
+# `json.loads` on the decompressed bytes dies on byte one and `utf-8-sig` is
+# required. Neither is documented.
+#
+# **What this gets that no other panel on the wall has.** Every visit carries
+# both `AimedArrivalTime` -- what the timetable promised -- and
+# `ExpectedArrivalTime`, what is actually going to happen. The difference is
+# lateness, signed, per bus, and because muni.py's one axis is minutes-to-
+# arrival, that difference is a *distance on screen*: the ghost of where the
+# bus should have been sits behind it, or ahead of it when it is running early,
+# which on the 19 it frequently is. And `Monitored` is false when 511 is
+# quoting the timetable back rather than watching a vehicle; the panel draws
+# that differently, because a panel that cannot tell you which of the two it is
+# showing is not worth the wall.
+#
+# `VehicleRef`, `VehicleLocation`, `Bearing` and `Occupancy` are all in the
+# response and none of them are stored. The panel's axis is time, not space, so
+# a coordinate is dead weight in a record; and the standing rule since `bikes`
+# is that an identifier which is not drawn does not get cached.
+# --------------------------------------------------------------------------
+
+MUNI_LIVE_PRODUCT = "muni-live"
+
+# Half an hour before the countdown stops being worth believing, and eighteen
+# minutes between fetches. The TTL has to sit comfortably above the interval or
+# the panel would spend the tail of every cycle calling itself stale; see the
+# rate-limit note above for where the interval comes from. It is a budget, not
+# a preference, and the comment above says what frees it.
+MUNI_LIVE_TTL = 1800
+MUNI_LIVE_INTERVAL = 900
+
+MUNI_511_URL = "https://api.511.org/transit/StopMonitoring"
+MUNI_511_AGENCY = "SF"
+MUNI_511_KEY_ENV = "FT_511_KEY"
+
+# Never keep more than this per stop; 511 returns a handful and the panel has
+# room for fewer.
+MUNI_LIVE_MAX_VISITS = 6
+
+# Refuse a response that is not the filtered one. A stopCode that 511 stopped
+# recognising would otherwise quietly return the whole 32 MB agency.
+MUNI_LIVE_MAX_BYTES = 512 << 10
+
+# The six stops, as `stop_code`s -- what 511 calls `stopCode` and GTFS calls
+# `stop_code`, the same numbers, verified against both.
+#
+# Normally these are read straight out of the `muni-18th` record, where they
+# were *derived* from ftsite.LAT/LON: the nearest stop to the installation for
+# each of the 19, 22 and 55, **in each direction, per route**. Per route
+# matters. Taking the nearest few stops overall instead gives four stops of the
+# 19 and 55 within 250 m and never reaches the 22 at all, whose nearest stop is
+# 413 m away on 16th St -- a panel that names three routes and shows two. The
+# GTFS fetcher's 800 m search radius exists to clear that.
+#
+# This list is only the fallback for a machine whose GTFS record has not landed
+# yet. It is a snapshot of that derivation, run 2026-08-12 against the
+# SFMTA_GTFS_20260723_20260828v5 schedule:
+#
+#   14352  De Haro St & 18th St        19 inbound   (Beach St)      140 m
+#   16192  Rhode Island St & 18th St   19 outbound  (Shipyard)      245 m
+#   17769  16th Street & Wisconsin St  22 inbound   (Bay St)        423 m
+#   17762  16th St & Wisconsin St      22 outbound  (UCSF)          413 m
+#   14126  Connecticut St & 18th St    55 inbound   (16th/Mission)  201 m
+#   14125  Connecticut St & 18th St    55 outbound  (20th/3rd)      187 m
+#
+# 16th & Wisconsin serves the 55 as well as the 22, and folding the 55 onto it
+# would have saved two requests a pass. It is not done, because the 55's own
+# stop is 187 m away and Wisconsin is 413 m: the merge would overstate the 55's
+# walk by two hundred metres, and the walk is the one thing this panel exists
+# to get right.
+#
+# Hardcoding the *stops* is fine where hardcoding the *address* is not. These
+# are an output of the site, recomputed by the GTFS fetcher every time SFMTA
+# signs up a new schedule; a wall that moves gets new ones without an edit here.
+MUNI_LIVE_STOPS_FALLBACK = ("14352", "16192", "17769", "17762", "14126",
+                            "14125")
+
+
+class MuniRateLimited(Exception):
+    """511 said 429. Carries the Retry-After it asked for, in seconds."""
+
+    def __init__(self, retry_after):
+        Exception.__init__(self, "rate limited, retry after %ss" % retry_after)
+        self.retry_after = retry_after
+
+
+def muni_live_key():
+    """The 511 token, or None. Never logged, never stored, never defaulted."""
+    return (os.environ.get(MUNI_511_KEY_ENV) or "").strip() or None
+
+
+def _muni_epoch(stamp):
+    """'2026-08-12T17:34:54Z' -> epoch seconds. None if absent or malformed."""
+    import calendar
+    if not stamp:
+        return None
+    try:
+        return float(calendar.timegm(
+            time.strptime(str(stamp)[:19], "%Y-%m-%dT%H:%M:%S")))
+    except ValueError:
+        return None
+
+
+def _muni_live_stops():
+    """The stop codes to poll: out of the GTFS record if it is there.
+
+    Reading them from the sibling product keeps the derivation in one place --
+    the GTFS fetcher is the thing that knows where the installation is and
+    which stop is nearest -- without making this product fail when that one has
+    not run yet.
+    """
+    got = load(MUNI_PRODUCT)
+    if got is not None:
+        payload = got[0]
+        if isinstance(payload, dict):
+            codes = [str(s.get("code") or "").strip()
+                     for s in (payload.get("stops") or ())]
+            codes = [c for c in codes if c]
+            if codes:
+                return codes
+    return list(MUNI_LIVE_STOPS_FALLBACK)
+
+
+def _muni_live_one(key, code):
+    """One stop's monitored visits, as (response epoch, [visit, ...])."""
+    import gzip
+    import urllib.error
+    import urllib.request
+    from urllib.parse import urlencode
+
+    query = urlencode({"api_key": key, "agency": MUNI_511_AGENCY,
+                       "format": "json", "stopCode": code})
+    req = urllib.request.Request(
+        MUNI_511_URL + "?" + query,
+        headers={"User-Agent": "flaschen-taschen-ftdata/1 (+wall display)",
+                 "Accept-Encoding": "gzip"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read(MUNI_LIVE_MAX_BYTES + 1)
+            encoding = (resp.headers.get("Content-Encoding") or "").lower()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            raise MuniRateLimited(exc.headers.get("Retry-After") or "?")
+        raise
+    if len(raw) > MUNI_LIVE_MAX_BYTES:
+        raise RuntimeError("stop %s returned over %d bytes, so the stopCode "
+                           "filter did not apply" % (code, MUNI_LIVE_MAX_BYTES))
+    if "gzip" in encoding:
+        raw = gzip.decompress(raw)
+    # utf-8-sig, not utf-8: 511 prefixes a byte order mark it does not mention.
+    doc = json.loads(raw.decode("utf-8-sig"))
+
+    delivery = doc.get("ServiceDelivery") or {}
+    stamp = _muni_epoch(delivery.get("ResponseTimestamp"))
+    monitoring = delivery.get("StopMonitoringDelivery") or {}
+    if isinstance(monitoring, list):            # SIRI permits either shape
+        monitoring = monitoring[0] if monitoring else {}
+
+    visits = []
+    for visit in monitoring.get("MonitoredStopVisit") or ():
+        journey = visit.get("MonitoredVehicleJourney") or {}
+        call = journey.get("MonitoredCall") or {}
+        expected = _muni_epoch(call.get("ExpectedArrivalTime")
+                               or call.get("ExpectedDepartureTime"))
+        aimed = _muni_epoch(call.get("AimedArrivalTime")
+                            or call.get("AimedDepartureTime"))
+        if expected is None:
+            # No prediction at all is not a bus this panel can place on its
+            # axis, so it is dropped rather than guessed at from the aim.
+            continue
+        visits.append({
+            "line": str(journey.get("LineRef") or "").strip(),
+            "dir": str(journey.get("DirectionRef") or "").strip().upper(),
+            "dest": " ".join(str(call.get("DestinationDisplay")
+                                 or journey.get("DestinationName")
+                                 or "").split())[:24],
+            "exp": int(round(expected)),
+            "aim": int(round(aimed)) if aimed is not None else None,
+            # Monitored false means 511 is reading the timetable back to us
+            # rather than watching a vehicle. The panel draws the difference.
+            "mon": bool(journey.get("Monitored")),
+        })
+    visits.sort(key=lambda v: v["exp"])
+    return stamp, visits[:MUNI_LIVE_MAX_VISITS]
+
+
+@product(MUNI_LIVE_PRODUCT, ttl=MUNI_LIVE_TTL, interval=MUNI_LIVE_INTERVAL,
+         volatile=True,
+         description="live 511.org arrival predictions for the six 19/22/55 "
+                     "stops nearest the installation (needs $FT_511_KEY)")
+def _muni_live():
+    """Six filtered StopMonitoring calls, one per stop, about 4 KB in total.
+
+    Volatile: a prediction is worthless across a reboot, and rewriting six of
+    them onto the Pi's SD card every eighteen minutes would buy nothing.
+    """
+    key = muni_live_key()
+    if not key:
+        raise RuntimeError(
+            "$%s is not set; get a free token at https://511.org/open-data/"
+            "token and export it for the fetcher. muni.py falls back to the "
+            "%s timetable without it." % (MUNI_511_KEY_ENV, MUNI_PRODUCT))
+
+    codes = _muni_live_stops()
+    stops = {}
+    errors = []
+    newest = None
+    limited = None
+    for code in codes:
+        try:
+            stamp, visits = _muni_live_one(key, code)
+        except MuniRateLimited as exc:
+            # Stop the pass dead. Asking the remaining five is how a soft limit
+            # becomes a hard one, and they would all get the same answer.
+            limited = exc.retry_after
+            errors.append("%s: 429, retry after %s" % (code, limited))
+            break
+        except Exception as exc:
+            # One stop failing is not the product failing: five lanes of real
+            # predictions and one honest gap beats no panel at all.
+            errors.append("%s: %s" % (code, type(exc).__name__))
+            continue
+        stops[code] = visits
+        if stamp is not None and (newest is None or stamp > newest):
+            newest = stamp
+
+    if not stops:
+        raise RuntimeError("no stop answered (%s)"
+                           % ("; ".join(errors) or "no stops configured"))
+
+    return {
+        "schema": 1,
+        "t": int(newest if newest is not None else time.time()),
+        "agency": MUNI_511_AGENCY,
+        "stops": stops,
+        "n_stops": len(stops),
+        "n_asked": len(codes),
+        "n_visits": sum(len(v) for v in stops.values()),
+        "rate_limited": limited,
+        "errors": errors,
+        "source": "511.org SIRI StopMonitoring",
+    }, MUNI_511_URL
+
+
+# --------------------------------------------------------------------------
 # Every BART train, as a path through time. stringline.py draws these.
 #
 # **Why BART.** It publishes GTFS-Realtime with no API key, no signup and no
