@@ -355,6 +355,46 @@ A failed run does not stop later ones. A service in the failed state does not
 disable or hold off its timer, so there is nothing to reset after an afternoon
 when NOAA was unreachable; the next tick just works.
 
+## Updating the checkout
+
+A deploy is a fast-forward of `~/ft-cpp` and then a restart of the daemons that
+hold Python state. **Both of them, not just the obvious one:**
+
+```console
+$ cd ~/ft-cpp && git pull --ff-only jof betelgeuse
+$ sudo systemctl restart ftsched.service
+$ sudo systemctl restart ftctl.service     # yes, this one too
+```
+
+`ftctl` is easy to forget because it is deliberately decoupled from the display
+-- the whole point of a global off switch is that it survives whatever the
+scheduler is doing, so nothing else restarts it. But it `import`s `ftmotd`,
+which `import`s `ftdata`, and Python binds those module objects once at process
+start. An ftctl left running across a deploy therefore renders the login banner
+from **the product registry as it was when ftctl started**.
+
+That is not hypothetical. On 2026-08-11 the wall's address moved into
+`ftsite.py` and the two per-site weather products were renamed to embed the
+corrected coordinates. `ftsched` was restarted; `ftctl` was not. For the next
+day the banner reported
+
+```
+  ● data     ████████████▒▒ 14/16 fresh
+             wx-air-37.7627_-122.3966 absent
+             wx-model-37.7627_-122.3966 absent
+```
+
+-- two products that no longer existed, named by a registry two days stale,
+while every one of the 28 products that did exist was fetching perfectly. A
+banner that cries wolf is worse than no banner, because it is the thing people
+read while deciding whether to look closer.
+
+`ftmotd.registry_drift()` now detects this case directly and prints
+`registry stale · restart ftctl` instead of a list of phantom absences, so the
+banner tells you the truth even when this step is missed. Do not treat that as
+permission to miss it: the banner is only one of the things reading a stale
+registry.
+
 ## Things worth knowing
 
 **A blanked wall is not an idle Pi.** The panel keeps being refreshed with an

@@ -294,6 +294,95 @@ def _record_age(path, now):
     return "ok", max(0.0, now - stamp)
 
 
+# When this process bound its copy of ftdata.PRODUCTS. A record written after
+# this instant for a product we have never heard of means the fetcher is
+# running newer code than we are -- see registry_drift().
+_REGISTRY_BOUND_AT = time.time()
+
+
+def _cache_dirs(cache_dir=None):
+    """The directories ftdata would read records from, asked of ftdata itself.
+
+    Not hardcoded, because a volatile product writes to the /run tmpfs beside
+    the image sidecars rather than to the card, and that path is ftdata's
+    business to know.
+    """
+    if ftdata is None:
+        return set()
+    dirs = set()
+    for name in list(ftdata.PRODUCTS)[:64]:
+        for fn in (ftdata.record_path, ftdata.path_for):
+            try:
+                p = fn(name, cache_dir)
+            except Exception:                                # noqa: BLE001
+                continue
+            if p:
+                dirs.add(os.path.dirname(p))
+    return dirs
+
+
+def _cached_names(cache_dir=None):
+    """Every product name that has a record on disk right now.
+
+    Derived from the directories ftdata itself would write to, rather than a
+    hardcoded path, so a volatile product living on the /run tmpfs counts the
+    same as one on the card.
+    """
+    if ftdata is None:
+        return set()
+    names = set()
+    for d in _cache_dirs(cache_dir):
+        try:
+            for fname in os.listdir(d):
+                if fname.endswith(".json"):
+                    names.add(fname[:-5])
+        except OSError:
+            continue
+    return names
+
+
+def registry_drift(cache_dir=None):
+    """Names on disk that this process has never heard of.
+
+    This is the signature of a banner running older code than the fetcher.
+    ftctl imports ftmotd, which imports ftdata, and Python binds those module
+    objects once at process start -- so a deploy that adds, renames or
+    reparameterises a product leaves a long-running ftctl iterating a registry
+    that no longer exists. It then reports the *old* names as absent, which is
+    both alarming and false: the files it is looking for were never going to be
+    there.
+
+    A record on disk for a product the running registry does not know is proof
+    of exactly that drift, and it is cheap to detect. It happened for real on
+    2026-08-11: the wall's address moved into ftsite.py, the two per-site
+    weather products were renamed to embed the new coordinates, and an ftctl
+    from two days earlier spent a day reporting
+    `wx-air-37.7627_-122.3966 absent` -- a file belonging to a product that had
+    ceased to exist.
+    """
+    if ftdata is None:
+        return set()
+    unknown = _cached_names(cache_dir) - set(ftdata.PRODUCTS)
+    if not unknown:
+        return set()
+    # An unknown name alone is not enough: a product that was renamed or
+    # removed leaves its old record behind, and that orphan is harmless -- it
+    # is simply never written again. What proves *we* are the stale party is a
+    # record for an unknown product that was written **after this process
+    # started**, because only a newer fetcher could have written it.
+    drifted = set()
+    for name in unknown:
+        for d in _cache_dirs(cache_dir):
+            p = os.path.join(d, name + ".json")
+            try:
+                if os.path.getmtime(p) > _REGISTRY_BOUND_AT:
+                    drifted.add(name)
+                    break
+            except OSError:
+                continue
+    return drifted
+
+
 def data_states(cache_dir=None, now=None):
     """[(name, state, age)] for every registered product, or None with no ftdata.
 
@@ -395,10 +484,28 @@ def data_lines(extras, states, now=None, cache_dir=None):
     # the stale ones ahead of the rest, so a truncated list drops the products
     # least worth naming.
     rank = {"absent": 0, "bad": 1, "stale": 2}
-    trouble = sorted((s for s in states if s[1] != "fresh"),
+    trouble = [st for st in states if st[1] != "fresh"]
+
+    # If this process is running older code than the fetcher, the absent names
+    # it is about to print are products that no longer exist -- see
+    # registry_drift(). Naming them trains people to ignore the banner. Say the
+    # true thing once instead, and keep every other complaint: a stale feed is
+    # still stale whatever registry we are holding.
+    drift = registry_drift(cache_dir)
+    if drift:
+        on_disk = _cached_names(cache_dir)
+        trouble = [st for st in trouble
+                   if not (st[1] == "absent" and st[0] not in on_disk)]
+
+    trouble = sorted(trouble,
                      key=lambda s: (rank[s[1]], -(s[2] or 0.0), s[0]))
 
     cells = []
+    if drift:
+        # One line, naming the real fault and its fix, in place of however many
+        # phantom absents the stale registry would otherwise have listed.
+        cells.append((rgb(AMBER, "registry stale") +
+                      rgb(GREY, " restart ftctl"), 28))
     for name, state, age in trouble:
         if state == "stale":
             tail = " " + _short_age(age)
