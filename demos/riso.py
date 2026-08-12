@@ -25,8 +25,9 @@ colour is the multiply -- there is no table of "pink over blue is purple"
 anywhere in this file, it just happens. And the state of the sheet after k
 passes is the k-th partial product, so `build()` bakes the whole cumulative
 stack once, K+1 finished sheet images, and a frame that is halfway through
-laying the third colour is literally `cum[3]` to the left of the drum and
-`cum[2]` to the right of it. Two blits. That is the whole print engine.
+laying the third colour is literally `cum[3]` on the far side of the nip --
+the part of the sheet that has already gone under the drum -- and `cum[2]` on
+the near side. Two blits. That is the whole print engine.
 
 Halftone
 --------
@@ -43,8 +44,10 @@ The machine
 The panel is the paper path, left to right: feed deck, the ink drum in the
 middle, catch tray at the right. A sheet slides out of the feed deck, passes
 under the drum, and the ink wipes onto it *at the nip* -- the column where the
-drum touches the paper -- so the new colour arrives as a left-to-right wipe
-across a sheet that is already carrying the previous ones. Then it sits in the
+drum touches the paper. The nip is a fixed column and the paper is what moves,
+so the sheet's leading (right) edge is inked first and the seam between the new
+colour and the old sweeps backwards across the sheet, from its leading edge to
+its trailing one, while the sheet itself slides rightwards. Then it sits in the
 catch tray long enough to be looked at, whips back to the feed deck, and goes
 again. Between passes the drum is swapped (it drops out of frame and comes back
 a different colour) and a new master is burnt on the thermal head, because on a
@@ -708,34 +711,43 @@ def build(args):
         np.copyto(out, bg)
 
         # --- where the sheet is, and how much of this pass is on it --------
+        #
+        # `inked` is how many of the sheet's ws columns have been under the
+        # drum, counted from the *leading* edge. The paper travels left to
+        # right, so the leading edge is the sheet's RIGHT edge at x + ws and it
+        # is the right-hand part of the sheet that carries the new colour. A
+        # sheet-local column u sits at panel column x + u and has passed the
+        # nip once x + u >= nip, i.e. u >= nip - x; so exactly
+        # (x + ws) - nip columns are inked, clipped into 0..ws. Getting this
+        # backwards is not a subtle error -- see README-fragment-riso.md.
         if kind == "load":
             x = x_feed
-            wipe = 0
-            done = pi                       # nothing of this colour yet
+            inked = 0                       # nothing of this colour yet
+            done = pi
         elif kind == "print":
             x = path_x(u)
-            # How much of this pass's ink is on the sheet: the sheet-local
-            # column of the nip. Once the sheet's *left* edge is past the nip
-            # the whole thing has been under the drum, and `nip - x` has gone
-            # negative -- clipping that to zero blanks a sheet that has just
-            # been printed, which is exactly what it did the first time.
-            wipe = ws if x >= nip else int(np.clip(nip - x, 0, ws))
+            inked = int(np.clip(x + ws - nip, 0, ws))
             done = pi
         elif kind == "dwell":
-            x, wipe, done = x_catch, ws, pi
+            x, inked, done = x_catch, ws, pi
         elif kind == "back":
             x = int(round(x_catch + (x_feed - x_catch) * smooth(u)))
-            wipe, done = ws, pi
+            inked, done = ws, pi
         else:                                # eject, off to the right
             x = int(round(x_catch + (W + 8 - x_catch) * (u ** 1.6)))
-            wipe, done = ws, k - 1
+            inked, done = ws, k - 1
 
         # --- the sheet: two blits out of the baked cumulative stack --------
+        # Trailing part first, still carrying only `done` passes; then the
+        # leading part, which has been under the drum and carries done + 1.
+        # The seam between them is at panel column x + dry, which during a
+        # print is the nip itself.
         cums = job["cums"]
-        if wipe > 0:
-            paste(out, y_sheet, x, cums[done + 1][:, :wipe])
-        if wipe < ws:
-            paste(out, y_sheet, x + wipe, cums[done][:, wipe:])
+        dry = ws - inked
+        if dry > 0:
+            paste(out, y_sheet, x, cums[done][:, :dry])
+        if inked > 0:
+            paste(out, y_sheet, x + dry, cums[done + 1][:, dry:])
 
         # --- the deck, running while the paper moves -----------------------
         if kind in ("print", "back", "eject"):
@@ -793,7 +805,7 @@ def build(args):
             out[bay_y + 8, max(bay_x0 + 3, hx - 3):hx + 6] = (255, 150, 40)
 
         # --- the nip: where the ink actually lands -------------------------
-        if kind == "print" and 0 < wipe < ws:
+        if kind == "print" and 0 < inked < ws:
             out[y_sheet:y_deck, nip] = ink_rgb
             out[y_sheet - 2:y_sheet, nip - 1:nip + 2] = ink_rgb
 

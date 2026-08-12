@@ -460,6 +460,88 @@ def add_arguments(ap):
     ap.add_argument("--seed", type=int, default=7)
 
 
+def bubble_layout(text, scale, W, H):
+    """Where the speech bubble goes, and the three masks that make it.
+
+    A pure function of the panel size, at module scope on purpose: `build()`
+    draws from this and the test checks against it, so the geometry is
+    described once. The previous banner had its placement formula copied
+    into the test, which is exactly the arrangement that lets a demo and its
+    test drift apart while both stay green.
+
+    Returns fill / border / glyph masks in card coordinates, the card size,
+    and the (ty, tx) it should be pasted at.
+    """
+    # The dog's geometry, rederived from the same two numbers build() uses.
+    floor_y = int(round(H * 0.69))
+    dog_w = len(HAT[0])
+    dog_x = int(round(W * 0.30)) - dog_w // 2
+    table_y = floor_y - 3
+    dog_h = len(HAT) + len(HEAD) + len(BODY)
+    dog_y = table_y + 2 - dog_h
+    dog_cx = dog_x + dog_w * 0.5
+
+    tmask = text_mask(text, max(1, scale))
+    gh, gw = tmask.shape
+    PADX, PADY, TAIL, MARGIN = 4, 3, 4, 1
+    bh, bw = gh + 2 * PADY, gw + 2 * PADX
+    th, tw = bh + TAIL + 2 * MARGIN, bw + 2 * MARGIN
+
+    # Shift-based dilation rather than np.roll: roll wraps, and a border
+    # computed with it would wrap the tail's ink around to the top edge.
+    def _dilate(m):
+        d = m.copy()
+        d[1:, :] |= m[:-1, :]; d[:-1, :] |= m[1:, :]
+        d[:, 1:] |= m[:, :-1]; d[:, :-1] |= m[:, 1:]
+        d[1:, 1:] |= m[:-1, :-1]; d[1:, :-1] |= m[:-1, 1:]
+        d[:-1, 1:] |= m[1:, :-1]; d[:-1, :-1] |= m[1:, 1:]
+        return d
+
+    fill = np.zeros((th, tw), bool)
+    fill[MARGIN:MARGIN + bh, MARGIN:MARGIN + bw] = True
+    # Knock the corners off. A two-step chamfer is as much "round" as eleven
+    # rows can carry; an actual radius just loses the corner pixel.
+    for r in range(2):
+        for c in range(2 - r):
+            fill[MARGIN + r, MARGIN + c] = False
+            fill[MARGIN + r, MARGIN + bw - 1 - c] = False
+            fill[MARGIN + bh - 1 - r, MARGIN + c] = False
+            fill[MARGIN + bh - 1 - r, MARGIN + bw - 1 - c] = False
+    # The tail hangs off the bubble's lower left and leans left, because the
+    # dog is down and to the left of it. Its tip is what gets aimed at him.
+    tail_x = max(2, int(bw * 0.20))
+    for r in range(TAIL):
+        x0, x1 = tail_x - r, tail_x + (TAIL - r)
+        if x1 > x0:
+            fill[MARGIN + bh + r,
+                 MARGIN + max(0, x0):MARGIN + min(bw, x1)] = True
+
+    border = _dilate(fill) & ~fill
+    glyphs = np.zeros((th, tw), bool)
+    glyphs[MARGIN + PADY:MARGIN + PADY + gh,
+           MARGIN + PADX:MARGIN + PADX + gw] = tmask
+
+    # Placement. The tail's tip is the thing being aimed, not the box: it
+    # goes just above the dog's head, which puts the bubble over his
+    # shoulder. The bubble must never touch him -- "the dog never moves" is
+    # the invariant this whole demo rests on, and a bubble drawn across his
+    # ears would break it in a way that still looks plausible in a still.
+    ty = dog_y - 2 - th
+    tx = int(round(dog_cx)) - (MARGIN + tail_x)
+    if ty < 1:
+        # Not enough headroom at this text size. Sit it beside him instead;
+        # the tail leans left, so from there it still points back at him.
+        ty = 1
+        tx = dog_x + dog_w + 6
+    tx = int(np.clip(tx, 1, max(1, W - tw - 1)))
+    if ty + th > dog_y and tx < dog_x + dog_w and tx + tw > dog_x:
+        raise ValueError(
+            "fine: the bubble for %r at scale %d will not fit clear of the "
+            "dog on a %dx%d panel" % (text, scale, W, H))
+    return {"fill": fill, "border": border, "glyphs": glyphs,
+            "th": th, "tw": tw, "ty": ty, "tx": tx}
+
+
 def build(args):
     W, H = args.width, args.height
     rng = np.random.default_rng(args.seed)
@@ -558,27 +640,30 @@ def build(args):
     em_y0 = np.full(ne, float(floor_y) + 2.0, f32)
     EMBER = np.array((255, 196, 96), np.uint8)
 
-    # --- the punchline ----------------------------------------------------
-    # Measured, not assumed: whatever the mask turns out to be is the box.
-    tmask = text_mask(args.text, max(1, args.text_scale))
-    th, tw = tmask.shape
-    # A one-pixel outline in every direction. On a panel that is by then
-    # entirely orange, white type without it is unreadable.
-    halo = np.zeros_like(tmask)
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
-            halo |= np.roll(np.roll(tmask, dy, 0), dx, 1)
-    halo &= ~tmask
-    ty = max(1, int(H * 0.06))
-    tx = max(0, (W - tw) // 2 - int(W * 0.02))
-    if ty + th > floor_y - 2:                 # never let it land on the floor
-        ty = max(0, floor_y - 2 - th)
-    tw = min(tw, W - tx)
-    tmask, halo = tmask[:, :tw], halo[:, :tw]
+    # --- the punchline, as a speech bubble --------------------------------
+    # The line is dialogue, not a title card. Centred white type across the
+    # top read as a caption imposed on the scene -- the wall announcing the
+    # joke rather than the dog saying it -- so it is drawn the way a comic
+    # draws speech: dark ink inside a light rounded bubble with a tail
+    # pointing at whoever is talking.
+    #
+    # The bubble also solves the legibility problem more honestly than the
+    # banner did. By the time the line appears the room is entirely orange,
+    # and white type on it needed a per-glyph halo to survive. A light
+    # bubble puts the type on its own ground, so the contrast comes from the
+    # object rather than from an outline traced around every letter.
+    #
+    # Geometry lives in bubble_layout() at module scope so the test can
+    # check the drawn bubble against it rather than against a copy.
+    _lay = bubble_layout(args.text, max(1, args.text_scale), W, H)
+    th, tw = _lay["th"], _lay["tw"]
+    ty, tx = _lay["ty"], _lay["tx"]
+    INK = (26, 16, 12)
     text_card = np.zeros((th, tw, 3), f32)
-    text_card[tmask] = (255, 250, 236)
-    text_card[halo] = (18, 10, 8)
-    text_any = tmask | halo
+    text_card[_lay["fill"]] = (250, 246, 235)
+    text_card[_lay["border"]] = INK
+    text_card[_lay["glyphs"]] = INK
+    text_any = _lay["fill"] | _lay["border"]
     card_pix = text_card[text_any]
 
     # --- the schedule, drawn once ----------------------------------------

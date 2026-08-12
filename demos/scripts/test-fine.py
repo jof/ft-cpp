@@ -243,19 +243,25 @@ def test_punchline(args):
           "%dx%d" % (tw, th))
 
     r = fine.build(opts(**kw))
-    ty = max(1, int(64 * 0.06))
-    tx = max(0, (320 - tw) // 2 - int(320 * 0.02))
+    # Ask the demo where the bubble goes rather than re-deriving it here.
+    # The banner's placement formula used to be copied into this test, which
+    # is how a demo and its test drift apart while both stay green.
+    lay = fine.bubble_layout(args.text, scale, 320, 64)
+    ty, tx = lay["ty"], lay["tx"]
+    cth, ctw = lay["th"], lay["tw"]
     on = []
     i = 0
     best = None
     while i / FPS < cyc:
         f = r(i / FPS, i)
-        sub = f[ty:ty + th, tx:tx + tw]
-        white = (sub.min(axis=2) > 200)
-        if white.sum() > 0.5 * m.sum():
+        sub = f[ty:ty + cth, tx:tx + ctw]
+        # The bubble is a light ground with dark ink on it, so presence is
+        # the fill, and the type is the ink *inside* the fill.
+        pale = (sub.min(axis=2) > 200)
+        if pale.sum() > 0.5 * m.sum():
             on.append(i / FPS)
-            if white.sum() > (best[0] if best else 0):
-                best = (white.sum(), white.copy())
+            if pale.sum() > (best[0] if best else 0):
+                best = (pale.sum(), sub.copy())
         i += 1
     check("the punchline appears", bool(on),
           "" if not on else "%.1fs .. %.1fs" % (on[0], on[-1]))
@@ -267,26 +273,58 @@ def test_punchline(args):
     # Every pixel of the glyph mask is lit, including the bottom row. This is
     # the clipped-E check.
     if best:
-        got = best[1]
-        missing = int((m & ~got).sum())
+        sub = best[1]
+        dark = (sub.max(axis=2) < 120)          # ink, in card coordinates
+        gm = lay["glyphs"]
+        missing = int((gm & ~dark).sum())
         check("every glyph pixel is drawn", missing == 0,
-              "%d of %d mask pixels missing" % (missing, int(m.sum())))
+              "%d of %d mask pixels missing" % (missing, int(gm.sum())))
+        # The clipped-E check, now against the glyph block's own last row.
+        rows = np.where(gm.any(axis=1))[0]
+        last = int(rows[-1]) if len(rows) else 0
         check("the last glyph row is drawn",
-              m[-1].sum() == 0 or bool((m[-1] & got[-1]).any()),
-              "bottom row: %d of %d" % (int((m[-1] & got[-1]).sum()),
-                                        int(m[-1].sum())))
+              gm[last].sum() == 0 or bool((gm[last] & dark[last]).any()),
+              "bottom row: %d of %d" % (int((gm[last] & dark[last]).sum()),
+                                        int(gm[last].sum())))
+        # It is a bubble, not a banner: the type sits on its own light
+        # ground, and that ground fully surrounds it.
+        fill = lay["fill"]
+        check("the type sits on the bubble's own ground",
+              bool((gm & ~fill).sum() == 0),
+              "%d glyph pixels outside the fill" % int((gm & ~fill).sum()))
+        pale = (sub.min(axis=2) > 200)
+        halo_ok = int((fill & ~gm & ~pale).sum())
+        check("the bubble reads as a light object",
+              halo_ok < 0.10 * int((fill & ~gm).sum()) + 1,
+              "%d of %d fill pixels are not pale"
+              % (halo_ok, int((fill & ~gm).sum())))
+        # And it has a tail -- the thing that makes it speech rather than a
+        # caption. The tail is fill below the bubble's own solid block.
+        solid = np.where(fill.all(axis=1))[0]
+        if len(solid):
+            below = fill[int(solid[-1]) + 1:]
+            check("the bubble has a tail", bool(below.any()),
+                  "%d tail pixels" % int(below.sum()))
     # ...and it does not land on the dog's hat.
     dog_top = int(round(64 * 0.69)) - 3 + 2 \
         - (len(fine.HAT) + len(fine.HEAD) + len(fine.BODY))
-    check("the punchline clears the dog", ty + th <= dog_top,
-          "text ends row %d, hat starts row %d" % (ty + th, dog_top))
+    # A rectangle test, not a vertical one. At large --text-scale the bubble
+    # cannot fit above his head and moves alongside him instead, which is
+    # still clear of him; a vertical-only check calls that a failure.
+    dog_w = len(fine.HAT[0])
+    dog_left = int(round(320 * 0.30)) - dog_w // 2
+    dog_right = dog_left + dog_w
+    clear = (ty + cth <= dog_top or tx >= dog_right or tx + ctw <= dog_left)
+    check("the punchline clears the dog", clear,
+          "bubble rows %d..%d cols %d..%d, dog rows %d.. cols %d..%d"
+          % (ty, ty + cth, tx, tx + ctw, dog_top, dog_left, dog_right))
 
     off = fine.build(opts(no_text=True, **kw))
     quiet = True
     i = 0
     while i / FPS < cyc:
         f = off(i / FPS, i)
-        sub = f[ty:ty + th, tx:tx + tw]
+        sub = f[ty:ty + cth, tx:tx + ctw]
         if (sub.min(axis=2) > 200).sum() > 0.5 * m.sum():
             quiet = False
         i += 1
