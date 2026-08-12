@@ -2454,6 +2454,247 @@ def _wiki_stream():
 
 
 # --------------------------------------------------------------------------
+# What is on at this makerspace, and how soon. tonight.py draws these.
+#
+# **The endpoint.** `sequoia.garden/api/calendar.json` is our own site's export
+# of the public class and social calendar -- keyless, no signup, 2.7 kB, a flat
+# JSON array of the next fourteen events. Every entry carries exactly five
+# fields and nothing else: `title`, `start`, `end`, `allDay`, `url`. There is no
+# category, no location, no capacity and no attendee list, which is a mercy:
+# there is nothing here that could identify a person even if we wanted it to,
+# so the privacy rule that shaped `bikes` and `sf311` costs nothing here. `url`
+# is dropped -- it points at Bookwhen, and the wall is not clickable.
+#
+# **The offset is wrong in summer, and this is the single thing most likely to
+# put every event on the wall an hour late.** Starts are stamped like
+# `2026-08-13T19:00:00-08:00`. -08:00 is Pacific *Standard* Time; California in
+# August is on Pacific *Daylight* Time, which is -07:00. So the offset is not
+# the zone the event is in, it is the zone's winter offset applied year round --
+# the classic symptom of an exporter that formats a local datetime against a
+# fixed offset instead of against a zone.
+#
+# Two readings are possible and they are not equally right:
+#
+#   * Take the *instant* as authoritative. Then 19:00-08:00 is 03:00 UTC, which
+#     is 20:00 on a Pacific wall clock in August and 19:00 in November.
+#   * Take the *wall-clock fields* as authoritative and ignore the offset. Then
+#     the event is at 19:00 local, in August and in November alike.
+#
+# The feed decides this for us. "Member Applicant Orientation" recurs six times
+# between August and November -- 08-18, 09-01, 09-15, 10-06, 10-20, 11-03 --
+# and every single one is stamped 19:00. Under the first reading that one
+# recurring orientation would be at 8 pm all summer and silently move to 7 pm on
+# the 3rd of November, two days after the DST change, for no reason anybody
+# organised. Under the second it is at 7 pm every time, which is what a
+# recurring evening event actually is. So the **wall-clock fields win and the
+# offset is discarded**, and this fetcher parses `YYYY-MM-DDTHH:MM:SS` off the
+# front of the string and resolves it in America/Los_Angeles.
+#
+# Note that the two readings *agree* for anything in November: a fixed -08:00 is
+# correct once standard time starts. The bug is invisible for four months of the
+# year and an hour wide for the other eight, which is exactly why it is written
+# down here rather than discovered on the wall in March.
+#
+# **The calendar is sparse, and the panel had to be designed around that rather
+# than around what a calendar API suggests.** Fourteen events is not fourteen
+# events this week: the probe returned 2026-08-13 through 2026-11-03, spread
+# over eighty-three days. One or two evenings a week is the real cadence. A
+# "next seven days" panel would be empty five days out of seven and would be
+# reporting a quiet workshop as a broken feed. `tonight.py` therefore draws
+# three weeks, not one, and extends further when three weeks hold nothing.
+#
+# **They are all evenings.** Every start in the probe is 18:00 or 19:00 and
+# every end is 20:00 to 21:00. That is not an accident of one week -- it is what
+# a makerspace with day jobs looks like -- and it is what lets the demo spend
+# its rows on a three-hour band of the evening instead of a flat 24.
+#
+# **Trimming.** Two kinds of shortening happen here and only one of them is
+# about bytes. Dropping `url`, capping the list and rounding the durations is
+# size. Editing the *title* is editorial, and it belongs in the fetcher because
+# it is a fact about the feed rather than about the font: "Upmending (upcycling
+# + mending) Social" carries a parenthetical gloss written for somebody reading
+# a web page, and on a wall read at three metres it is noise in front of the
+# word that matters. Parentheticals go, `&` becomes `/` (the same substitution
+# `_muni_short` makes, so the tree has one separator and not two), whitespace
+# collapses, and the result is capped on a word boundary. What is *not* done
+# here is dropping characters the demo's 3x5 font cannot draw -- that is the
+# demo's business and it does it in `sanitise()`, because a second panel drawing
+# the same record might have a font with an ampersand in it.
+#
+# **TTL and cadence.** Six hours and hourly. Neither number is about the data
+# going off -- a calendar fetched this morning is still true tonight, and the
+# panel's "starting in forty minutes" is computed from the clock against cached
+# absolute timestamps, so it stays correct to the minute between fetches. The
+# TTL is the age at which the *fetcher* has clearly stopped running, which is
+# the only thing a TTL on a slow-moving feed can usefully mean; the interval is
+# a 2.7 kB request an hour so that an event added this afternoon is on the wall
+# this evening.
+# --------------------------------------------------------------------------
+
+SEQUOIA_CAL_URL = "https://sequoia.garden/api/calendar.json"
+
+# Six hours: see above, this is a dead-fetcher detector and not a shelf life.
+SEQUOIA_CAL_TTL = 21600
+
+# Hourly. 2.7 kB on the wire against our own solar-powered server, which is why
+# this is not five minutes: `solar-garden` in this same file explains what a
+# request costs that machine.
+SEQUOIA_CAL_INTERVAL = 3600
+
+# How far past its end an event stays on the record. The feed appears to publish
+# only future events, so in practice this keeps whatever is running *right now*
+# -- the single most valuable state the panel has -- plus anything that finished
+# earlier today, so the panel can draw this evening honestly rather than
+# claiming an empty one.
+SEQUOIA_CAL_KEEP_PAST = 86400
+
+# Enough for a season at this cadence, and a hard stop if the feed ever grows a
+# recurrence expander and starts returning a thousand.
+SEQUOIA_CAL_MAX = 40
+
+# Longer than any title observed (the longest was 28 characters once its
+# parenthetical was removed) and short enough that a pathological one cannot
+# blow the record up. The panel draws the nearest title at double size and 28
+# characters is 223 of its 320 columns, so this cap is also the panel's.
+SEQUOIA_CAL_TITLE_MAX = 44
+
+# An all-day entry has no useful clock time. It is given this much length so it
+# is a visible block rather than a zero-height nothing, and the record flags it
+# so the panel can draw it as the different kind of thing it is.
+SEQUOIA_CAL_ALLDAY_S = 43200
+
+def _sequoia_cal_epoch(s):
+    """A feed timestamp as epoch seconds, taking the wall clock and not the offset.
+
+    See the long note above for why the trailing `-08:00` is discarded rather
+    than honoured. zoneinfo first so that a fetcher running anywhere resolves
+    this the way the makerspace experiences it, with `mktime` behind it for a
+    Python that has no tzdata -- which on the Pi this ships to is set to Pacific
+    anyway, so the fallback agrees.
+
+    Parsed by slicing rather than by regex, and not only because `re` is
+    imported further down this file than this section sits: the slice *is* the
+    documentation of which eight characters of `2026-08-13T19:00:00-08:00` are
+    believed and which nine are thrown away. Anything that does not have digits
+    where ISO 8601 puts them is None, which the caller treats as an unusable
+    entry rather than as a broken feed.
+    """
+    s = str(s or "")
+    if len(s) < 16 or s[4] != "-" or s[7] != "-" or s[13] != ":":
+        return None
+    try:
+        year, mon, day = int(s[0:4]), int(s[5:7]), int(s[8:10])
+        hour, minute = int(s[11:13]), int(s[14:16])
+        sec = int(s[17:19]) if len(s) >= 19 and s[16] == ":" else 0
+    except ValueError:
+        return None
+    try:
+        import datetime
+        from zoneinfo import ZoneInfo
+        return float(datetime.datetime(
+            year, mon, day, hour, minute, sec,
+            tzinfo=ZoneInfo("America/Los_Angeles")).timestamp())
+    except Exception:                                        # noqa: BLE001
+        # tm_isdst=-1: let the C library decide, which is right on any machine
+        # whose zone is the makerspace's and no worse than guessing anywhere
+        # else.
+        return float(time.mktime((year, mon, day, hour, minute, sec, 0, 0, -1)))
+
+
+def _sequoia_cal_title(s):
+    """The title as the wall should carry it. Editorial, not typographic.
+
+    Case is folded up here rather than in the demo because upper case is what
+    the record is *for*: every panel that draws it draws capitals, and storing
+    both forms would be storing a string nobody reads.
+    """
+    s = str(s or "")
+    # Parentheticals, dropped by scan rather than by regex; see the note in
+    # _sequoia_cal_epoch. An unclosed "(" takes the rest of the title with it,
+    # which is the right answer: whatever follows it was never going to be
+    # readable prose.
+    while "(" in s:
+        head, _, rest = s.partition("(")
+        s = head + rest.partition(")")[2]
+    s = " ".join(s.replace("&", "/").split()).upper()
+    if len(s) <= SEQUOIA_CAL_TITLE_MAX:
+        return s
+    cut = s[:SEQUOIA_CAL_TITLE_MAX]
+    # On a word boundary if there is one in the last third, so the cap reads as
+    # a shorter name rather than as a truncation.
+    sp = cut.rfind(" ")
+    if sp >= SEQUOIA_CAL_TITLE_MAX * 2 // 3:
+        cut = cut[:sp]
+    return cut.rstrip()
+
+
+@product("sequoia-calendar", ttl=SEQUOIA_CAL_TTL,
+         interval=SEQUOIA_CAL_INTERVAL,
+         description="upcoming classes and socials at the makerspace")
+def _sequoia_calendar():
+    """The makerspace's own public calendar, trimmed to what a panel draws.
+
+    An empty array is returned as an empty record rather than raised as an
+    error. A quiet month is a real state of a small workshop's calendar and the
+    panel draws it as one; raising here would instead leave last week's record
+    in place -- see `fetch()` -- and the wall would keep advertising a social
+    that already happened, which is the one genuinely bad outcome available.
+    """
+    raw = get_json(SEQUOIA_CAL_URL, timeout=20)
+    if not isinstance(raw, list):
+        raise ValueError("sequoia calendar is not a JSON array")
+
+    now = time.time()
+    events, skipped = [], 0
+    for item in raw:
+        if not isinstance(item, dict):
+            skipped += 1
+            continue
+        start = _sequoia_cal_epoch(item.get("start"))
+        if start is None:
+            skipped += 1
+            continue
+        all_day = bool(item.get("allDay"))
+        end = _sequoia_cal_epoch(item.get("end"))
+        if end is None or end <= start:
+            end = start + (SEQUOIA_CAL_ALLDAY_S if all_day else 3600.0)
+        title = _sequoia_cal_title(item.get("title"))
+        if not title:
+            skipped += 1
+            continue
+        if end < now - SEQUOIA_CAL_KEEP_PAST:
+            continue
+        events.append({
+            "t": int(round(start)),
+            # A duration rather than an end: it is three or four digits instead
+            # of ten, and it is what the panel measures a block's height with.
+            "d": int(round(min(end - start, 86400.0))),
+            "a": 1 if all_day else 0,
+            "n": title,
+        })
+
+    events.sort(key=lambda e: (e["t"], e["n"]))
+    # Bookwhen can list the same session twice around a reschedule.
+    uniq, seen = [], set()
+    for e in events:
+        key = (e["t"], e["n"])
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(e)
+
+    return {
+        "site": ftsite.NAME.upper(),
+        "n": len(uniq[:SEQUOIA_CAL_MAX]),
+        "n_feed": len(raw),
+        "skipped": skipped,
+        "tz": "America/Los_Angeles",
+        "tz_note": "feed stamps a fixed -08:00 year round; wall-clock taken as local",
+        "ev": uniq[:SEQUOIA_CAL_MAX],
+    }, SEQUOIA_CAL_URL
+
+
+# --------------------------------------------------------------------------
 # Aircraft over the Bay. adsb.py draws these.
 #
 # **Which feed, and why not the obvious ones.** Three keyless aggregators
