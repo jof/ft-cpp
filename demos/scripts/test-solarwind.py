@@ -39,7 +39,7 @@ wall.
 
 The live cache is only needed for the one check against real data; everything
 else builds its own cache directory and needs nothing. Populate it with
-`python3 ftdata.py --once --only swpc_l1_wind`.
+`python3 ftdata.py --once --only swpc_solarwind`.
 """
 
 import argparse
@@ -118,7 +118,7 @@ def ramp_record(n=56):
 
 def write_cache(dirpath, payload, age=0.0, kp=None):
     os.makedirs(dirpath, exist_ok=True)
-    with open(os.path.join(dirpath, "swpc_l1_wind.json"), "w") as fh:
+    with open(os.path.join(dirpath, "swpc_solarwind.json"), "w") as fh:
         json.dump({"payload": payload, "fetched_at": time.time() - age,
                    "source": "test"}, fh)
     if kp is not None:
@@ -494,10 +494,10 @@ def test_record(tmp):
 
 def test_live(cache_dir):
     print("\nagainst the live cache")
-    got = ftdata.load("swpc_l1_wind", cache_dir)
+    got = ftdata.load("swpc_solarwind", cache_dir)
     if got is None:
-        print("  --   no swpc_l1_wind record; run "
-              "`python3 ftdata.py --once --only swpc_l1_wind`")
+        print("  --   no swpc_solarwind record; run "
+              "`python3 ftdata.py --once --only swpc_solarwind`")
         return
     payload, age = got
     n = len(payload.get("speed") or ())
@@ -514,9 +514,9 @@ def test_live(cache_dir):
           bool(bzs) and max(abs(v) for v in bzs) < 100,
           "%.1f..%.1f nT" % (min(bzs), max(bzs)))
     check("the record is small", os.path.getsize(
-        ftdata.record_path("swpc_l1_wind", cache_dir)) < 8000,
+        ftdata.record_path("swpc_solarwind", cache_dir)) < 8000,
         "%d bytes" % os.path.getsize(
-            ftdata.record_path("swpc_l1_wind", cache_dir)))
+            ftdata.record_path("swpc_solarwind", cache_dir)))
     f = frames(opts(cache_dir=cache_dir), 4)[-1]
     check("the live record draws something", int(f.sum()) > 10000)
 

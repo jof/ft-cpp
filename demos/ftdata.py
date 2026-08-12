@@ -711,28 +711,205 @@ WIND_SPEED_URL = "https://services.swpc.noaa.gov/products/summary/solar-wind-spe
 WIND_MAG_URL = "https://services.swpc.noaa.gov/products/summary/solar-wind-mag-field.json"
 
 
-@product("swpc_solarwind", ttl=3600,
-         description="solar wind speed and IMF Bt/Bz at L1")
-def _swpc_solarwind():
-    """Sixty bytes each, which is the whole reason these are the endpoints.
+# --------------------------------------------------------------------------
+# An hour of solar wind, measured at L1 and propagated to the bow shock, plus
+# the aurora oval's hemispheric power. solarwind.py draws this as a picture;
+# propagation.py reads the latest speed and Bz off it for its readout.
+#
+# **This product used to be two.** `swpc_solarwind` fetched the latest scalar
+# speed and Bz off SWPC's summary endpoints for propagation's instrument
+# panel, and a second product fetched this propagated series for solarwind's
+# picture -- two requests to the same agency for overlapping data. They are
+# one product now, because the series already contains the scalars: its last
+# row is the most recent minute at L1, which is exactly what "latest" means on
+# the readout. One fetch, one cache entry, and the two panels can no longer
+# disagree with each other about what the wind is doing.
+#
+# The consequence for consumers is that `speed` and `bz` here are *arrays*,
+# not numbers; the scalars live in `latest`. propagation.py reads them through
+# a helper that accepts either shape, so a wall still holding an old
+# scalar-shaped record keeps drawing until the next fetch replaces it.
+# --------------------------------------------------------------------------
 
-    The `/products/solar-wind/mag-1-day.json` path that every older script
-    uses is gone -- it 404s now -- and the day-long series it served would
-    have been trimmed to these two numbers anyway. Bz is the one worth the
-    space: southward Bz is what opens the magnetosphere, so a negative number
-    here is the reason tomorrow's K will be bad, hours before K knows it.
+L1_WIND_URL = ("https://services.swpc.noaa.gov/products/geospace/"
+               "propagated-solar-wind-1-hour.json")
+AURORA_POWER_URL = ("https://services.swpc.noaa.gov/text/"
+                    "aurora-nowcast-hemi-power.txt")
+
+# One column of a 320 px panel is worth about three minutes of this; sixty
+# samples is one a minute, which is finer than anything downstream can show and
+# still only about a kilobyte and a half of JSON.
+L1_WIND_SAMPLES = 60
+
+
+def _l1_num(value, places):
+    """A rounded float, or None for null, empty, '(n/a)' and NaN alike."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    f = round(f, places)
+    return int(f) if places <= 0 else f
+
+
+def _aurora_hemispheric_power():
+    """The last row of the Ovation hemispheric power table, in gigawatts.
+
+    Fixed-width text with a comment header, five-minute cadence, one file a
+    day -- so shortly after 00:00 UTC the file has a header and one row in it,
+    and the last data line is the only line worth having. It is read by taking
+    the last line that parses rather than by counting from the end, because the
+    file sometimes ends in a blank line and sometimes does not.
     """
-    payload = {"speed": None, "bt": None, "bz": None, "t": None}
-    rows = get_json(WIND_SPEED_URL)
-    if rows:
-        payload["speed"] = rows[0].get("proton_speed")
-        payload["t"] = rows[0].get("time_tag")
-    rows = get_json(WIND_MAG_URL)
-    if rows:
-        payload["bt"] = rows[0].get("bt")
-        payload["bz"] = rows[0].get("bz_gsm")
-        payload["t"] = rows[0].get("time_tag") or payload["t"]
-    return payload, WIND_SPEED_URL
+    text = get(AURORA_POWER_URL).decode("ascii", "replace")
+    out = {"north_gw": None, "south_gw": None, "t": None}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        north, south = _l1_num(parts[2], 0), _l1_num(parts[3], 0)
+        if north is None or south is None:
+            continue
+        out = {"north_gw": north, "south_gw": south, "t": parts[0]}
+    return out
+
+
+@product("swpc_solarwind", ttl=3600, interval=600,
+         description="an hour of propagated L1 solar wind, plus aurora power")
+def _swpc_solarwind():
+    """Sixty minutes of wind in flight, as four parallel arrays.
+
+    The file is a header row followed by data rows, which is SWPC's usual
+    `/products/` shape and the reason for the column-name lookup: the column
+    order has moved before and reading `row[6]` for bz would fail silently and
+    draw a beautiful wrong picture rather than raise.
+
+    Parallel arrays rather than a list of records, because at sixty samples the
+    repeated keys are two thirds of the file. Speed to the nearest km/s,
+    density and field to a tenth: that is finer than a 320 px panel can
+    resolve, and the float64 reprs would triple the record for nothing.
+
+    Arrays are oldest first, which is the order the file is in and also the
+    order of *distance from the Sun*: the oldest sample is the one nearest the
+    Earth. Anything drawing this wants it that way round; anything printing
+    'now' wants the last element, which is what `latest` is for.
+    """
+    rows = get_json(L1_WIND_URL)
+    if not rows or not isinstance(rows[0], list):
+        raise ValueError("propagated solar wind: no header row")
+    col = {}
+    for i, name in enumerate(rows[0]):
+        col[str(name)] = i
+    for key in ("time_tag", "speed", "density", "bz", "bt",
+                "propagated_time_tag"):
+        if key not in col:
+            raise ValueError("propagated solar wind: no %r column" % key)
+    data = [r for r in rows[1:] if isinstance(r, list) and len(r) >= len(col)]
+    if not data:
+        raise ValueError("propagated solar wind: no data rows")
+
+    # Thin from the newest end, so the most recent minute is always kept: it is
+    # the one the panel prints as the current wind speed.
+    step = max(1, -(-len(data) // L1_WIND_SAMPLES))
+    keep = list(reversed(data[::-step]))[-L1_WIND_SAMPLES:]
+
+    def column(key, places):
+        return [_l1_num(r[col[key]], places) for r in keep]
+
+    speed = column("speed", 0)
+    density = column("density", 1)
+    bz = column("bz", 1)
+    bt = column("bt", 1)
+
+    latest = {"t": None, "speed": None, "density": None, "bz": None,
+              "bt": None, "arrival": None}
+    for i in range(len(keep) - 1, -1, -1):
+        if speed[i] is not None and bz[i] is not None:
+            latest = {"t": keep[i][col["time_tag"]],
+                      "speed": speed[i], "density": density[i],
+                      "bz": bz[i], "bt": bt[i],
+                      "arrival": keep[i][col["propagated_time_tag"]]}
+            break
+
+    try:
+        aurora = _aurora_hemispheric_power()
+    except Exception:                                        # noqa: BLE001
+        # The oval's power is a garnish -- it sets how brightly the poles glow
+        # and nothing else. A panel with a stream, a field and a magnetopause
+        # is still the panel; one that failed to draw because a text file was
+        # briefly a 500 is not.
+        aurora = {"north_gw": None, "south_gw": None, "t": None}
+
+    return {
+        "speed": speed, "density": density, "bz": bz, "bt": bt,
+        "t_first": keep[0][col["time_tag"]],
+        "t_last": keep[-1][col["time_tag"]],
+        "arrival_first": keep[0][col["propagated_time_tag"]],
+        "arrival_last": keep[-1][col["propagated_time_tag"]],
+        "samples": len(keep), "minutes_per_sample": step,
+        "latest": latest, "aurora": aurora,
+        "units": {"speed": "km/s", "density": "protons/cm^3",
+                  "bz": "nT GSM", "bt": "nT", "aurora": "GW",
+                  "t": "UTC, measured at L1",
+                  "arrival": "UTC, propagated to the bow shock"},
+    }, L1_WIND_URL
+
+
+# --------------------------------------------------------------------------
+# The global routing table, churning, as San Francisco hears it. bgp.py draws
+# it as a per-second chart of the last quarter hour with a ticker of the actual
+# prefixes underneath.
+#
+# **Why RouteViews at SFMIX and not the obvious live feed.** RIPE's RIS Live
+# streams the whole default-free zone over plain HTTP as newline-delimited
+# JSON, and it was the first thing tried here. It works, and it is the wrong
+# tool for this panel for two reasons. Unfiltered it delivered 78 MB in 25
+# seconds -- that is not going anywhere near a Pi on shop wifi -- and even
+# filtered to one collector it can only ever be *sampled*: the fetcher opens
+# the socket, reads for twenty seconds, and closes it, so the other hundred and
+# sixty seconds of every three minutes are simply not observed. A burst that
+# lasted a minute would be missed entirely, and a chart that silently omits the
+# interesting parts is a worse chart than a coarser one that does not.
+#
+# The RouteViews archive has the opposite shape. Every collector writes a
+# complete MRT dump of every update it saw in each fifteen-minute window and
+# publishes it about a minute after the window closes, bzip2'd. One 1.2 MB file
+# gets **the entire window**, 75,000 messages, with per-second resolution and
+# nothing sampled away. It is a quarter of an hour behind, and that is a trade
+# worth making: this panel is about rate and texture, not about the last
+# second, and the age is on the screen anyway.
+#
+# And the collector is `route-views.sfmix` -- RouteViews' vantage point inside
+# the San Francisco Metropolitan Internet Exchange, which is a couple of miles
+# from the wall and is where the makerspace's own ISP hands off its traffic.
+# The routes this panel draws are the ones the room's packets are actually
+# steered by, which is not a claim any of the other collectors could make.
+# Eight networks peer with it -- Cloudflare and Amazon among them -- so the
+# feed is a genuinely local view of a global table rather than a global average
+# of one.
+#
+# **MRT is parsed here, by hand, and that needs justifying.** The usual answer
+# is libbgpstream or mrtparse, and neither is going on a Pi for this: the first
+# is a C library with a build, the second pulls in a dependency tree to do
+# something this file already does for PDFs. The wire format is RFC 6396 and
+# RFC 4271 and the part of it a churn counter needs is small -- walk the record
+# frames, find the BGP UPDATEs, count the prefixes in the withdrawn block, the
+# NLRI block and the two multiprotocol attributes, and read the AS_PATH. What
+# is deliberately *not* implemented is everything else: communities, MED,
+# aggregators, the legacy two-byte-ASN subtypes nobody has emitted this decade.
+# An attribute this does not understand is skipped by its own length field,
+# which is why an unknown one cannot desynchronise the parse.
+#
+# **Where the cost is.** 12.5 MB of MRT and 75,000 records is 0.5 s of pure
+# Python on a desktop, so call it ten on the wall, once every fifteen minutes,
+# in the fetcher process and never in a demo. Both ends are capped anyway --
+# see BGP_MAX_BZ2, BGP_MAX_MRT and BGP_MAX_RECORDS -- and a capped parse says
+# so in the record rather than quietly reporting a low rate.
 
 
 # --------------------------------------------------------------------------
@@ -6137,187 +6314,6 @@ def _sats():
 # is the same model's hemispheric integral, in gigawatts, at five-minute
 # cadence, and two numbers is all this panel can draw. Ten quiet gigawatts, a
 # hundred in a storm.
-# --------------------------------------------------------------------------
-
-L1_WIND_URL = ("https://services.swpc.noaa.gov/products/geospace/"
-               "propagated-solar-wind-1-hour.json")
-AURORA_POWER_URL = ("https://services.swpc.noaa.gov/text/"
-                    "aurora-nowcast-hemi-power.txt")
-
-# One column of a 320 px panel is worth about three minutes of this; sixty
-# samples is one a minute, which is finer than anything downstream can show and
-# still only about a kilobyte and a half of JSON.
-L1_WIND_SAMPLES = 60
-
-
-def _l1_num(value, places):
-    """A rounded float, or None for null, empty, '(n/a)' and NaN alike."""
-    try:
-        f = float(value)
-    except (TypeError, ValueError):
-        return None
-    if f != f or f in (float("inf"), float("-inf")):
-        return None
-    f = round(f, places)
-    return int(f) if places <= 0 else f
-
-
-def _aurora_hemispheric_power():
-    """The last row of the Ovation hemispheric power table, in gigawatts.
-
-    Fixed-width text with a comment header, five-minute cadence, one file a
-    day -- so shortly after 00:00 UTC the file has a header and one row in it,
-    and the last data line is the only line worth having. It is read by taking
-    the last line that parses rather than by counting from the end, because the
-    file sometimes ends in a blank line and sometimes does not.
-    """
-    text = get(AURORA_POWER_URL).decode("ascii", "replace")
-    out = {"north_gw": None, "south_gw": None, "t": None}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        north, south = _l1_num(parts[2], 0), _l1_num(parts[3], 0)
-        if north is None or south is None:
-            continue
-        out = {"north_gw": north, "south_gw": south, "t": parts[0]}
-    return out
-
-
-@product("swpc_l1_wind", ttl=3600, interval=600,
-         description="an hour of propagated L1 solar wind, plus aurora power")
-def _swpc_l1_wind():
-    """Sixty minutes of wind in flight, as four parallel arrays.
-
-    The file is a header row followed by data rows, which is SWPC's usual
-    `/products/` shape and the reason for the column-name lookup: the column
-    order has moved before and reading `row[6]` for bz would fail silently and
-    draw a beautiful wrong picture rather than raise.
-
-    Parallel arrays rather than a list of records, because at sixty samples the
-    repeated keys are two thirds of the file. Speed to the nearest km/s,
-    density and field to a tenth: that is finer than a 320 px panel can
-    resolve, and the float64 reprs would triple the record for nothing.
-
-    Arrays are oldest first, which is the order the file is in and also the
-    order of *distance from the Sun*: the oldest sample is the one nearest the
-    Earth. Anything drawing this wants it that way round; anything printing
-    'now' wants the last element, which is what `latest` is for.
-    """
-    rows = get_json(L1_WIND_URL)
-    if not rows or not isinstance(rows[0], list):
-        raise ValueError("propagated solar wind: no header row")
-    col = {}
-    for i, name in enumerate(rows[0]):
-        col[str(name)] = i
-    for key in ("time_tag", "speed", "density", "bz", "bt",
-                "propagated_time_tag"):
-        if key not in col:
-            raise ValueError("propagated solar wind: no %r column" % key)
-    data = [r for r in rows[1:] if isinstance(r, list) and len(r) >= len(col)]
-    if not data:
-        raise ValueError("propagated solar wind: no data rows")
-
-    # Thin from the newest end, so the most recent minute is always kept: it is
-    # the one the panel prints as the current wind speed.
-    step = max(1, -(-len(data) // L1_WIND_SAMPLES))
-    keep = list(reversed(data[::-step]))[-L1_WIND_SAMPLES:]
-
-    def column(key, places):
-        return [_l1_num(r[col[key]], places) for r in keep]
-
-    speed = column("speed", 0)
-    density = column("density", 1)
-    bz = column("bz", 1)
-    bt = column("bt", 1)
-
-    latest = {"t": None, "speed": None, "density": None, "bz": None,
-              "bt": None, "arrival": None}
-    for i in range(len(keep) - 1, -1, -1):
-        if speed[i] is not None and bz[i] is not None:
-            latest = {"t": keep[i][col["time_tag"]],
-                      "speed": speed[i], "density": density[i],
-                      "bz": bz[i], "bt": bt[i],
-                      "arrival": keep[i][col["propagated_time_tag"]]}
-            break
-
-    try:
-        aurora = _aurora_hemispheric_power()
-    except Exception:                                        # noqa: BLE001
-        # The oval's power is a garnish -- it sets how brightly the poles glow
-        # and nothing else. A panel with a stream, a field and a magnetopause
-        # is still the panel; one that failed to draw because a text file was
-        # briefly a 500 is not.
-        aurora = {"north_gw": None, "south_gw": None, "t": None}
-
-    return {
-        "speed": speed, "density": density, "bz": bz, "bt": bt,
-        "t_first": keep[0][col["time_tag"]],
-        "t_last": keep[-1][col["time_tag"]],
-        "arrival_first": keep[0][col["propagated_time_tag"]],
-        "arrival_last": keep[-1][col["propagated_time_tag"]],
-        "samples": len(keep), "minutes_per_sample": step,
-        "latest": latest, "aurora": aurora,
-        "units": {"speed": "km/s", "density": "protons/cm^3",
-                  "bz": "nT GSM", "bt": "nT", "aurora": "GW",
-                  "t": "UTC, measured at L1",
-                  "arrival": "UTC, propagated to the bow shock"},
-    }, L1_WIND_URL
-
-
-# --------------------------------------------------------------------------
-# The global routing table, churning, as San Francisco hears it. bgp.py draws
-# it as a per-second chart of the last quarter hour with a ticker of the actual
-# prefixes underneath.
-#
-# **Why RouteViews at SFMIX and not the obvious live feed.** RIPE's RIS Live
-# streams the whole default-free zone over plain HTTP as newline-delimited
-# JSON, and it was the first thing tried here. It works, and it is the wrong
-# tool for this panel for two reasons. Unfiltered it delivered 78 MB in 25
-# seconds -- that is not going anywhere near a Pi on shop wifi -- and even
-# filtered to one collector it can only ever be *sampled*: the fetcher opens
-# the socket, reads for twenty seconds, and closes it, so the other hundred and
-# sixty seconds of every three minutes are simply not observed. A burst that
-# lasted a minute would be missed entirely, and a chart that silently omits the
-# interesting parts is a worse chart than a coarser one that does not.
-#
-# The RouteViews archive has the opposite shape. Every collector writes a
-# complete MRT dump of every update it saw in each fifteen-minute window and
-# publishes it about a minute after the window closes, bzip2'd. One 1.2 MB file
-# gets **the entire window**, 75,000 messages, with per-second resolution and
-# nothing sampled away. It is a quarter of an hour behind, and that is a trade
-# worth making: this panel is about rate and texture, not about the last
-# second, and the age is on the screen anyway.
-#
-# And the collector is `route-views.sfmix` -- RouteViews' vantage point inside
-# the San Francisco Metropolitan Internet Exchange, which is a couple of miles
-# from the wall and is where the makerspace's own ISP hands off its traffic.
-# The routes this panel draws are the ones the room's packets are actually
-# steered by, which is not a claim any of the other collectors could make.
-# Eight networks peer with it -- Cloudflare and Amazon among them -- so the
-# feed is a genuinely local view of a global table rather than a global average
-# of one.
-#
-# **MRT is parsed here, by hand, and that needs justifying.** The usual answer
-# is libbgpstream or mrtparse, and neither is going on a Pi for this: the first
-# is a C library with a build, the second pulls in a dependency tree to do
-# something this file already does for PDFs. The wire format is RFC 6396 and
-# RFC 4271 and the part of it a churn counter needs is small -- walk the record
-# frames, find the BGP UPDATEs, count the prefixes in the withdrawn block, the
-# NLRI block and the two multiprotocol attributes, and read the AS_PATH. What
-# is deliberately *not* implemented is everything else: communities, MED,
-# aggregators, the legacy two-byte-ASN subtypes nobody has emitted this decade.
-# An attribute this does not understand is skipped by its own length field,
-# which is why an unknown one cannot desynchronise the parse.
-#
-# **Where the cost is.** 12.5 MB of MRT and 75,000 records is 0.5 s of pure
-# Python on a desktop, so call it ten on the wall, once every fifteen minutes,
-# in the fetcher process and never in a demo. Both ends are capped anyway --
-# see BGP_MAX_BZ2, BGP_MAX_MRT and BGP_MAX_RECORDS -- and a capped parse says
-# so in the record rather than quietly reporting a low rate.
 # --------------------------------------------------------------------------
 
 BGP_ARCHIVE = "https://archive.routeviews.org"

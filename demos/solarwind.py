@@ -76,7 +76,7 @@ Shue curves, the type -- is baked into one overlay and stamped in with a single
 `np.copyto(where=)`. That leaves five whole-panel numpy calls a frame plus a
 dozen writes of a handful of pixels each for the sparks and the aurora.
 
-Run:  python3 ftdata.py --once --only swpc_l1_wind    # the fetcher
+Run:  python3 ftdata.py --once --only swpc_solarwind    # the fetcher
       python3 solarwind.py --host 127.0.0.1
       python3 solarwind.py --storm                    # the interesting day
       python3 solarwind.py --bz -18 --speed 750 --kp 7
@@ -94,7 +94,7 @@ import ftdata
 
 f32 = np.float32
 
-WIND_PRODUCT = "swpc_l1_wind"
+WIND_PRODUCT = "swpc_solarwind"
 KP_PRODUCT = "swpc_kp"
 
 # --------------------------------------------------------------------------
