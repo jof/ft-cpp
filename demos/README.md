@@ -2733,15 +2733,23 @@ drawn as a statement rather than as an alarm. In every one of those cases the
 map is still drawn underneath, because the coastline is not data and does not
 go stale — a blanked panel reads as a crash.
 
-**The feed is `api.airplanes.live`, and the obvious first choice does not
+**The feed is `opendata.adsb.fi`, and the obvious first choice does not
 work.** All three keyless aggregators publish the same readsb-descended JSON
 and all three were tried against this exact query: `api.adsb.lol` answers 200
 OK in a second with `{"ac": [], "total": 0}`, which is not an error and would
 have given a permanently, honestly empty sky; `opendata.adsb.fi` and
 `api.airplanes.live` both answer in about 250 ms with sixty-odd aircraft.
-airplanes.live is what ships, adsb.fi is a one-line swap, and the User-Agent
-carries a real contact address because this is a volunteer-run receiver network
-being asked for something 1440 times a day. **Half of what comes back is on the
+airplanes.live shipped until 2026-08-12, when it began answering every endpoint
+`403 {"error": "please contact us at contact@airplanes.live"}` — for any
+User-Agent, at a sixtieth of the one-per-second their guide documents, while
+the site itself still served 200 from the same host. That reads as a block on
+the wall's address rather than anything a fetcher can fix, so the second source
+became the first one, which is what a second source is for. The swap was the
+`ADSB_URL` line and a timestamp check: adsb.fi calls the list `aircraft` where
+airplanes.live called it `ac`, which the parser already accepted, and reports
+`now` in seconds where readsb reports milliseconds, which it now does too. The
+User-Agent carries a real contact address either way, because this is a
+volunteer-run receiver network being asked for something 1440 times a day. **Half of what comes back is on the
 ground** — 47 of 76 on a Sunday morning, reported as the *string* `"ground"` in
 `alt_baro` — and none of it can be dead-reckoned, so the fetcher drops it and
 stores the count instead. The panel says "29 airborne, 47 on the ground" and

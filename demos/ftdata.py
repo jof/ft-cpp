@@ -1693,13 +1693,22 @@ for _lat, _lon in _wx_sites:
 #                                    error, so a demo built on this would have
 #                                    drawn an honest, permanently empty sky.
 #   opendata.adsb.fi/api/v2/...      works; 63 aircraft, 240 ms.
-#   api.airplanes.live/v2/point/...  works; 65 aircraft, 250 ms.
+#   api.airplanes.live/v2/point/...  worked; 65 aircraft, 250 ms.
 #
-# The last one is what is used, and adsb.fi is the drop-in second source if it
-# ever stops -- the response shapes differ only in that adsb.fi calls the list
-# `aircraft` and airplanes.live calls it `ac`. Neither wants a key. Both ask for
-# civility rather than credentials: airplanes.live documents roughly one request
-# a second, and this asks once a minute.
+# airplanes.live was what shipped until 2026-08-12, when it began answering
+# every endpoint with `403 {"error": "please contact us at
+# contact@airplanes.live"}` -- the same 403 for the project User-Agent, a bare
+# curl one and a browser one, while airplanes.live itself still served 200 from
+# the same host. Their guide documents one request a second and this asked once
+# a minute, sixty times under, so this was not the rate. It reads as a block on
+# the wall's address, and an address is not something a fetcher can argue with.
+#
+# So adsb.fi is what ships, which is what the second source was written to be.
+# The response shapes differ in two places and no more: adsb.fi calls the list
+# `aircraft` where airplanes.live called it `ac`, which the parser below has
+# always accepted both of, and adsb.fi reports `now` in seconds where readsb
+# reports milliseconds, which the timestamp line now accepts both of. Neither
+# wants a key. Both ask for civility rather than credentials.
 #
 # **Ground traffic is dropped, and counted.** Half of what comes back is parked
 # or taxiing -- 36 of 70 on a Sunday morning -- reported as the *string*
@@ -1732,7 +1741,7 @@ for _lat, _lon in _wx_sites:
 # minutes later; none of that belongs on the flash card the Pi boots from.
 # --------------------------------------------------------------------------
 
-ADSB_URL = "https://api.airplanes.live/v2/point/%.4f/%.4f/%d"
+ADSB_URL = "https://opendata.adsb.fi/api/v2/lat/%.4f/lon/%.4f/dist/%d"
 
 # The wall's own address, in the Mission. Everything on the panel is measured
 # from here, so this is the one number to change for another installation.
@@ -1768,7 +1777,7 @@ def _adsb_num(x):
 
 @product("adsb-bay", ttl=ADSB_TTL, interval=ADSB_INTERVAL, volatile=True,
          description="airborne ADS-B within %d nm of the wall, from "
-                     "airplanes.live" % ADSB_RADIUS_NM)
+                     "adsb.fi" % ADSB_RADIUS_NM)
 def _adsb_bay():
     """The airborne traffic around the wall, trimmed to what a panel can draw.
 
@@ -1800,11 +1809,20 @@ def _adsb_bay():
     if not isinstance(seen, list):
         raise ValueError("no aircraft list in the response from %s" % url)
 
-    # readsb reports `now` in milliseconds since the epoch. Falling back to the
-    # local clock rather than failing: the positions are still good, and a demo
-    # that dead-reckons from a clock a second out is not measurably wrong.
-    served = _adsb_num(doc.get("now"))
-    t = served / 1000.0 if served and served > 1e11 else time.time()
+    # readsb reports `now` in milliseconds since the epoch and adsb.fi reports
+    # it in seconds, and the magnitude is what tells them apart: a seconds
+    # count does not reach 1e11 until the year 5138, so anything past it is
+    # milliseconds and anything past 1e9 is a plausible seconds count. Falling
+    # back to the local clock rather than failing on either shape: the
+    # positions are still good, and a demo that dead-reckons from a clock a
+    # second out is not measurably wrong.
+    served = _adsb_num(doc.get("now")) or 0.0
+    if served > 1e11:
+        t = served / 1000.0
+    elif served > 1e9:
+        t = served
+    else:
+        t = time.time()
 
     ground = 0
     rows = []
@@ -1843,7 +1861,7 @@ def _adsb_bay():
         "n_seen": len(seen), "capped": len(rows) > len(kept),
         "units": {"alt": "ft baro", "gs": "kn", "trk": "deg true",
                   "dst": "nm", "pa": "s since position last heard"},
-        "source": "airplanes.live",
+        "source": "adsb.fi",
     }
     payload.update({c: [r[c] for r in kept] for c in cols})
     return payload, url
