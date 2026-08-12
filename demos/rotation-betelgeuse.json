@@ -13,6 +13,17 @@
     },
     {
       "kind": "py",
+      "name": "pipes",
+      "module": "pipes",
+      "seconds": 40.0,
+      "fps": 20,
+      "ms": 7.0,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "plotter",
       "module": "plotter",
       "seconds": 40.0,
@@ -465,6 +476,17 @@
     },
     {
       "kind": "py",
+      "name": "solar",
+      "module": "solar",
+      "seconds": 35.0,
+      "fps": 20,
+      "ms": 3.0,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "riso",
       "module": "riso",
       "seconds": 34.0,
@@ -680,6 +702,17 @@
       "seconds": 46.0,
       "fps": 20,
       "ms": 6.3,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "crash",
+      "module": "crash",
+      "seconds": 45.0,
+      "fps": 20,
+      "ms": 1.0,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -942,6 +975,17 @@
       "seconds": 50.0,
       "fps": 20,
       "ms": 6.0,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "muni",
+      "module": "muni",
+      "seconds": 40.0,
+      "fps": 20,
+      "ms": 7.0,
       "enabled": true,
       "solo": false,
       "options": {}

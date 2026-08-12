@@ -6265,6 +6265,467 @@ $ python3 scripts/test-solarwind.py               # 51 checks, incl. the Shue fi
 ```
 
 
+### solar
+
+![solar](screenshots/solar.png)
+
+Will our own website survive the night? sequoia.garden is Sequoia Fabrica's
+website — this makerspace's website, on a machine in this building, on a 12 V
+battery behind a solar panel — and its front page says so itself: *"This is a
+solar powered website. It may go offline!"* Nothing else on this wall is ours in
+that way. `sfmix` and `bgp` are infrastructure we happen to sit near, `caiso` is
+the whole state's grid seen from orbit; this is one battery, one panel, one
+small computer, and it can actually lose. The panel draws its last twenty-four
+hours as a landscape: terrain that rises and falls with the battery voltage, a
+sky lit by the sun and glowing where charge actually went in, a cursor at the
+present moment, and a battery in the right-hand margin with the state of charge
+in it.
+
+**One column per five minutes, and every other decision falls out of that.**
+The endpoint publishes `sparklines`: seven parallel arrays of 288 buckets, with
+`sparkline_meta` giving `bucket_ms` 300000 and `window_ms` 86400000 — exactly
+one day at five-minute resolution. The panel is 320 columns wide. 288 of them
+are the day at native resolution with no resampling, no interpolation and no
+decimation, and the remaining 32 are the readout. It is the rare case where the
+source and the display already agree about how wide a moment is, and the whole
+design is just refusing to spoil that.
+
+**x is time of day, not "the last twenty-four hours".** Those are the same 288
+buckets either way, but binning them by *local time of day* rather than by age
+nails dawn and dusk to fixed columns — midnight at the left edge, noon at column
+144, midnight again at the right — so the lit band sits in the middle of the
+panel every single day and the overnight trough is always the two dark ends.
+Somebody who walks past this wall twice a week is then looking at the same
+picture, differently lit, which is worth a great deal more than an axis whose
+landmarks slide a column every five minutes. The cost is that the columns to
+the right of the cursor are *yesterday's* tail rather than empty space. They
+are drawn at six tenths brightness to say so — and six tenths is the second
+number that went there. The first was a third, which looked correct in the
+abstract and was wrong in practice: at nine in the morning, when a makerspace
+fills up, the cursor is a third of the way across and *the entire solar event is
+on the yesterday side*, so a third threw away the best part of the picture for
+most of the hours anybody is standing in front of it.
+
+**The battery turned out not to be the interesting variable, and finding that
+out changed the panel.** The bank sits at 99.7–100 % state of charge essentially
+all summer; a "battery fills and drains" chart of that is a flat line and there
+is no picture in it. What is *not* flat is the terminal voltage: it sags all
+night to about 13.24, lifts at first light, spikes to the charge controller's
+absorb voltage — 14.32 V was observed at noon in August — and decays through the
+afternoon. So the terrain is voltage, scaled to the day's own range with a floor
+under the span so that a becalmed day is not amplified into a mountain range out
+of sensor noise. The needle at midday is real and it is that sharp: it is the
+controller hitting its absorb limit for two buckets and then backing off.
+
+**The sky is two different things at once, and the gap between them is the
+point.** Its blue comes from the *computed* solar elevation for this latitude
+and this date — astronomy, what light was theoretically available — mixed
+between a night gradient and a day gradient over the first twelve degrees of
+elevation. The warm glow hugging the ridge comes from the *measured* charge
+current, which runs 5–15 mA in the dark and past 300 mA at solar noon, and it
+falls off exponentially above each column's own terrain so it moves up and down
+with the hill under it. On a clear day the two agree and there is a white-hot
+band over the hill at midday. On a foggy San Francisco week the sky is bright
+blue and the ridge stays dark, and that difference — *the sun was up, and we got
+nothing* — is the case this whole panel exists to be ready for. Both gradients
+are darkest at the top, which is also how a real sky works and, more usefully,
+means the header type sits on the deepest colour on the panel at every hour.
+
+**Three states, because the demo is about fragility.** Fresh and full is serene,
+and it is most of the time; that is allowed to be the boring case. Draining
+tenses up — the ridge goes amber and then red, the ground turns from garden
+green to something dry, and the state of charge blinks once it is under the
+reserve mark drawn dashed across the battery. That mark is the reason the case
+is worth 44 rows: without it the empty space above the level is just dark.
+Silent is the funny one. If the record has aged past three TTLs — ninety minutes
+of nobody answering — the panel stops pretending, dims the last day it *did* see
+to two fifths as a ghost behind the words, and prints `NO ANSWER`,
+`SEQUOIA.GARDEN LAST SPOKE 3H AGO` and `IT DID SAY IT MIGHT`. It does not claim
+the site is down, because from the wall a dead server and a dead fetcher are
+identical silences; it quotes the site's own warning back at it, which is true
+either way. The site's separate `data_stale` flag — the web server answering
+while the battery monitor behind it has gone quiet — is a different failure and
+reads `QUIET` on a panel that still draws.
+
+**Politeness is a design constraint here, which is new.** The fetch interval is
+fifteen minutes, deliberately slower than the five-minute publication cadence,
+because every request costs *that* battery a little radio and a little CPU and
+it is the battery on the panel. Three extra columns at the right-hand edge are
+not worth it from three metres away. The server is also, unsurprisingly,
+sometimes slow to answer, so the timeout is thirty seconds and a failure simply
+leaves the last record in place with an honest age on it. About 6 kB lands in
+the cache: three of the seven published series rounded to the precision that
+survives being drawn on a 64 row panel, plus a dozen scalars. `powerUsage` is
+reconstructible from the other two and goes; `load_W`, `p_in_W` and
+`powerUsage` all read exactly 0 for long stretches while the current is plainly
+nonzero, so none of the three is trusted for anything the panel prints.
+
+**Frame budget.** Everything is baked in `build()` — the sky field, the terrain,
+the stars, the battery and every string — including both degraded cards, which
+in an earlier draft re-rasterised three strings every frame and cost five times
+what the panel with data on it cost. `render()` does one full-frame copy, two
+ops for a sweep that only touches the ground, and writes a handful of short
+columns: seven or eight numpy calls, none of them scaling with anything a knob
+controls. Measured over 1500 frames: **mean 0.021 ms, p95 0.030 ms**, worst
+frame 0.35 ms; the silent card is 0.014 ms and the no-data card 0.002 ms.
+`build()` is about 3 ms, most of it a Python loop over 288 buckets doing a
+`localtime()` and a solar-elevation series apiece — call it a third of a second
+on the Pi, once, on the worker thread.
+
+The one thing worth knowing about the sweep is why it is masked to the ground.
+`caiso` lifts everything lit towards white and that works because its panel is
+mostly black. This one has a lit sky across most of its width, and an unmasked
+sweep was a travelling white bar. Baking the delta as zero everywhere except
+the terrain costs nothing per frame and fixes it.
+
+```console
+$ python3 ftdata.py --once --only solar-garden
+$ python3 solar.py --host 127.0.0.1
+$ python3 solar.py --soc 24            # a foggy week, simulated — stamps SIM
+$ python3 solar.py --off               # the website is not answering
+$ python3 solar.py --quiet-sensor      # the site answers, its monitor does not
+$ FT_DATA_CACHE=/tmp/empty python3 solar.py
+$ python3 scripts/test-solar.py
+```
+
+### muni
+
+![muni](screenshots/muni.png)
+
+The 19, 22 and 55 — the three buses the makerspace wiki names as ours —
+approaching our own front door, drawn against the walk you still have to do to
+meet them. It answers one question, the one somebody walking past the wall
+actually has: **do I need to leave now?**
+
+That question has two halves and every departure board in the world shows one
+of them. "22 in 4 minutes" is useless on its own, because the 22's stop is
+413 m away and that is seven minutes of Potrero Hill. The bus is not early; you
+are late. So the panel draws the other half **on the same axis, to the same
+scale**. The left edge is the door. Rightwards is twenty minutes of time, and
+because you walk at a roughly constant speed, rightwards is also distance — one
+pixel is about four seconds either way. The dotted stretch running out of the
+door is the walk to that route's stop, ending in a post. Buses slide left along
+the street and reach the post at the moment they reach the stop.
+
+Everything then reads without a legend, because the geometry *is* the answer.
+You leave the door and walk right; the bus comes left. **While a bus is still
+right of the post you can make it. Once it is inside the dotted stretch it is
+gone** — it will reach the stop before you can — and it goes grey to say so.
+The number printed just inside the door is minutes until you have to start
+walking, and NOW means put your shoes on.
+
+**Putting the walk and the bus on one axis instead of two is the one choice
+everything else falls out of.** The posts land in different places by
+themselves: the 19's stop is 140 m away so its post is close to the door, the
+55's is 187 m, and the 22's is a third of the way across the panel. That
+staircase of posts is the panel's real content — three routes that a timetable
+would list as equivalent are visibly not, and the frequent 22 is frequently the
+one you cannot reach. It is also why this is not a departure board and not a
+map: the only distance plotted is the distance *you* have to cover.
+
+Deliberately not a fourth dot-on-a-map, and deliberately not `stringline`,
+which is the nearest neighbour and also has time on one axis and distance on
+the other. A stringline is about the trains — their speed, their headway, where
+they pass each other — and carries no map on purpose. This is about the viewer,
+and the buses get exactly as much detail as it takes to say whether you have
+missed one.
+
+**The bar under the street is lateness, drawn to that same scale.** 511 hands
+back both what the timetable promised (`AimedArrivalTime`) and what is going to
+happen (`ExpectedArrivalTime`), so the gap between them is a *length* on this
+axis rather than a number to read: a faint dotted rule from the bus back to a
+bright cap at the time it was due. Warm and trailing left means running late.
+Cool and reaching right means running early, which sounds harmless and is not —
+an early 22 is a 22 you will miss. On the morning in the screenshot the 22 was
+running four minutes early and the 55 four minutes late, both visible at a
+glance, and no other panel on this wall has that number at all.
+
+**It says what it is.** The header goes green and says LIVE when it is drawing
+511 predictions of tracked vehicles. When 511 marks a visit `Monitored: false`
+it is quoting its own timetable back rather than watching a bus, and that bus
+is drawn as a hollow outline instead of a solid, so a scheduled bus never wears
+a tracked one's clothes. With no key, no fetch, or a record past its TTL, the
+whole panel falls back to SFMTA's published timetable, the header turns amber
+and says SCHEDULE, and every bus on it is hollow — which is the honest picture
+and, pleasingly, came for free from the same rule.
+
+**Two products, because the two questions are different.** `muni-18th` is
+SFMTA's static GTFS off San Francisco's open data portal, keyless, fetched
+daily, and it supplies the *geometry*: which stop is nearest for each route in
+each direction, how far it is, how long that is to walk, and the fallback
+timetable. `muni-live` is 511.org SIRI StopMonitoring and supplies the
+*predictions*; it needs a free token in `$FT_511_KEY` and there is no default,
+so a checkout that has never heard of one still draws a real panel.
+
+**The stops are derived, not listed, and that matters more than it sounds.**
+The fetcher takes every stop within 800 m of `ftsite.LAT`/`LON` and keeps the
+nearest one *per route per direction*. The obvious alternative — nearest N
+stops, or a quarter-mile radius — finds four stops of the 19 and 55 within
+250 m and never reaches the 22 at all, and then draws a confident panel naming
+three routes and showing two. A script already running on the Pi had exactly
+that bug. `scripts/test-muni.py` asserts all three route numbers are present in
+both directions, against the real fetched record.
+
+**The rate limit is the design.** 511 allows sixty requests an hour per key and
+StopMonitoring filters to exactly one stop per request — a comma-separated pair
+returns zero visits, not two stops. Six stops is therefore six requests a pass,
+and fifteen minutes between passes is 24 an hour, which leaves most of the key
+for whatever else the space points at 511 later. Unfiltered the same endpoint
+returns 35,573 visits, 32 MB decoded, which is sixty times this whole cache;
+the filter is not an optimisation. Fifteen-minute-old predictions sound fatal
+for a panel about the next four minutes and are not, because what is cached is
+**absolute arrival timestamps**: 17:34:54 is still 17:34:54 a quarter of an
+hour later, and the countdown on the wall is recomputed every frame. What ages
+is the revision, not the clock, and the header carries the age when it matters.
+
+```console
+$ python3 ftdata.py --once --only muni-18th          # geometry + timetable
+$ FT_511_KEY=... python3 ftdata.py --once --only muni-live
+$ python3 muni.py --now 1786556684                   # pin the clock
+$ python3 muni.py --source schedule                  # ignore 511, draw the timetable
+$ python3 muni.py --horizon 30                       # half an hour of street
+$ python3 scripts/test-muni.py --cache-dir ~/.cache/ftdata
+```
+
+Two things were harder than expected. The response from 511 is gzipped whether
+or not you ask and carries a UTF-8 byte order mark, so the naive read dies on
+byte one with a `UnicodeDecodeError` that says nothing useful. And 16th &
+Wisconsin is the 22's stop *and* a 55 stop, so its record carries both lines —
+but the 55 has its own stop 200 m closer, and a Wisconsin 55 drawn in the 55's
+lane would sit at completely the wrong walk distance. Folding the 55 onto the
+22's stop would have saved two requests a pass and was not done for the same
+reason: the walk is the one thing this panel exists to get right.
+
+It is a **wall-clock** panel — it reads `time.time()` once in `build()` and
+every frame is a pure function of `t` from there, so segments animate and
+previews bake reproducibly. `--now` pins that moment, which is how the tests
+and the screenshot above get a fixed picture.
+
+### pipes
+
+![pipes](screenshots/pipes.png)
+
+The Windows 3D Pipes screensaver. Pipes grow through an invisible lattice,
+turning at right angles, joined by a gleaming ball at every elbow; when the
+volume is full enough the panel holds for a beat, an eraser bar sweeps it black,
+and a new run starts in a new colour scheme. The wall already has the bouncing
+logo (`dvd`) and the flying toasters (`toasters`); this is the third pillar of
+the genre and the only one of the three with *depth*.
+
+The representation is **a self-avoiding walk on an integer lattice, flattened
+into a list of primitives with timestamps**. The head sits in a cell, picks a
+direction, runs a few cells, turns ninety degrees, repeats, and never revisits
+an occupied cell; a pipe that paints itself into a corner dies and another is
+born somewhere else, which is the original's behaviour and most of its
+character. That leaves exactly two things to draw — a straight *run* between two
+lattice nodes and a *joint* ball at each turn — and everything else is
+bookkeeping. `build()` walks the whole lattice for each of the three schemes up
+front and emits `(kind, p0, p1, colour, t0, t1)` in view-space coordinates,
+sorted by finish time; `render(t)` only reveals more of a list that already
+exists. That is what makes it a pure function of `t`, and it is also why the
+walk can be *guaranteed* to fill the panel nicely rather than hoped to.
+
+**There is no mesh and no triangle anywhere.** A run is rasterised as a
+screen-space capsule: over the segment's bounding tile, `perp` is the signed
+perpendicular distance to the projected axis and `u = perp / radius` runs −1..1
+across the tube. Everything falls out of `u` alone — `w = sqrt(1 − u²)` is the
+component facing the viewer, the depth is the axis depth minus `w·R`, and the
+surface normal is `u·p + w·v` for the segment's screen perpendicular `p` and the
+view direction `v`. A ball is the same idea in two dimensions. That is what
+makes the chrome affordable: both the Lambert term and the tight specular are a
+function of `u` and of the *angle the segment makes on screen* and nothing else,
+so both are baked in `build()` into a table indexed by `[colour][angle
+bin][u bin]`, and a frame does one `np.take` where it would otherwise do a dozen
+vector operations per pixel. The highlight running down the length of a tube —
+the whole reason chrome reads as chrome — costs one lookup. Balls get a 2D table
+of the same kind indexed by `(nx, ny)`, plus a matching table of the bulge
+towards the viewer that doubles as the coverage mask.
+
+Occlusion is the point, so there is a real **z-buffer**: a float depth per panel
+pixel, tested per fragment. Pipes crossing in front of one another is most of
+what makes a flat panel read as a volume, and no amount of shading substitutes
+for it. `scripts/test-pipes.py` asserts it the only way that means anything:
+draw the same finished lattice with the primitives shuffled and require
+essentially the same pixels back. A z-buffered scene is order independent; a
+painter's-algorithm scene is not, and it is otherwise a bug that produces a
+perfectly attractive picture.
+
+**Perspective, not isometric, and for a specific reason.** Isometric is cheaper
+and was tried first. It fails here because every tube is the same width at every
+depth, so two tubes crossing are distinguished *only* by which occludes the
+other, and at 64 rows that is a one-pixel cue. A mild perspective — the far
+plane one and a half times the distance of the near one — makes near tubes
+visibly fatter (6.2 px against 4.1) and, with a little depth fog, brighter. That
+is a second and a third depth cue that survive being seen at an angle from three
+metres, and the frustum costs one divide per lattice node at build time. The
+camera is also yawed 15° and pitched 9°, because with the lattice axes exactly
+on the screen axes the whole thing reads as a flat maze.
+
+The lattice is 20 × 4 × 9 cells, which is deliberately not a cube: the panel is
+a 5:1 letterbox and a wide, shallow, *short* volume fills it. The focal length
+and screen centre are **solved** in `build()` by projecting all 720 nodes rather
+than hardcoded, then over-scanned 14% so the near layer runs off the edges the
+way it does in the original — which also means changing an angle cannot silently
+push half the volume off the panel.
+
+**The interesting problem was that cost scales with how much pipe is on screen,
+and `render` may not accumulate.** A frame must not redraw the couple of hundred
+primitives already there, but a persistent frame buffer is accumulated state.
+The resolution is the one `plotter` uses: the buffer is a pure function of one
+integer. `world(i)` is "every primitive with index < i, rasterised into colour
+and depth", *memoised* rather than accumulated; a frame asking for a larger `i`
+draws the difference, and one asking for a smaller — a cold start, a loop wrap,
+a preview baker's rewind — restores from the nearest snapshot below it and walks
+forward. Snapshots are taken every 32 primitives as the cache sweeps past them,
+so they cost memory (about 140 kB each, five per run) and no work. Because the
+z-test is a strict `<` and primitives are always applied in increasing index
+order, restore-and-walk-forward is *bit identical* to walk-from-zero, which is
+why the purity assertion compares with `array_equal` and passes rather than
+nearly passing. The growing tips never enter the buffer at all: they are drawn
+into a scratch copy each frame, so a pipe advances smoothly instead of a cell at
+a time.
+
+So a frame is two panel copies plus one capsule per growing tip, flat from the
+first frame of a run to the last: **0.14 ms mean, 0.22 p95, 0.54 max** on a
+desktop, and close to linear in `--pipes` (1 → 0.06, 2 → 0.12, 3 → 0.17, 4 →
+0.20 ms while growing). `--pipes` is the knob if the wall wants it cheaper, but
+it is also a pacing knob — two pipes take half again as long to fill the same
+lattice, so `--pipes 2 --fill 0.22` is the pairing that keeps the cycle the same
+length.
+
+**The teapot is in.** The original famously spawns a chrome Utah teapot instead
+of an elbow once in a while, and it is the best easter egg available — but a
+sprite of one cannot be scaled to whatever depth it lands at without falling
+apart, and a fixed-size sprite in a scene with perspective reads as a decal. So
+the teapot is *modelled*, in the only two shapes this renderer knows: a fat ball
+for the body, a small one for the knob, a squat capsule for the lid, a tapered
+one for the spout and a four-piece loop for the handle. Eight draws, in the
+pipe's own colour, into the same z-buffer, and it shrinks with distance for
+free. It lands about 31 × 20 px against a 6 px tube. Honestly: at three metres it
+reads as *something that is not a pipe*, and it resolves into a teapot when you
+look at it — which is roughly the right amount of easter egg. It is placed in
+the second half of the sequence and the nearer half of the volume, because a
+teapot drawn early and far is a teapot buried behind forty pipes; even so, one
+run in three puts it somewhere it is half hidden, and that is the walk's luck
+rather than a bug. `--teapot 0` turns it off.
+
+Two things worth recording. The live growing tips were first found by scanning a
+small window forward from the finished index, which looks safe and is not: the
+list is ordered by *finish* time, so a pipe part way through a six-cell run can
+sit sixteen entries behind three other pipes turning every cell, and it stalls
+for a second at a time. It is now a vectorised test over the whole list — six
+numpy calls on a 170-element array, which is nothing — and the test asserts that
+the window would have been too small. And the eraser first reached the right
+edge exactly at the end of the cycle, so the panel cut from a half-erased frame
+straight into the next run; the bar now clears four fifths of the way through
+the wipe, leaving a third of a second of black, and that beat is what makes the
+clear read as a decision rather than a dropped frame.
+
+Roughly 35 s per cycle at the defaults — 30 s of growth, 3.5 s held, 1.6 s of
+wipe — so one rotation slot is about one complete run. 20 fps.
+
+```console
+$ python3 pipes.py --scheme enamel --pipes 2 --fill 0.22
+$ python3 pipes.py --fill 0.5 --speed 4          # spaghetti, quickly
+$ python3 pipes.py --yaw 0 --pitch 0             # why the camera is turned
+$ python3 scripts/test-pipes.py --bench
+```
+
+### crash
+
+![crash](screenshots/crash.png)
+
+A gallery of famous computer deaths. Five screens a generation learned to
+dread, each held for eight and a half seconds and captioned like an exhibit:
+the C64's `?SYNTAX ERROR`, the Sad Mac, the Amiga's Guru Meditation, a Windows
+blue screen and a Linux kernel panic. The whole loop is 42.8 seconds, which is
+one slot, and it is chronological — 1982, 1984, 1985, 2001, 2020.
+
+**The museum label along the bottom is the safety catch, not decoration.** A
+convincing blue screen on a wall in a public workshop makes somebody think the
+wall has crashed and go looking for whoever runs it. That reaction is half the
+joke and it is also a support call. So the bottom eight rows are a plinth: a
+hairline rule, near-black, and a caption in a bone colour that belongs to no
+specimen — `AMIGA OS 1.3 - GURU MEDITATION, 1985` on the left, `3/5` on the
+right — in the same place, in the same face, in every single frame of the loop.
+It reads in well under two seconds and it turns the panel from a prank into a
+small history exhibit, which is a much better fit for a makerspace than a
+prank is. Two more tells come free: the screens visibly change every few
+seconds, and a real crash does not become a different crash later; and the
+plinth reads as a matte around an object. Of the three the caption is the one
+doing the work, and `scripts/test-crash.py` asserts it by reading the words
+back off all 855 frames of the loop, because it is the one property here that
+is a safety property rather than a taste one.
+
+**Each specimen is rendered at its native column count, and the column count
+picks the font.** That one decision settles every layout question in the file.
+A C64 is a 40-column machine, so it gets an 8x8 cell — 320 divides by 8 exactly
+— and those chunky glyphs are the whole reason anyone recognises it; four
+pixels of border each side buys the two-tone frame that makes it a C64 rather
+than a blue rectangle, at the cost of one column nobody has ever counted.
+Everything else is an 80-column screen and gets a 4 px cell, 78 columns inside
+a margin, which is the *same proportion* a 640-wide Amiga or VGA screen gives
+80 columns of 8x8 text. That is why the guru box comes out occupying about the
+fraction of the width it really did rather than being eyeballed, and why
+`*** STOP: 0x000000D1 (0x0000002C,0x00000002,...)` fits on one line, as it must
+— that line is the icon of the blue screen and breaking it would be wrong.
+
+**Both fonts are bitmaps written out in the file, not TrueType.** The Pi does
+not have the faces this was written on, a fallback face is a different metric,
+and at six pixels of cap height an antialiased edge is a smudge. More to the
+point, DejaVu Sans Mono at 8 px is not a C64 and no thresholding makes it one.
+The 8x8 set is the Commodore ROM shape; the 4 px set is a 3x5 body with real
+ascenders and a descender row, because a blue screen set in small capitals is
+instantly wrong and the ragged rhythm of mixed case is most of what makes a
+wall of 3-pixel-wide text read as English. Every glyph is checked for being
+non-empty, for fitting its cell and for being distinct from every other glyph:
+a hand-typed hex table's characteristic failure is a typo that silently
+duplicates a shape you already have, and eyeballing does not catch it. It
+caught `~` and `-`.
+
+**Colours are looked up, and asserted.** VIC-II blue is 0x352879 and light blue
+0x6C5EB5 (Pepto's measurements off a real 6569, which is what every emulator
+ships). The blue screen ground is VGA attribute 1, 0x0000AA, with attribute 15
+white text. The Linux console is VGA attribute 7, 0xAAAAAA — grey, *not* white,
+and drawing a panic in white is the commonest mistake in a recreation because
+it makes it look like a blue screen that lost its background. The guru is pure
+red on black. Getting one of these wrong is the most visible possible failure
+for this demo, so the test asserts each against its documented value and
+against how much of its panel it covers.
+
+**Only two things move.** The guru's border flashes and the C64's cursor blinks
+— a third of a second on, a third off, which is a 60 Hz jiffy counter toggling
+every twenty frames. Everything else is dead still, because these screens are
+static by nature and the stillness is what makes them read as death rather than
+as a screensaver. Between specimens the picture collapses to a bright line and
+the next opens back out of it over half a second. The collapse needed an
+*additive* white term as well as a gain: the Sad Mac's centre row is black, so
+brightening alone collapsed it to nothing and the cut read as a dropped frame
+rather than as a CRT.
+
+Everything is baked in `build()` as complete 64x320 frames, blink variants
+included, so a held frame is one memcpy — 0.002 ms/frame measured, 0.035 ms
+through a collapse, which is the cheapest thing in the show by a wide margin.
+The cost is 430 KB of baked frames, which is the right way round on a machine
+where an operation costs more than a page of pixels. Nothing reads the clock;
+the order and every hex code come from `--seed`.
+
+Two things it does not do. The Sad Mac had a chime — four notes of doom on the
+Mac II — and the wall has no speakers, so that half of it is simply missing.
+And DOS's `Abort, Retry, Fail?` was cut: grey text on black is the kernel
+panic's territory already, and five specimens rendered well beat six rendered
+approximately. One honest uncertainty: the C64 error is printed here as
+`?SYNTAX ERROR` with one space, which is what the ROM's message-plus-` ERROR`
+concatenation gives; the two-space form is widely reproduced and may be what
+you remember.
+
+```console
+$ python3 crash.py --only guru --hold 30      # sit on one specimen
+$ python3 crash.py --shuffle --seed 7         # a different exhibition
+$ python3 crash.py --hold 4 --gap 0.2         # the whole gallery in a slot
+```
+
+
 ## Group buttons
 
 Sixty-three cards is a lot of switches. The thing people actually want from the
