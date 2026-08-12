@@ -78,3 +78,24 @@ $ python3 fine.py --cycle 30 --scroll 26
 $ python3 fine.py --no-text --stages 40      # just the room, smoother light
 $ python3 scripts/test-fine.py
 ```
+
+**The line is dialogue, so it is drawn as dialogue.** The first cut set the
+punchline as centred white type across the top of the panel with a one-pixel
+halo around every glyph, and it read as a caption laid over the scene -- the
+wall announcing the joke rather than the dog saying it. It is now a speech
+bubble: dark ink on a light rounded ground, with a tail that points at him.
+That also fixes the legibility problem more honestly than the halo did. By the
+time the line appears the room is entirely orange, and white type on orange
+needed an outline traced around every letter to survive; a light bubble gives
+the type its own ground, so the contrast comes from an object in the scene
+rather than from a per-glyph trick.
+
+The bubble is sized from the measured glyph mask rather than a fixed box, so
+`--text` and `--text-scale` grow it instead of overrunning it. Placement aims
+the *tail's tip* rather than the box, which is what puts the bubble over his
+shoulder; and when the text is large enough that the bubble will not fit above
+his head, it moves alongside him instead, because the one thing it must never
+do is overlap the dog. `bubble_layout()` is module scope so the test checks the
+drawn bubble against the same geometry the demo draws from -- the banner's
+placement formula had been copied into the test, which is the arrangement that
+lets a demo and its test drift apart while both stay green.
