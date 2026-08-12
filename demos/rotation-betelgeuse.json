@@ -17,10 +17,12 @@
       "module": "plotter",
       "seconds": 40.0,
       "fps": 20,
-      "ms": 6.0,
+      "ms": 13.1,
       "enabled": true,
       "solo": false,
-      "options": {}
+      "options": {
+        "speed": 120
+      }
     },
     {
       "kind": "py",
@@ -206,7 +208,7 @@
       "module": "dither",
       "seconds": 29.0,
       "fps": 20,
-      "ms": 0.5,
+      "ms": 0.1,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -318,7 +320,7 @@
       "module": "dvd",
       "seconds": 40.0,
       "fps": 20,
-      "ms": 1.0,
+      "ms": 0.9,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -467,7 +469,7 @@
       "module": "riso",
       "seconds": 34.0,
       "fps": 20,
-      "ms": 2.0,
+      "ms": 2.5,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -548,7 +550,7 @@
       "module": "wiki",
       "seconds": 40.0,
       "fps": 20,
-      "ms": 0.3,
+      "ms": 0.1,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -677,7 +679,7 @@
       "module": "fine",
       "seconds": 46.0,
       "fps": 20,
-      "ms": 6.0,
+      "ms": 6.3,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -751,7 +753,7 @@
       "module": "solarwind",
       "seconds": 35.0,
       "fps": 20,
-      "ms": 3.5,
+      "ms": 3.8,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -939,7 +941,7 @@
       "module": "cnc",
       "seconds": 50.0,
       "fps": 20,
-      "ms": 5.0,
+      "ms": 6.0,
       "enabled": true,
       "solo": false,
       "options": {}
