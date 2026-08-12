@@ -27,7 +27,10 @@ none of them look wrong on the wall:
 
 Two things about how these run, both learned the hard way in this tree. The
 demo is a **wall-clock** panel, so every check pins `--now`; without that the
-answers change between one run and the next. And `ftdata.CACHE_DIR` binds at
+answers change between one run and the next. Pinning `--now` is not enough on
+its own, though: a record's *age* is measured against the real clock inside
+`ftdata.load()`, so the fixture's `fetched_at` is written from `time.time()`
+and not from the pinned moment -- see `synthetic()`. And `ftdata.CACHE_DIR` binds at
 import, so the three data states -- fresh, stale, absent -- are each run in a
 **separate process** with FT_DATA_CACHE set, at the bottom of this file.
 Reloading the module in one process does not test what it looks like it tests.
@@ -96,8 +99,24 @@ METRES = {"19": 140, "22": 413, "55": 200}
 
 def synthetic(cache_dir, now=NOW, live=True, fetched_ago=60.0,
               live_ago=60.0, expired=False):
-    """Write a muni-18th (and optionally muni-live) record into `cache_dir`."""
+    """Write a muni-18th (and optionally muni-live) record into `cache_dir`.
+
+    Two clocks are in play here and they are not the same clock.
+
+    The *panel* clock is pinned: `now` decides where the buses are drawn, and
+    every expected column below is a constant derived from it. But the
+    *freshness* clock is not ours to pin -- `ftdata.load()` reports a record's
+    age as `time.time() - fetched_at`, against the real wall clock, and
+    `muni.build()` drops a live record past its TTL and falls back to the
+    timetable. So `fetched_ago` is measured from the real clock, never from
+    `now`. Writing `fetched_at = now - 60` instead gives a fixture whose
+    freshness decays as the real clock walks away from the pinned `NOW`: the
+    suite passed for the first half hour after `NOW` and then, silently,
+    started rendering the schedule fallback and failing fifteen position and
+    colour checks that had nothing to do with position or colour.
+    """
     os.makedirs(cache_dir, exist_ok=True)
+    real = time.time()
     today = time.strftime("%Y%m%d", time.localtime(now))
     dates = [time.strftime("%Y%m%d", time.localtime(now + d * 86400.0))
              for d in (-1, 0, 1)]
@@ -125,7 +144,7 @@ def synthetic(cache_dir, now=NOW, live=True, fetched_ago=60.0,
         "schema": 1, "feed_version": "TEST", "feed_start": dates[0],
         "feed_end": dates[-1], "services": services, "stops": stops,
         "routes": ["19", "22", "55"], "walk_mps": 1.25, "walk_detour": 1.3,
-    }, now - fetched_ago, ftdata.ttl_for("muni-18th"))
+    }, real - fetched_ago, ftdata.ttl_for("muni-18th"))
     del midnight
 
     if not live:
@@ -167,7 +186,7 @@ def synthetic(cache_dir, now=NOW, live=True, fetched_ago=60.0,
     _write(cache_dir, "muni-live", {
         "schema": 1, "t": int(now), "agency": "SF", "stops": live_stops,
         "n_stops": 6, "n_asked": 6, "errors": [], "rate_limited": None,
-    }, now - live_ago, ftdata.ttl_for("muni-live"))
+    }, real - live_ago, ftdata.ttl_for("muni-live"))
 
 
 def _write(cache_dir, name, payload, fetched_at, ttl):
@@ -207,6 +226,35 @@ def is_missed(band, x):
 
 
 # --------------------------------------------------------------------------
+
+def test_fixture_is_live():
+    """The fixture must read as fresh, or every check below it means nothing.
+
+    Almost everything this file asserts -- bus columns, the greying either side
+    of the post, hollowness, the lateness mark, the margin text -- is asserted
+    against the *live* record. `build()` drops a live record past its TTL and
+    draws the timetable instead, which is correct behaviour and a disaster for
+    a test: the panel still renders, still looks right, and fifteen checks fail
+    describing pixels without once mentioning freshness. This check exists so
+    that that failure has a name.
+    """
+    with tempfile.TemporaryDirectory() as cache:
+        synthetic(cache)
+        got = ftdata.load("muni-live", cache)
+        fresh = got is not None and ftdata.is_fresh("muni-live", got[1])
+        check("the synthetic live record reads as fresh", fresh,
+              "age %ds vs ttl %s" % (int(got[1]) if got else -1,
+                                     ftdata.ttl_for("muni-live")))
+        # And in pixels: `auto` must land on the same frame as forcing `live`,
+        # and a different one from the timetable. Forcing `live` uses the
+        # record whether or not it is believed, so the two agreeing is exactly
+        # the statement that the record was believed.
+        auto = muni.build(opts(cache_dir=cache))(0.0, 0)
+        forced = muni.build(opts(cache_dir=cache, source="live"))(0.0, 0)
+        sched = muni.build(opts(cache_dir=cache, source="schedule"))(0.0, 0)
+        check("auto draws the live record, not the timetable",
+              np.array_equal(auto, forced) and not np.array_equal(auto, sched))
+
 
 def test_routes_present():
     """All three routes, both directions. The 22 is the one that goes missing."""
@@ -628,6 +676,7 @@ def main():
 
     test_fetcher_helpers()
     test_request_budget()
+    test_fixture_is_live()
     test_routes_present()
     test_posts_to_scale()
     test_catchable_boundary()
