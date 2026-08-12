@@ -13,6 +13,17 @@
     },
     {
       "kind": "py",
+      "name": "plotter",
+      "module": "plotter",
+      "seconds": 40.0,
+      "fps": 20,
+      "ms": 6.0,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "docks",
       "module": "docks",
       "seconds": 24.0,
@@ -191,6 +202,17 @@
     },
     {
       "kind": "py",
+      "name": "dither",
+      "module": "dither",
+      "seconds": 29.0,
+      "fps": 20,
+      "ms": 0.5,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "sort",
       "module": "sort",
       "seconds": 45.0,
@@ -286,6 +308,17 @@
       "seconds": 45.0,
       "fps": 20,
       "ms": 0.2,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "dvd",
+      "module": "dvd",
+      "seconds": 40.0,
+      "fps": 20,
+      "ms": 1.0,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -430,6 +463,17 @@
     },
     {
       "kind": "py",
+      "name": "riso",
+      "module": "riso",
+      "seconds": 34.0,
+      "fps": 20,
+      "ms": 2.0,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "sun",
       "module": "sun",
       "seconds": 30.0,
@@ -494,6 +538,17 @@
       "seconds": 45.0,
       "fps": 30,
       "ms": 19.8,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "wiki",
+      "module": "wiki",
+      "seconds": 40.0,
+      "fps": 20,
+      "ms": 0.3,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -618,6 +673,17 @@
     },
     {
       "kind": "py",
+      "name": "fine",
+      "module": "fine",
+      "seconds": 46.0,
+      "fps": 20,
+      "ms": 6.0,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "space-invaders",
       "module": "pixelart",
       "seconds": 30,
@@ -675,6 +741,17 @@
       "seconds": 45.0,
       "fps": 20,
       "ms": 37.9,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "solarwind",
+      "module": "solarwind",
+      "seconds": 35.0,
+      "fps": 20,
+      "ms": 3.5,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -852,6 +929,17 @@
       "seconds": 40.0,
       "fps": 20,
       "ms": 12.1,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "cnc",
+      "module": "cnc",
+      "seconds": 50.0,
+      "fps": 20,
+      "ms": 5.0,
       "enabled": true,
       "solo": false,
       "options": {}

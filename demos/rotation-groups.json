@@ -50,7 +50,10 @@
         "sun",
         "air",
         "wateryear",
-        "cityline"
+        "cityline",
+        "dither",
+        "wiki",
+        "solarwind"
       ]
     },
     {
@@ -87,7 +90,10 @@
         "splitflap",
         "scroller",
         "sf-tree",
-        "sf-tree-bounce"
+        "sf-tree-bounce",
+        "riso",
+        "cnc",
+        "plotter"
       ]
     },
     {
@@ -135,7 +141,10 @@
         "boing",
         "scroller",
         "fireworks",
-        "daliclock"
+        "daliclock",
+        "fine",
+        "dvd",
+        "dither"
       ]
     },
     {
