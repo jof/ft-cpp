@@ -17,7 +17,7 @@
       "module": "pipes",
       "seconds": 40.0,
       "fps": 20,
-      "ms": 7.0,
+      "ms": 10.1,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -480,7 +480,7 @@
       "module": "solar",
       "seconds": 35.0,
       "fps": 20,
-      "ms": 3.0,
+      "ms": 0.9,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -712,7 +712,7 @@
       "module": "crash",
       "seconds": 45.0,
       "fps": 20,
-      "ms": 1.0,
+      "ms": 0.3,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -985,7 +985,7 @@
       "module": "muni",
       "seconds": 40.0,
       "fps": 20,
-      "ms": 7.0,
+      "ms": 3.7,
       "enabled": true,
       "solo": false,
       "options": {}
