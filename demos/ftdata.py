@@ -7451,6 +7451,210 @@ def _sf311_day():
 
 
 # --------------------------------------------------------------------------
+# The makerspace's own web server, which runs on a solar panel and a battery
+# and says so on its front page. solar.py draws the last day of it.
+#
+# sequoia.garden is Sequoia Fabrica's website -- the makerspace this wall is
+# bolted to -- and it is the only thing on this wall that is *ours*. sfmix and
+# bgp are infrastructure we happen to sit near. This is a machine in the
+# building, on a 12 V battery, behind a solar panel, and the site's own front
+# page carries the sentence "This is a solar powered website. It may go
+# offline!". One keyless endpoint, no signup, about 20 kB:
+#
+#   https://sequoia.garden/api/stats.json
+#
+# **The representation gift is that its history is already the right shape.**
+# The response carries `sparklines`: seven parallel arrays of 288 five-minute
+# buckets covering exactly 24 hours, plus `sparkline_meta` giving `bucket_ms`
+# (300000) and `window_ms` (86400000). The panel is 320 columns. One bucket per
+# column, at native resolution, with no resampling and no interpolation -- and
+# because the buckets are aligned to whole multiples of 300 s epoch, and every
+# US Pacific offset is a whole number of hours, each bucket lands exactly on a
+# five-minute slot of the local day. x is simultaneously "the last 24 hours"
+# and "time of day", which is what lets solar.py fix dawn and dusk at constant
+# columns. Nothing here has to be resampled; the fetcher's only job is to throw
+# most of it away.
+#
+# **What is kept, and what surprised us.** Seven arrays go down to three:
+#
+#   * `voltage` -> `volt`. This is the interesting one and it was not the one
+#     expected. The battery bank is LiFePO4-ish and sits at 99.7-100 % state of
+#     charge essentially all the time in summer, so the *charge* series is a
+#     flat line and cannot carry a picture. The terminal voltage is not flat at
+#     all: it sags slowly all night to about 13.24, lifts at first light, spikes
+#     to the controller's absorb voltage (14.3 was observed at noon in August)
+#     and decays through the afternoon. That is a real, legible 24 hour curve,
+#     and it is what the panel draws as terrain.
+#   * `currentDraw` -> `cur_ma`, in milliamps, exactly as published. The name is
+#     misleading: its last element is always equal to the top-level `esp32_i_mA`
+#     and it tracks the *charge* side, running 5-15 mA at night and spiking past
+#     300 mA around solar noon. Whatever the shunt is actually measuring, it is
+#     near zero in the dark and large in the sun, which is the signal the panel
+#     lights its sky with.
+#   * `mainBattery` -> `soc`, percent, kept even though it barely moves, because
+#     the entire question the panel asks is whether it *will* move, and a foggy
+#     San Francisco week is the case worth being ready for.
+#
+# `powerUsage` is `voltage * currentDraw` and is reconstructible, so it goes.
+# `cpuTemp` and `cpuLoad` are kept only as the two current scalars. Note also
+# that `powerUsage`, `load_W` and `p_in_W` all read exactly 0 for long stretches
+# while the current is plainly nonzero -- there is a deadband or a sign
+# convention in the source that is not documented, so none of those three is
+# trusted for anything the panel prints.
+#
+# `data_stale` and `data_age_s` are the site's own admission that the ESP32
+# behind the numbers has stopped reporting, which is a different failure from
+# the site being down, and both are carried through so the demo can tell them
+# apart honestly.
+#
+# **The interval is set out of politeness, not out of caching.** Every fetch
+# costs somebody's battery a little bit of radio and a little bit of CPU, and
+# it is *this* battery, the one on the panel. 15 minutes is 96 requests a day
+# and about 2 MB. Fetching every 5 minutes to match the bucket size would treble
+# that to add three columns at the right-hand edge that nobody standing three
+# metres from an LED wall can resolve. The server is also, unsurprisingly,
+# sometimes slow to answer, so the timeout is generous and a failure simply
+# leaves the last record in place with an honest age on it.
+#
+# About 6 kB lands in the cache.
+# --------------------------------------------------------------------------
+
+SOLAR_URL = "https://sequoia.garden/api/stats.json"
+
+# Half an hour. The picture is a 24 hour landscape and it is still very nearly
+# the right landscape at 29 minutes old; what goes stale faster than that is the
+# present-tense claim -- "the site is up and this is its battery right now" --
+# and thirty minutes is where the demo has to stop making it.
+SOLAR_TTL = 1800
+
+# See the note above on politeness. Also: the site publishes on a five-minute
+# cadence, so anything under 300 s would return the identical document.
+SOLAR_INTERVAL = 900
+
+# It is on a battery at the end of a domestic link and it has been observed
+# taking several seconds to answer. Longer than the house default of 20 s,
+# because a timeout here throws away a whole fetch interval.
+SOLAR_TIMEOUT = 30
+
+# A hard cap on what is stored, independent of what arrives. 288 five-minute
+# buckets is 24 hours and is what the endpoint publishes today; if it ever
+# starts publishing a week at the same resolution, this record stays the size
+# it is and the panel keeps drawing the last day rather than quietly growing a
+# 60 kB record on the Pi's SD card.
+SOLAR_MAX_BUCKETS = 288
+
+
+def _solar_days(uptime):
+    """Whole days out of an uptime string like '190d 20h 5m'. None if absent.
+
+    The string is carried through verbatim as well -- it is what gets printed --
+    but the number is wanted separately so the demo can decide whether 190 days
+    is worth a line of its own without parsing anything at build time.
+    """
+    import re
+    m = re.match(r"\s*(\d+)\s*d", str(uptime or ""))
+    return int(m.group(1)) if m else None
+
+
+@product("solar-garden", ttl=SOLAR_TTL, interval=SOLAR_INTERVAL,
+         description="sequoia.garden's solar battery: 24h of volts, charge "
+                     "current and state of charge at 5 minute resolution")
+def _solar_garden():
+    """Last 24 hours of the makerspace website's own power supply.
+
+    Three of the seven published series, rounded to the precision that survives
+    being drawn on a 64 row panel, plus the dozen scalars the readout needs.
+    """
+    d = get_json(SOLAR_URL, timeout=SOLAR_TIMEOUT)
+    sl = d.get("sparklines") or {}
+    meta = d.get("sparkline_meta") or {}
+
+    stamps = list(sl.get("timestamps") or [])
+    if len(stamps) < 2:
+        raise ValueError("sequoia.garden returned %d sparkline buckets"
+                         % len(stamps))
+
+    # Keep the newest buckets if there are somehow more than a day of them.
+    if len(stamps) > SOLAR_MAX_BUCKETS:
+        stamps = stamps[-SOLAR_MAX_BUCKETS:]
+    keep = len(stamps)
+
+    def series(key, digits):
+        """The last `keep` values of one array, rounded. Missing -> None.
+
+        None rather than a substitute: a gap in the record is a gap in the day,
+        and the demo draws it as one. Interpolating here would invent a battery
+        voltage for a five minute window the sensor did not report, which is
+        precisely the kind of quiet fiction the cache is not allowed to hold.
+        """
+        vals = list(sl.get(key) or [])[-keep:]
+        vals += [None] * (keep - len(vals))
+        out = []
+        for v in vals:
+            try:
+                out.append(round(float(v), digits))
+            except (TypeError, ValueError):
+                out.append(None)
+        return out
+
+    # The bucket step, in seconds, from the source rather than assumed -- the
+    # whole one-column-per-bucket identity rests on it being 300.
+    step = float(meta.get("bucket_ms") or 300000) / 1000.0
+    t0 = float(stamps[0]) / 1000.0
+
+    def num(key):
+        try:
+            return float(d[key])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    avg = d.get("range_averages") or {}
+
+    def avg_of(key, digits):
+        try:
+            return round(float(avg[key]), digits)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    return {
+        # The series, chronological, one entry per `step` seconds from `t0`.
+        "t0": t0,
+        "step": step,
+        "n": keep,
+        "volt": series("voltage", 3),
+        "cur_ma": series("currentDraw", 1),
+        "soc": series("mainBattery", 2),
+
+        # The present moment, as the site itself reports it.
+        "soc_pct": num("soc_pct"),
+        "status": str(d.get("status") or ""),
+        "v": num("esp32_v_V"),
+        "i_ma": num("esp32_i_mA"),
+        "load_w": num("load_W"),
+        "p_in_w": num("p_in_W"),
+        "cpu_c": num("cpu_temp_c"),
+        "cpu_load": num("cpu_load_15min"),
+
+        # The site's own staleness flag: the web server answered, but the
+        # battery monitor behind it has not spoken in `sensor_age_s`. That is a
+        # different outage from the one where this fetch fails outright, and
+        # the panel says so differently.
+        "sensor_stale": bool(d.get("data_stale")),
+        "sensor_age_s": num("data_age_s"),
+
+        "uptime": str(d.get("uptime") or ""),
+        "up_days": _solar_days(d.get("uptime")),
+        "local_time": str(d.get("local_time") or ""),
+
+        "avg_volt": avg_of("voltage", 3),
+        "avg_cur_ma": avg_of("currentDraw", 1),
+        "avg_soc": avg_of("mainBattery", 2),
+
+        "site": "sequoia.garden",
+    }, SOLAR_URL
+
+
+# --------------------------------------------------------------------------
 # The San Francisco Metropolitan Internet Exchange: what is on its backbone
 # right now, and how much of it there is. sfmix.py draws the weathermap.
 #
