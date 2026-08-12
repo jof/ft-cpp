@@ -4,12 +4,18 @@
 This demo can draw a confident, pretty, wrong picture in several ways, and
 every one of them looks fine in a still:
 
-  1. **The ink can vanish mid-pass.** The sheet is two blits out of a baked
-     cumulative stack, split at the nip column. The split is `nip - x` in
-     sheet-local coordinates, and once the sheet's left edge is past the nip
-     that goes negative -- clipped to zero it blanks a sheet that has just
-     been printed. That is not a hypothetical; it is what the first version
-     did, and it looked like a perfectly good frame of a blank sheet.
+  1. **The wipe can be inverted, or vanish mid-pass.** The sheet is two blits
+     out of a baked cumulative stack, split at the nip column. Both failures
+     have actually shipped here. First the split was `nip - x` clipped at
+     zero, which blanked a sheet whose left edge had passed the nip. Then the
+     guard for that hid a worse bug: the two halves were the wrong way round,
+     so the sheet arrived already printed, *lost* the colour as it crossed the
+     drum, and the finished print popped in at the end. Both looked like
+     perfectly good stills. So the wipe is asserted as a moving spatial
+     boundary -- two ink states across the sheet, the seam pinned to the nip,
+     the seam sweeping leading-edge to trailing-edge, and no sheet-local
+     column ever losing ink -- and not merely as ink totals over time, which
+     is what let the inversion through.
   2. **The passes can go backwards.** cum[k] must be the sheet after exactly k
      passes. Off by one anywhere and the last colour never lands, or the
      finished print appears a pass early.
@@ -212,6 +218,162 @@ def test_cycle():
           "longest blank run %.1f s" % (max(_runlength(ink < 60)) / 20.0))
 
 
+# --------------------------------------------------------------------------
+# 4b. The wipe, as geometry rather than as a total.
+#
+# test_cycle() above compares whole-sheet ink counts between frames, and that
+# is not enough: a sheet drawn with the inked and un-inked halves swapped has
+# a perfectly plausible total on every frame. What actually has to hold is
+# spatial, so this drives the module with a stand-in artwork of two
+# full-coverage separations. Full coverage beats every screen threshold, so
+# every printed column of the sheet is one of exactly three flat colours --
+# paper, paper x ink0, paper x ink0 x ink1 -- and a column of the panel can be
+# classified into "how many passes have landed here" by colour alone. From
+# that, four assertions the earlier test could not make.
+# --------------------------------------------------------------------------
+
+def _probe_build(d=0.88, W=320, H=64):
+    """Build riso with two full-coverage separations, and the flat colours."""
+    saved = dict(riso.ARTWORKS)
+    try:
+        riso.ARTWORKS.clear()
+        riso.ARTWORKS["probe"] = lambda ah_, aw_, Y, X: [
+            np.ones((ah_, aw_), np.float32), np.ones((ah_, aw_), np.float32)]
+        r = build(art="probe", misreg=0, density=d, inks="yellow,blue",
+                  seed=1, width=W, height=H)
+    finally:
+        riso.ARTWORKS.clear()
+        riso.ARTWORKS.update(saved)
+    cur = np.array(riso.PAPER, np.float64)
+    states = [cur.copy()]
+    for key in ("yellow", "blue"):
+        ink = np.array(riso.hex_rgb(riso.INKS[key][0]), np.float64)
+        cur = cur * ((1 - d) + d * ink / 255.0)
+        states.append(cur.copy())
+    return r, states
+
+
+def test_wipe():
+    W, H = 320, 64
+    r, states = _probe_build(W=W, H=H)
+    # Geometry re-derived from the module's own formulas, the same way
+    # test_compose re-derives the multiply. The band is a few rows inside the
+    # printable area, where every sheet column is a single flat colour: the
+    # registration marks sit on the printable edges and the sheet's edge
+    # shading on its outermost row, and both are outside it.
+    nip = W // 2
+    y_sheet = int(round(H * 0.42))
+    y_deck = H - (7 if H >= 56 else 5)
+    band = slice(y_sheet + 5, y_deck - 5)
+    BG = np.array((13, 15, 20), np.int32)         # the machine interior
+
+    seen = {}                     # sheet-local column -> passes landed so far
+    seams = []                    # (frame, seam in sheet-local columns)
+    runs = []                     # contiguous stretches of two-state frames
+    mean_state = []
+    bad_two = bad_seam = bad_class = bad_mono = None
+    n_frames = 0
+
+    for i in range(20 * 60):
+        f = r(i / 20.0, i).astype(np.int32)
+        b = f[band]
+        # Classify every panel column by which cumulative state it shows.
+        # Nothing else on the panel is any of these three flat colours, so
+        # this locates the sheet as well as reading it. What it does not find
+        # is the sheet's outermost column at each end, which carries the edge
+        # shading, nor column `nip` when the ink-landing marker is painted
+        # over the sheet -- hence the +/- 1 and the allowance for one gap.
+        st = np.full(W, -1, np.int32)
+        for si, c in enumerate(states):
+            m = (np.abs(b - c.round().astype(np.int32)) <= 2).all(axis=2).all(axis=0)
+            st[m] = si
+        cols = np.flatnonzero(st >= 0)
+        if cols.size == 0 or cols[-1] + 1 >= W - 4:
+            break                      # the sheet is ejecting off the right
+        x0, x1 = int(cols[0]) - 1, int(cols[-1]) + 1
+        span = int(cols[-1] - cols[0]) + 1
+        gap_ok = (cols.size == span
+                  or (cols.size == span - 1 and cols[0] < nip < cols[-1]
+                      and st[nip] < 0))
+        if not gap_ok:
+            bad_class = bad_class or ("frame %d: the sheet is not one run of "
+                                      "columns (%d in a span of %d)"
+                                      % (i, cols.size, span))
+            break
+        n_frames = i + 1
+        inter = np.array([c for c in range(x0 + 3, x1 - 2) if c != nip])
+        ist = st[inter]
+        if (ist < 0).any():
+            bad_class = bad_class or ("frame %d: %d unclassified columns"
+                                      % (i, int((ist < 0).sum())))
+            break
+        mean_state.append(float(ist.mean()))
+
+        # (1) At most two ink states across the sheet, they are consecutive,
+        #     and the low one is entirely to the LEFT of the high one -- the
+        #     paper travels left to right, so its leading edge is its right
+        #     edge and the fresh ink is on the right.
+        vals = np.unique(ist)
+        if vals.size > 2 or (vals.size == 2 and vals[1] - vals[0] != 1):
+            bad_two = bad_two or "frame %d: states %s" % (i, list(vals))
+        if vals.size == 2:
+            lo = inter[ist == vals[0]]
+            hi = inter[ist == vals[1]]
+            if lo.max() > hi.min():
+                bad_two = bad_two or ("frame %d: fresh ink is not on the "
+                                      "leading edge" % i)
+            # (2) The seam is pinned to the nip, not drifting with the sheet.
+            elif not (lo.max() == nip - 1 and hi.min() == nip + 1):
+                bad_seam = bad_seam or ("frame %d: seam at %d..%d, nip is %d"
+                                        % (i, lo.max(), hi.min(), nip))
+            seam = nip - x0                    # in sheet-local columns
+            if runs and runs[-1][-1][0] == i - 1:
+                runs[-1].append((i, seam))
+            else:
+                runs.append([(i, seam)])
+            seams.append((i, seam))
+
+        # (3) No sheet-local column ever loses ink inside a job.
+        for c, s in zip(inter - x0, ist):
+            if seen.get(int(c), -1) > int(s):
+                bad_mono = bad_mono or ("frame %d: sheet column %d went %d "
+                                        "-> %d" % (i, c, seen[int(c)], s))
+            seen[int(c)] = int(s)
+
+    check("the wipe test saw a whole job", n_frames > 20 * 15 and len(runs) >= 2,
+          "%d frames, %d wipe runs" % (n_frames, len(runs)))
+    check("two ink states, fresh ink on the leading edge", bad_two is None,
+          bad_two or "")
+    check("the seam sits on the nip column", bad_seam is None, bad_seam or "")
+    check("every sheet column is a cumulative state", bad_class is None,
+          bad_class or "")
+    check("no sheet column ever loses ink", bad_mono is None, bad_mono or "")
+
+    # (2, continued) Each wipe sweeps the whole sheet, monotonically, from the
+    # leading edge to the trailing one. A seam that jumped, stalled or ran
+    # backwards fails here even if every individual frame looked legal.
+    ws = max(24, int(round(W * 0.2625)))
+    ok_runs, why = True, ""
+    for run in runs:
+        vs = [s for _, s in run]
+        if any(vs[j + 1] > vs[j] for j in range(len(vs) - 1)):
+            ok_runs, why = False, "seam ran backwards: %s" % vs[:12]
+        elif not (vs[0] >= ws - 8 and vs[-1] <= 8):
+            ok_runs, why = False, ("seam covered %d..%d of %d columns"
+                                   % (vs[-1], vs[0], ws))
+        elif vs[0] - vs[-1] < ws - 16:
+            ok_runs, why = False, "seam only travelled %d columns" % (vs[0] - vs[-1])
+    check("each wipe sweeps leading edge to trailing edge", ok_runs, why)
+
+    # (4) And it is continuous: no frame may print a large slab of the sheet
+    #     at once. This is the assertion that fails loudly on the old
+    #     `x >= nip` special case, which slammed the whole sheet to printed.
+    ms = np.array(mean_state)
+    step = np.abs(np.diff(ms)).max() if ms.size > 1 else 0.0
+    check("no discontinuous jump in how much is printed", step < 0.12,
+          "largest single-frame step %.3f of a pass" % step)
+
+
 def _runlength(mask):
     best, cur, runs = 0, 0, [0]
     for v in mask:
@@ -282,6 +444,8 @@ def main():
     test_purity()
     print("riso: the cycle")
     test_cycle()
+    print("riso: the wipe")
+    test_wipe()
     print("riso: registration and inks")
     test_registration()
     print("riso: type")
