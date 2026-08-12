@@ -1959,6 +1959,324 @@ for _lat, _lon in _wx_sites:
 
 
 # --------------------------------------------------------------------------
+# The Wikipedia edit firehose. wiki.py draws this.
+#
+# Wikimedia publishes every change to every one of its nine hundred-odd wikis
+# on one keyless public SSE stream, worldwide, in real time. It is the only
+# source in this file that is a stream of *events* rather than a snapshot of a
+# state, and that difference is the whole product: a snapshot can be fetched,
+# but a firehose can only be sampled. So this fetcher opens the socket, listens
+# for forty seconds, aggregates what went past, and hangs up. It is a periodic
+# process like everything else here, not a daemon -- ftsched builds segments on
+# a worker thread and a fetcher holding a socket open forever would be a second
+# long-lived thing on the Pi for no benefit, since the panel replays a window
+# rather than tracking a live cursor.
+#
+# **What forty seconds of it looks like**, measured rather than assumed:
+# roughly 1500 messages, 36 a second, from about 40 distinct wikis, 61% of them
+# flagged as bot edits. Slightly over half are `categorize` -- MediaWiki
+# emitting one message per category as a page's categories change, which is
+# machine bookkeeping about an edit that already has its own message -- so those
+# are dropped, along with `log` (account creation, blocks, deletions: the
+# identity-adjacent half of the stream and nothing this panel wants). What is
+# kept is `edit` and `new`: an actual revision of an actual page. That is about
+# 15 a second, and it is the number the panel puts on the wall.
+#
+# The traffic is the real cost. Forty seconds is about 1.7 MB off the wire,
+# because every message carries the full rendered HTML of the edit summary
+# whether you want it or not and there is no server-side filter to ask for
+# less. At a fifteen-minute interval that is ~7 MB an hour on shop wifi, which
+# is the largest number in this file and is why the interval is not shorter.
+# The record it becomes is about 12 kB.
+#
+# **PRIVACY -- what is thrown away, in this function, before anything is
+# stored.** Every message carries `user`, which is a username for a registered
+# editor and a bare IP address for an anonymous one. It is never read into any
+# structure here: there is no field for it in the payload, no hash of it, no
+# count keyed on it. Nor is there any handle that could be turned back into it:
+#
+#   * `user`                 -- dropped outright. Identity, and for anonymous
+#                               editors a home or workplace IP address.
+#   * `comment`/`parsedcomment` -- dropped. Edit summaries are free text written
+#                               by a person and routinely name people.
+#   * `revision.old/new`, `id`, `meta.id`, `notify_url` -- dropped. A revision
+#                               id is a one-call lookup back to its author, so
+#                               keeping one would be keeping `user` in a costume.
+#   * titles outside namespace 0 -- dropped. `User:Someone/sandbox` and its Talk
+#                               page are a person's name in the title field, and
+#                               main-space article titles are the only ones this
+#                               panel wanted anyway.
+#
+# What is kept is the public shape of the encyclopedia and nothing about who
+# wrote it: article titles, the wiki's own database name, the byte length before
+# and after as a single delta, the bot flag, whether the page was new, and the
+# millisecond the edit happened. None of it is reversible to a person by any
+# means this record provides.
+#
+# **The titles need a Latin alphabet and most of the stream does not have one.**
+# The demo draws in a 3x5 bitmap font -- A-Z, digits and a handful of
+# punctuation -- and about 44% of main-space titles in any given window are
+# Cyrillic, CJK, Devanagari, Arabic or Hebrew. A panel of tofu boxes is a
+# failure, so the split is: **colour carries every project including the ones
+# whose script cannot be drawn, and type carries only the ones that can.** The
+# counts, the rate, the bot share and the coloured strokes are the whole
+# firehose; the ticker is the subset this font can spell, and the panel says so.
+# Accented Latin is folded rather than rejected (NFD, drop the combining marks,
+# plus a short table for the letters that do not decompose -- ss, ae, o, th),
+# which is what keeps es, fr, de, pt, pl and no in the ticker instead of only
+# en. `n_titles_seen` records how many main-space titles went past so the demo
+# could say what fraction survived if it ever wanted to.
+#
+# **The events are stored columnar and in relative time.** Three parallel lists
+# -- millisecond offset from the window start, byte delta, project index -- plus
+# a flags int, rather than a dict per edit; at 600 events that is worth about
+# half the bytes. Relative rather than absolute time is deliberate on both
+# counts: it is four digits instead of thirteen, and it is what lets the demo
+# replay the window at its true internal pacing without also publishing the
+# exact wall-clock second any particular article was edited.
+# --------------------------------------------------------------------------
+
+WIKI_STREAM_URL = "https://stream.wikimedia.org/v2/stream/recentchange"
+
+# Seconds of firehose per fetch. Long enough that a burst is inside the window
+# and short enough that the panel is not a two-minute loop of the same titles.
+WIKI_WINDOW = float(os.environ.get("FT_WIKI_WINDOW", "40"))
+
+# Backstops, so a stream that suddenly runs hot cannot fill memory or the cache.
+# Neither has ever fired; both are cheaper than finding out.
+WIKI_MAX_BYTES = 24 << 20
+WIKI_MAX_EVENTS = 1400
+
+# Title reservoir. The demo lays these out along a scrolling strip and fits
+# fifteen or so; sixty candidates is enough slack for it to choose ones that do
+# not collide, and 44 characters is a wide panel's worth of 3x5 type.
+WIKI_MAX_TITLES = 60
+WIKI_TITLE_CHARS = 44
+
+# Two hours to live, a quarter of an hour between fetches. Wikipedia at four in
+# the afternoon looks like Wikipedia at five -- the rate and the bot share barely
+# move -- so a stale record is still a true picture of the encyclopedia and the
+# TTL is generous. What goes stale is the *titles*, which are the delight, and
+# that is what the interval is for.
+WIKI_TTL = 7200
+WIKI_INTERVAL = 900
+
+# Wikimedia asks for a User-Agent that identifies the client and reaches a
+# human; their policy is explicit about it and they will block a generic one.
+WIKI_UA = ("flaschen-taschen-wiki/1 (+https://github.com/hzeller/flaschen-taschen; %s)"
+           % os.environ.get("FT_CONTACT", "jof@thejof.com"))
+
+# Exactly the glyphs wiki.py can draw. Kept here rather than imported from the
+# demo because the fetcher must not import a demo module, and duplicated with
+# that stated: if the demo's font grows, this string grows with it.
+WIKI_CHARSET = frozenset(" -.,:;/'\"!?()&+*=%_0123456789"
+                         "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+# The Latin letters that NFD will not take apart, because their diacritic is
+# welded on rather than combining. Without these, half of Scandinavian, Polish,
+# Icelandic and German goes in the bin for the sake of one letter.
+WIKI_FOLD = {
+    u"ß": "ss", u"æ": "ae", u"Æ": "AE", u"ø": "o",
+    u"Ø": "O", u"đ": "d", u"Đ": "D", u"ł": "l",
+    u"Ł": "L", u"þ": "th", u"Þ": "TH", u"ð": "d",
+    u"Ð": "D", u"œ": "oe", u"Œ": "OE", u"å": "a",
+    u"Å": "A", u"–": "-", u"—": "-", u"‘": "'",
+    u"’": "'", u"“": '"', u"”": '"', u" ": " ",
+}
+
+
+def _wiki_latin(title):
+    """A title in wiki.py's font, or None if it cannot be spelled in it.
+
+    Fold first, reject second. "Zaragoza" and "Malmo" and "Strasse" all survive
+    a NFD-and-drop-the-marks pass; a Cyrillic or CJK title survives nothing and
+    is meant not to, because the alternative is a row of empty boxes claiming to
+    be an article name.
+    """
+    import unicodedata
+    s = u"".join(WIKI_FOLD.get(ch, ch) for ch in title)
+    s = unicodedata.normalize("NFD", s)
+    s = u"".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.replace("_", " ").strip().upper()
+    if not s or not all(ch in WIKI_CHARSET for ch in s):
+        return None
+    if len(s) > WIKI_TITLE_CHARS:
+        # Say it was cut rather than stopping mid-word, which reads as though
+        # the article really is called "ST. MICHAEL'S ABBEY (ORANGE COUNTY".
+        s = s[:WIKI_TITLE_CHARS - 3].rstrip() + "..."
+    return s
+
+
+def _wiki_dt(meta):
+    """`meta.dt` as an epoch float. Milliseconds, which is the point.
+
+    `timestamp` on the message is whole seconds, and whole seconds cannot show
+    that eleven of the last fifteen edits arrived inside 200 ms of each other --
+    which is the burstiness the panel is drawing. This parses the ISO string by
+    hand rather than reaching for a dependency: the format is fixed by the
+    schema and it is always UTC with a Z on the end.
+    """
+    import calendar
+    s = str((meta or {}).get("dt") or "")
+    if len(s) < 20 or s[-1] != "Z":
+        return None
+    try:
+        base = calendar.timegm(time.strptime(s[:19], "%Y-%m-%dT%H:%M:%S"))
+        frac = float(s[19:-1]) if len(s) > 20 else 0.0
+        return base + frac
+    except (ValueError, OverflowError):
+        return None
+
+
+@product("wiki-stream", ttl=WIKI_TTL, interval=WIKI_INTERVAL,
+         description="a %ds window of the Wikimedia recentchange firehose"
+                     % int(WIKI_WINDOW))
+def _wiki_stream():
+    """Listen to the firehose for a bounded window, aggregate, and hang up.
+
+    The SSE framing is done by hand -- `data:` lines accumulated until a blank
+    line closes the event -- because the whole of what a client library would
+    add here is reconnection, and reconnecting is precisely what this must not
+    do. One connection, one window, then close.
+
+    The window is bounded three ways and each bound has a different failure in
+    mind: elapsed time is the normal exit, a byte count catches a stream that
+    starts shouting, and an event count catches the same thing one layer up. The
+    socket also has its own read timeout, because a firehose that has gone quiet
+    looks exactly like a firehose that has gone away.
+    """
+    import urllib.request
+
+    req = urllib.request.Request(
+        WIKI_STREAM_URL,
+        headers={"User-Agent": WIKI_UA, "Accept": "text/event-stream"})
+
+    t_start = time.time()
+    n_all = n_kept = n_bot = n_new = 0
+    n_titles_seen = 0
+    add_bytes = del_bytes = 0
+    per_wiki = {}
+    events = []                       # (t, delta, wiki, bot, new)
+    titles = []                       # (t, wiki, delta, latin)
+    t_first = t_last = None
+    read = 0
+    data = []
+
+    def take(doc):
+        """One recentchange message. Nothing about `user` is read, ever."""
+        nonlocal n_all, n_kept, n_bot, n_new, n_titles_seen
+        nonlocal add_bytes, del_bytes, t_first, t_last
+        n_all += 1
+        kind = doc.get("type")
+        if kind not in ("edit", "new"):
+            return                    # categorize is bookkeeping; log is people
+        length = doc.get("length")
+        if not isinstance(length, dict):
+            return
+        new_len = length.get("new")
+        if not isinstance(new_len, (int, float)) or isinstance(new_len, bool):
+            return
+        old_len = length.get("old")
+        if not isinstance(old_len, (int, float)) or isinstance(old_len, bool):
+            old_len = 0               # a new page has no old length, by design
+        delta = int(max(-999999, min(999999, int(new_len) - int(old_len))))
+
+        when = _wiki_dt(doc.get("meta")) or time.time()
+        if t_first is None:
+            t_first = when
+        t_last = when
+
+        wiki = str(doc.get("wiki") or doc.get("server_name") or "?")[:32]
+        is_bot = bool(doc.get("bot"))
+        is_new = kind == "new"
+        per_wiki[wiki] = per_wiki.get(wiki, 0) + 1
+        n_kept += 1
+        n_bot += 1 if is_bot else 0
+        n_new += 1 if is_new else 0
+        if delta >= 0:
+            add_bytes += delta
+        else:
+            del_bytes -= delta
+        if len(events) < WIKI_MAX_EVENTS:
+            events.append((when, delta, wiki, is_bot, is_new))
+
+        # Titles: main namespace only, which is both the privacy rule and the
+        # quality one. Wikidata's Q-numbers and Wiktionary's single words are
+        # main-space too but are not what anybody means by an article title, so
+        # the bare-identifier shapes go as well.
+        if doc.get("namespace") != 0:
+            return
+        raw = str(doc.get("title") or "")
+        if not raw or (raw[0] in "QPL" and raw[1:].isdigit()):
+            return
+        n_titles_seen += 1
+        latin = _wiki_latin(raw)
+        if latin and len(latin) >= 3:
+            titles.append((when, wiki, delta, latin))
+
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        for raw in resp:
+            read += len(raw)
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if line.startswith("data:"):
+                data.append(line[5:].lstrip())
+                continue
+            if line:
+                continue              # event:, id:, and the :ok keepalive
+            if data:
+                try:
+                    take(json.loads("".join(data)))
+                except (ValueError, TypeError, KeyError):
+                    pass
+                data = []
+            if (time.time() - t_start >= WIKI_WINDOW
+                    or read >= WIKI_MAX_BYTES or n_kept >= WIKI_MAX_EVENTS):
+                break
+
+    if n_kept < 8 or t_first is None or t_last is None or t_last <= t_first:
+        raise ValueError("only %d usable events in %.0fs of stream"
+                         % (n_kept, time.time() - t_start))
+
+    secs = t_last - t_first
+    # Project index. The wikis are ordered by how much they contributed, so the
+    # low indices are the ones the legend names and the demo can slice off the
+    # front of the list without sorting it again.
+    order = sorted(per_wiki, key=lambda k: (-per_wiki[k], k))
+    idx = {name: i for i, name in enumerate(order)}
+
+    # Titles thinned to a reservoir spread across the window rather than the
+    # first sixty, which would be the first eight seconds of it.
+    if len(titles) > WIKI_MAX_TITLES:
+        step = len(titles) / float(WIKI_MAX_TITLES)
+        titles = [titles[int(i * step)] for i in range(WIKI_MAX_TITLES)]
+
+    payload = {
+        "secs": round(secs, 2),
+        "n": n_kept, "n_all": n_all,
+        "per_s": round(n_kept / secs, 2),
+        "all_per_s": round(n_all / max(1e-6, time.time() - t_start), 2),
+        "bot_pct": round(100.0 * n_bot / n_kept, 1),
+        "n_new": n_new,
+        "add_bytes": add_bytes, "del_bytes": del_bytes,
+        "n_projects": len(per_wiki),
+        "projects": [[name, per_wiki[name]] for name in order[:12]],
+        "pnames": order,
+        # Columnar, relative, and integer everywhere an integer will say it.
+        "ms": [int(round((e[0] - t_first) * 1000.0)) for e in events],
+        "d": [e[1] for e in events],
+        "pi": [idx[e[2]] for e in events],
+        "f": [(1 if e[3] else 0) | (2 if e[4] else 0) for e in events],
+        "titles": [[int(round((e[0] - t_first) * 1000.0)), idx[e[1]], e[2],
+                    e[3]] for e in titles],
+        "n_titles_seen": n_titles_seen,
+        "title_note": "namespace 0, Latin-script only",
+        "bytes_read": read,
+        "source": "Wikimedia EventStreams (mediawiki.recentchange)",
+    }
+    return payload, WIKI_STREAM_URL
+
+
+# --------------------------------------------------------------------------
 # Aircraft over the Bay. adsb.py draws these.
 #
 # **Which feed, and why not the obvious ones.** Three keyless aggregators
