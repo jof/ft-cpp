@@ -13,6 +13,17 @@
     },
     {
       "kind": "py",
+      "name": "teletext",
+      "module": "teletext",
+      "seconds": 42.0,
+      "fps": 20,
+      "ms": 1.0,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "pipes",
       "module": "pipes",
       "seconds": 40.0,
@@ -121,6 +132,17 @@
       "seconds": 40.0,
       "fps": 20,
       "ms": 2.6,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "pong",
+      "module": "pong",
+      "seconds": 45.0,
+      "fps": 20,
+      "ms": 2.0,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -261,6 +283,17 @@
     },
     {
       "kind": "py",
+      "name": "dominoes",
+      "module": "dominoes",
+      "seconds": 36.0,
+      "fps": 20,
+      "ms": 4.0,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "cityline",
       "module": "cityline",
       "seconds": 30.0,
@@ -369,6 +402,17 @@
       "seconds": 40.0,
       "fps": 20,
       "ms": 0.9,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "fish",
+      "module": "fish",
+      "seconds": 45.0,
+      "fps": 20,
+      "ms": 7.0,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -520,6 +564,17 @@
     },
     {
       "kind": "py",
+      "name": "tonight",
+      "module": "tonight",
+      "seconds": 45.0,
+      "fps": 20,
+      "ms": 2.0,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "sf-tree-bounce",
       "module": "pixelart",
       "seconds": 30,
@@ -573,6 +628,17 @@
       "seconds": 40.0,
       "fps": 20,
       "ms": 0.1,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "pigeon",
+      "module": "pigeon",
+      "seconds": 62.0,
+      "fps": 20,
+      "ms": 6.0,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -733,6 +799,17 @@
         "poses": ",b",
         "sequence_ms": 500.0
       }
+    },
+    {
+      "kind": "py",
+      "name": "marble",
+      "module": "marble",
+      "seconds": 42.0,
+      "fps": 20,
+      "ms": 4.0,
+      "enabled": true,
+      "solo": false,
+      "options": {}
     },
     {
       "kind": "py",
@@ -986,6 +1063,17 @@
       "seconds": 40.0,
       "fps": 20,
       "ms": 3.2,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "hackfilm",
+      "module": "hackfilm",
+      "seconds": 42.0,
+      "fps": 20,
+      "ms": 1.0,
       "enabled": true,
       "solo": false,
       "options": {}
