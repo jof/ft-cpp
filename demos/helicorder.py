@@ -451,12 +451,14 @@ def draw_traces(dst, lay, rec, rows_per_count, clip_rows, n_cols):
     that has left its lane is a different colour without a second pass over
     the geometry.
     """
+    over = {}
     for i in range(lay.lanes):
-        if not draw_lane(dst, lay, rec, i, rows_per_count, clip_rows, n_cols):
+        if not draw_lane(dst, lay, rec, i, rows_per_count, clip_rows, n_cols,
+                         over):
             break
 
 
-def draw_lane(dst, lay, rec, i, rows_per_count, clip_rows, n_cols):
+def draw_lane(dst, lay, rec, i, rows_per_count, clip_rows, n_cols, over=None):
     """One hour of ink. False if this lane has no data in it yet.
 
     Split out from draw_traces() because the reveal needs the drum in the
@@ -507,15 +509,40 @@ def draw_lane(dst, lay, rec, i, rows_per_count, clip_rows, n_cols):
     own = span & inside
     colour = C_TRACE_A if i % 2 == 0 else C_TRACE_B
 
+    # Ink that earlier lanes threw into this one, in this lane's own column
+    # numbering -- the lanes all cover the same columns, so a mask that is
+    # (rows, columns-in-a-lane) carries straight across. Restamped after this
+    # lane's own ink below, because otherwise the later lane wins and wins
+    # invisibly: a big event overruns downward into a lane that has not been
+    # drawn yet, and that lane's ordinary background -- five rows of it, this
+    # trace is a filled min-to-max run and not a hairline -- then paints out
+    # the middle of the overrun and leaves the two ends. An M3.8 came out as
+    # two disconnected red stubs with the neighbour's quiet trace running
+    # between them. Upward overruns never had the problem, because the lane
+    # above is already drawn, which is what made it look like a rendering
+    # quirk rather than the asymmetry it is.
+    if over is not None:
+        acc = over.get("mask")
+        if acc is None:
+            acc = np.zeros((rows, per_lane), bool)
+            over["mask"] = acc
+
     # Widen to the panel's columns. On a 320 panel with 300 columns an hour
     # this is one pixel and the loop runs once; the loop is here so that a
     # different panel width still draws every column.
     xw = xs[:b - a]
+    prior = None
+    if over is not None:
+        prior = over["mask"][:, :b - a]
     for k in range(width):
         sub = reg[:, xw + k]
         sub[span] = C_CLIP
         sub[own] = colour
+        if prior is not None:
+            sub[prior] = C_CLIP
         reg[:, xw + k] = sub
+    if over is not None:
+        over["mask"][:, :b - a] |= span & ~inside
 
     # Columns inside the fetched window with no samples in them: a real gap in
     # the record, drawn as a red dash on the zero line rather than as a flat
@@ -713,8 +740,10 @@ def build(args):
         stack = cell["stack"]
         del stack[:]
         work = base.copy()
+        over = {}
         for i in range(lay.lanes):
-            draw_lane(work, lay, rec, i, rows_per_count, clip_rows, n_filled)
+            draw_lane(work, lay, rec, i, rows_per_count, clip_rows, n_filled,
+                      over)
             stack.append(work.copy())
         stack.append(base)
         static[:] = work

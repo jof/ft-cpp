@@ -6648,11 +6648,27 @@ HELI_COLS = HELI_SPAN_H * HELI_TRACE_COLS
 HELI_TTL = 1800
 HELI_INTERVAL = 300
 
-# The zero adjustment: the baseline subtracted from each column is a box
-# smoothing of the column midpoints this many seconds wide. Two minutes is
-# well outside anything a local earthquake does and well inside the thermal
-# and tidal wander of a broadband vault.
-HELI_BASE_S = 120.0
+# The zero adjustment: the baseline subtracted from each column is a running
+# *median* of the column midpoints this many seconds wide.
+#
+# It was a running mean over two minutes, and that is the bug an M3.8 in San
+# Leandro found on 2026-08-13. A mean is not robust: the two columns holding
+# the S-wave had midpoints of +43,000 and -139,000 counts, which dragged the
+# mean of the ten-column window around them by about 11,000 counts -- two
+# whole trace lanes -- so every quiet column within a minute of the event had
+# two lanes of baseline subtracted from it and was drawn bodily outside its
+# own lane. On the panel the earthquake came out as a pair of black holes with
+# the trace missing, which is the exact opposite of what a helicorder is for.
+#
+# A median ignores anything occupying less than half its window, and ten
+# minutes of window means five minutes of continuous strong shaking before it
+# can be moved at all -- far more than any local event puts on this trace. It
+# is longer than the old mean because it can afford to be: the thing being
+# removed is the thermal and tidal wander of a broadband vault, which is an
+# hours-long drift, and a median does not smear a burst outward across its
+# window the way a mean does. Everything slower than about ten minutes goes
+# with it, and nothing an earthquake does is that slow.
+HELI_BASE_S = 600.0
 
 # The response -- counts per m/s -- changes when somebody recalibrates the
 # vault, which is a thing that has happened eight times since 1996 and never
@@ -6858,11 +6874,15 @@ def _heli_bins(segs, rate, t0, t1):
 
 
 def _heli_centre(lo, hi, have):
-    """Subtract a two-minute smoothing of the column midpoints, in place-ish.
+    """Subtract a running median of the column midpoints, in place-ish.
 
     The pen's zero adjustment. Gaps are filled with the median before smoothing
     so that a missing minute does not drag the baseline through the hole and
     bend the trace either side of it.
+
+    The median rather than a mean, and why, is HELI_BASE_S's comment: a mean
+    lets an earthquake set the zero line for the minute either side of itself
+    and delete its own approach from the picture.
     """
     import numpy as np
 
@@ -6877,7 +6897,11 @@ def _heli_centre(lo, hi, have):
         # Edge-padded so the first and last columns get a full window rather
         # than a baseline that tapers towards zero and tips the trace up.
         ext = np.concatenate([np.full(pad, mid[0]), mid, np.full(pad, mid[-1])])
-        base = np.convolve(ext, np.full(k, 1.0 / k), mode="valid")
+        # The window as an explicit (k, n) stack and one median down it. Not
+        # sliding_window_view: the wall's Pi is on numpy 1.19 and does not
+        # have it. k is 51 and n is at most 1800, so this is 92k floats and a
+        # sort, which is a millisecond and happens once per fetch.
+        base = np.median(np.stack([ext[i:i + len(mid)] for i in range(k)]), 0)
     else:
         base = mid
     return (np.round(lo - base).astype(np.int32),

@@ -376,6 +376,106 @@ def test_lane_order():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_baseline_is_robust():
+    """The zero adjustment must not be set by the earthquake it is drawing.
+
+    This is the 2026-08-13 bug and it is worth stating in full, because the
+    panel it produced looked like a plausible helicorder and not like a fault.
+    The baseline was a running *mean* of the column midpoints. An M3.8 in San
+    Leandro put two columns of a million counts into a ten-column window, which
+    moved that window's mean by about eleven thousand counts -- two whole trace
+    lanes. Every quiet column within a minute either side of the event then had
+    two lanes of baseline subtracted from it, was drawn entirely outside its own
+    lane, and left its own lane empty. On the wall the largest local earthquake
+    in months rendered as a pair of black holes with the trace missing from
+    them: the panel deleted its own headline.
+
+    A mean cannot be made safe here by tuning the window, because the failure is
+    proportional -- a bigger event breaks it worse and over the same span. Only
+    an estimator that ignores a minority of its window can hold, so the checks
+    below are on that property and not on the constant: quiet columns beside a
+    burst stay near zero *whatever* the burst's amplitude.
+    """
+    print("\nthe zero adjustment survives the earthquake")
+    n = 300
+    quiet = 3000                       # peak-to-peak of the flat background
+    for amp in (2e4, 2e5, 2e6, 2e7):
+        lo = np.full(n, -quiet // 2, np.int32)
+        hi = np.full(n, quiet // 2, np.int32)
+        # An asymmetric burst, two columns wide: asymmetric because a burst
+        # whose min and max are equal and opposite has a midpoint of zero and
+        # would not have moved even the mean. Real S-wave columns are not
+        # symmetric, which is exactly why this bit.
+        lo[150:152], hi[150:152] = int(-amp), int(amp * 0.55)
+        clo, chi = ftdata._heli_centre(lo, hi, np.ones(n, bool))
+
+        near = np.r_[145:150, 152:157]         # the minute either side
+        worst = int(np.abs((clo[near] + chi[near]) * 0.5).max())
+        check("a %.0e burst does not move the zero line beside it" % amp,
+              worst < quiet, "worst midpoint %d counts, background %d"
+              % (worst, quiet))
+
+    # ...and the drift it exists to remove is still removed.
+    ramp = np.linspace(-8000, 8000, n)
+    lo = (ramp - quiet // 2).astype(np.int32)
+    hi = (ramp + quiet // 2).astype(np.int32)
+    clo, chi = ftdata._heli_centre(lo, hi, np.ones(n, bool))
+    worst = int(np.abs((clo + chi) * 0.5).max())
+    check("but a slow vault drift is still taken out", worst < quiet,
+          "worst midpoint %d counts over a 16000 count ramp" % worst)
+
+
+def test_big_event_is_one_mark():
+    """A clipped event must reach the panel as one continuous mark.
+
+    The other half of the 2026-08-13 bug. Lanes are drawn in time order, so a
+    lane's downward overrun lands in a lane that has not been drawn yet, and
+    that lane's own background -- which is a filled min-to-max run several rows
+    thick, not a hairline -- then painted over the middle of it. The overrun
+    survived only where the next lane's trace happened not to reach, so the
+    largest event on the drum came out as two disconnected stubs with somebody
+    else's quiet trace running between them. Upward overruns were fine, because
+    the lane above is already on the paper, and that asymmetry is the tell.
+    """
+    print("\na big event is one mark, not two stubs")
+    tmp = tempfile.mkdtemp(prefix="heli-onemark")
+    try:
+        # Lane 2, so there is a drawn lane above it and an undrawn one below.
+        col = 2 * TRACE_COLS + 100
+        synthetic(tmp, noise=4000, burst=(col, 800000))
+        r, f = settled(opts(cache_dir=tmp, sweep=0, gain=2.5, clip_lanes=1.5))
+        lay = r.state["lay"]
+        x = lay.x0 + (col % TRACE_COLS) * lay.trace_w // TRACE_COLS
+
+        # The event, and only the event: the clip colour is unique to ink that
+        # has left its own lane, and inside lane 2 the event fills the lane, so
+        # the two together are the whole mark. Every other lane's quiet trace
+        # lives in this column too and must not be counted as part of it.
+        col_rgb = f[lay.chart_y:, x]
+        clip = (col_rgb == np.array(hc.C_CLIP, np.uint8)).all(axis=1)
+        a2, b2 = lane_rows(lay, 2)
+        mark = clip.copy()
+        mark[a2 - lay.chart_y:b2 - lay.chart_y] = True
+        lit = np.where(mark)[0]
+
+        check("the event is drawn at all", int(clip.sum()) > 0,
+              "%d clipped rows" % int(clip.sum()))
+        gaps = int((np.diff(lit) > 1).sum())
+        check("and it is one unbroken run down the panel", gaps == 0,
+              "%d break(s) in rows %d..%d" % (gaps, lit[0], lit[-1]))
+        check("which reaches outside its own lane both ways",
+              clip[:a2 - lay.chart_y].any() and clip[b2 - lay.chart_y:].any(),
+              "rows %d..%d, lane 2 is %d..%d"
+              % (lit[0], lit[-1], a2 - lay.chart_y, b2 - lay.chart_y - 1))
+
+        # The event's own lane is the one place it must never be missing.
+        own = int((f[a2:b2, x].max(axis=1) > 40).sum())
+        check("and its own lane is full of it, not empty",
+              own == lay.lane_h, "%d of %d rows" % (own, lay.lane_h))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_scale():
     print("\nvertical scale: fixed against the background, not the maximum")
     tmp = tempfile.mkdtemp(prefix="heli-scale")
@@ -744,6 +844,8 @@ def main():
     test_no_network()
     test_steim()
     test_lane_order()
+    test_baseline_is_robust()
+    test_big_event_is_one_mark()
     test_scale()
     test_gaps_and_pen()
     test_quake_marks()
