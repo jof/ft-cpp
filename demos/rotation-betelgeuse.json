@@ -17,7 +17,7 @@
       "module": "teletext",
       "seconds": 42.0,
       "fps": 20,
-      "ms": 1.0,
+      "ms": 0.2,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -142,7 +142,7 @@
       "module": "pong",
       "seconds": 45.0,
       "fps": 20,
-      "ms": 2.0,
+      "ms": 1.2,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -287,7 +287,7 @@
       "module": "dominoes",
       "seconds": 36.0,
       "fps": 20,
-      "ms": 4.0,
+      "ms": 13.0,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -412,7 +412,7 @@
       "module": "fish",
       "seconds": 45.0,
       "fps": 20,
-      "ms": 7.0,
+      "ms": 20.0,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -568,7 +568,7 @@
       "module": "tonight",
       "seconds": 45.0,
       "fps": 20,
-      "ms": 2.0,
+      "ms": 0.2,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -638,7 +638,7 @@
       "module": "pigeon",
       "seconds": 62.0,
       "fps": 20,
-      "ms": 6.0,
+      "ms": 3.2,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -806,7 +806,7 @@
       "module": "marble",
       "seconds": 42.0,
       "fps": 20,
-      "ms": 4.0,
+      "ms": 1.5,
       "enabled": true,
       "solo": false,
       "options": {}
@@ -1073,7 +1073,7 @@
       "module": "hackfilm",
       "seconds": 42.0,
       "fps": 20,
-      "ms": 1.0,
+      "ms": 0.3,
       "enabled": true,
       "solo": false,
       "options": {}
