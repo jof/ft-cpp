@@ -34,6 +34,7 @@ they all phrase it the same way.
 
 import argparse
 import json
+import math
 import os
 import sys
 import tempfile
@@ -2697,32 +2698,46 @@ def _sequoia_calendar():
 # --------------------------------------------------------------------------
 # Aircraft over the Bay. adsb.py draws these.
 #
-# **Which feed, and why not the obvious ones.** Three keyless aggregators
-# publish the same shape of JSON, all descended from readsb's `aircraft.json`,
-# and they were all tried against this exact query before one was picked:
+# **Which feed, and why not the obvious ones.** adsb.fi is the source, with
+# the OpenSky Network behind it, and both were tried against this exact query:
 #
+#   opendata.adsb.fi/api/v2/...      works; 109 aircraft, 400 ms, keyless.
+#   opensky-network.org/api/states/  works; 111 states, 630 ms, keyless when
+#                                    anonymous. Different shape, different
+#                                    project, different receivers.
 #   api.adsb.lol/v2/point/...        200 OK, `{"ac": [], "total": 0}`. It
-#                                    answers, it answers quickly, and it answers
-#                                    with nothing. An empty list is not an
-#                                    error, so a demo built on this would have
-#                                    drawn an honest, permanently empty sky.
-#   opendata.adsb.fi/api/v2/...      works; 63 aircraft, 240 ms.
-#   api.airplanes.live/v2/point/...  worked; 65 aircraft, 250 ms.
+#                                    answers, it answers quickly, and it
+#                                    answers with nothing. An empty list is
+#                                    not an error, so a demo built on this
+#                                    would have drawn an honest, permanently
+#                                    empty sky. Re-checked 2026-08-12: still
+#                                    empty over the Bay.
+#   api.adsb.one/v2/point/...        403 from Cloudflare before it reaches the
+#                                    application at all.
 #
-# airplanes.live was what shipped until 2026-08-12, when it began answering
-# every endpoint with `403 {"error": "please contact us at
-# contact@airplanes.live"}` -- the same 403 for the project User-Agent, a bare
-# curl one and a browser one, while airplanes.live itself still served 200 from
-# the same host. Their guide documents one request a second and this asked once
-# a minute, sixty times under, so this was not the rate. It reads as a block on
-# the wall's address, and an address is not something a fetcher can argue with.
+# **airplanes.live is not in that list, and will not be.** It shipped here
+# until 2026-08-12, when it began answering every endpoint with
+# `403 {"error": "please contact us at ..."}`. That is a request to stop, and
+# the only correct response to a volunteer-run project asking you to stop is
+# to stop -- so this file no longer holds their URL, no longer falls back to
+# them, and does not probe them to see whether the block has lifted. If you
+# are tempted to put it back: don't. They asked.
 #
-# So adsb.fi is what ships, which is what the second source was written to be.
-# The response shapes differ in two places and no more: adsb.fi calls the list
-# `aircraft` where airplanes.live called it `ac`, which the parser below has
-# always accepted both of, and adsb.fi reports `now` in seconds where readsb
-# reports milliseconds, which the timestamp line now accepts both of. Neither
-# wants a key. Both ask for civility rather than credentials.
+# **Why OpenSky as the second source rather than another readsb mirror.**
+# adsb.lol, adsb.one and adsb.fi are all the same lineage serving the same
+# shape from an overlapping volunteer feeder network, so a mirror is not much
+# of a hedge -- the thing most likely to take out adsb.fi is the thing most
+# likely to take out its siblings. OpenSky is a different project with its own
+# receivers and its own funding, which is what a fallback is for. The price is
+# that nothing is shared: it answers a bounding box rather than a radius,
+# reports altitude in metres and speed in metres per second, has no distance
+# field, and returns positional arrays rather than objects. All of that is
+# converted in `_adsb_from_opensky` into the same shape adsb.fi returns, so
+# only one parser exists below and only one thing can be wrong with it.
+#
+# OpenSky is a *fallback and only a fallback*, on purpose: anonymous access is
+# metered in credits per day, and a request a minute would spend the day's
+# budget before lunch. It is asked only when adsb.fi has actually failed.
 #
 # **Ground traffic is dropped, and counted.** Half of what comes back is parked
 # or taxiing -- 36 of 70 on a Sunday morning -- reported as the *string*
@@ -2757,6 +2772,13 @@ def _sequoia_calendar():
 
 ADSB_URL = "https://opendata.adsb.fi/api/v2/lat/%.4f/lon/%.4f/dist/%d"
 
+# The fallback, asked only when the line above has failed. A bounding box in
+# degrees rather than a radius, because that is the only spatial filter the
+# endpoint has; the surplus corners are trimmed by real distance below, which
+# the radius query would have done for us.
+ADSB_FALLBACK_URL = ("https://opensky-network.org/api/states/all"
+                     "?lamin=%.4f&lomin=%.4f&lamax=%.4f&lomax=%.4f")
+
 # The wall's own address, in Dogpatch. Everything on the panel is measured from
 # here; it lives in demos/site.json now, which is the one place to change it.
 ADSB_LAT, ADSB_LON = ftsite.LAT, ftsite.LON
@@ -2789,9 +2811,74 @@ def _adsb_num(x):
     return float(x) if x == x and abs(x) != float("inf") else None
 
 
+def _adsb_nm(lat, lon):
+    """Great-circle nautical miles from the wall to (lat, lon)."""
+    rlat0 = math.radians(ADSB_LAT)
+    rlat = math.radians(lat)
+    dlat = rlat - rlat0
+    dlon = math.radians(lon - ADSB_LON)
+    h = (math.sin(dlat * 0.5) ** 2
+         + math.cos(rlat0) * math.cos(rlat) * math.sin(dlon * 0.5) ** 2)
+    return 2.0 * 3440.065 * math.asin(min(1.0, math.sqrt(h)))
+
+
+def _adsb_from_opensky(doc):
+    """OpenSky's `states` rendered in the shape adsb.fi returns.
+
+    Everything the parser reads is produced here and nothing else changes, so
+    there is one parser rather than two. The state vector is positional:
+
+        0 icao24  1 callsign  5 lon  6 lat  7 baro_altitude (m)
+        8 on_ground  9 velocity (m/s)  10 true_track  16 position_source
+
+    Three conversions and one omission. Metres become feet and metres per
+    second become knots, because the panel's units are the aviation ones and
+    converting here means the demo never has to know which source it got.
+    `on_ground` becomes the string "ground" in `alt_baro`, which is how readsb
+    says the same thing and therefore what the ground counter already looks
+    for. Distance is computed rather than read, since OpenSky has no `dst`.
+    The omission is aircraft type and category: OpenSky's state vectors carry
+    neither, so those come back None rather than guessed, and the panel simply
+    has less to say about a plane while the fallback is in use.
+
+    `time_position` is when that aircraft's position was last heard, so the
+    per-aircraft age the demo dead-reckons from survives the switch intact.
+    """
+    now = _adsb_num(doc.get("time")) or time.time()
+    out = []
+    for s in (doc.get("states") or []):
+        if not isinstance(s, (list, tuple)) or len(s) < 11:
+            continue
+        lat, lon = _adsb_num(s[6]), _adsb_num(s[5])
+        if lat is None or lon is None:
+            continue
+        if _adsb_nm(lat, lon) > ADSB_RADIUS_NM:      # trim the box to the disc
+            continue
+        alt_m = _adsb_num(s[7])
+        if s[8] is True:
+            alt = "ground"
+        elif alt_m is None:
+            continue
+        else:
+            alt = alt_m * 3.28084
+        vel = _adsb_num(s[9])
+        seen_pos = _adsb_num(s[3])
+        out.append({
+            "hex": str(s[0] or "").strip().lower(),
+            "flight": str(s[1] or "").strip(),
+            "lat": lat, "lon": lon,
+            "alt_baro": alt,
+            "gs": None if vel is None else vel * 1.94384,
+            "track": _adsb_num(s[10]),
+            "dst": _adsb_nm(lat, lon),
+            "seen_pos": 0.0 if seen_pos is None else max(0.0, now - seen_pos),
+        })
+    return out
+
+
 @product("adsb-bay", ttl=ADSB_TTL, interval=ADSB_INTERVAL, volatile=True,
-         description="airborne ADS-B within %d nm of the wall, from "
-                     "adsb.fi" % ADSB_RADIUS_NM)
+         description="airborne ADS-B within %d nm of the wall, from adsb.fi "
+                     "(OpenSky as fallback)" % ADSB_RADIUS_NM)
 def _adsb_bay():
     """The airborne traffic around the wall, trimmed to what a panel can draw.
 
@@ -2810,10 +2897,37 @@ def _adsb_bay():
     bug rather than as an aircraft.
     """
     import urllib.request
+
+    def fetch(u):
+        req = urllib.request.Request(u, headers={"User-Agent": ADSB_UA})
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            return json.loads(resp.read())
+
+    source = "adsb.fi"
     url = ADSB_URL % (ADSB_LAT, ADSB_LON, ADSB_RADIUS_NM)
-    req = urllib.request.Request(url, headers={"User-Agent": ADSB_UA})
-    with urllib.request.urlopen(req, timeout=25) as resp:
-        doc = json.loads(resp.read())
+    try:
+        doc = fetch(url)
+        if not isinstance(doc.get("ac"), list) and \
+                not isinstance(doc.get("aircraft"), list):
+            raise ValueError("no aircraft list in the response")
+    except Exception as exc:
+        # The fallback exists for exactly this and is asked for nothing else,
+        # because anonymous OpenSky is metered by the day. If it fails too,
+        # that exception is the one that propagates: two dead sources is a
+        # real outage and the cache should go stale and say so, rather than
+        # this returning an empty sky that looks like a quiet afternoon.
+        sys.stderr.write("ftdata: adsb.fi failed (%s: %s); trying OpenSky\n"
+                         % (type(exc).__name__, exc))
+        # A degree of latitude is 60 nm; a degree of longitude is 60 nm times
+        # the cosine of the latitude, which at 37.8 N is about 47.
+        dlat = ADSB_RADIUS_NM / 60.0
+        dlon = ADSB_RADIUS_NM / (60.0 * max(0.1, math.cos(math.radians(ADSB_LAT))))
+        url = ADSB_FALLBACK_URL % (ADSB_LAT - dlat, ADSB_LON - dlon,
+                                   ADSB_LAT + dlat, ADSB_LON + dlon)
+        raw = fetch(url)
+        doc = {"now": _adsb_num(raw.get("time")) or time.time(),
+               "aircraft": _adsb_from_opensky(raw)}
+        source = "opensky"
 
     seen = doc.get("ac")
     if not isinstance(seen, list):
@@ -2875,7 +2989,7 @@ def _adsb_bay():
         "n_seen": len(seen), "capped": len(rows) > len(kept),
         "units": {"alt": "ft baro", "gs": "kn", "trk": "deg true",
                   "dst": "nm", "pa": "s since position last heard"},
-        "source": "adsb.fi",
+        "source": source,
     }
     payload.update({c: [r[c] for r in kept] for c in cols})
     return payload, url
