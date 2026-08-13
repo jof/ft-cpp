@@ -39,10 +39,22 @@ Because the wave is *in the geometry*, a tail-beat frame is free at run time.
 **A fish that turns is a fish that gets narrower.** Its path is
 `cx + ax*sin(th + 0.28*sin 2th)`, so the velocity is `cos`-shaped: it
 decelerates into the edge, hangs, and comes back. To read that as a *turn*
-rather than as an instant reversal, each fish is also baked at up to seven
+rather than as an instant reversal, each fish is also baked at a range of
 horizontal squashes, from full profile one way through a head-on sliver to full
 profile the other, and the frame picks one straight out of `dx/dt`. It is the
-cheapest possible three-quarter view. The phase warp, rather than an added
+cheapest possible three-quarter view.
+
+How many squashes is not a taste decision, it is solved: the turn is quantised
+to that table, so one step is one visible jump in the fish's *width*, and the
+count comes from holding that jump to two pixels. Sizing it by size class
+instead had it backwards — the biggest fish got the fewest levels, so a 37 px
+fish crossed the panel in five steps and changed width sixteen pixels at a
+time, which reads as a snap rather than a turn, on the most watched fish in the
+tank. The levels are also spaced uniformly in width rather than in velocity,
+with the foreshortening curve moved into the lookup: spaced the other way the
+widest jump lands exactly where the turn is fastest. Both are asserted off the
+rendered silhouettes. It costs 14.5 MB of baked sprites against 3.6 MB, and
+nothing per frame — the frame is still one indexed blit. The phase warp, rather than an added
 third harmonic, is deliberate: `sin(th + a sin 2th)` has derivative
 `cos(...)*(1 + 2a cos 2th)`, and with `a < 0.5` the second factor never changes
 sign, so the fish turns exactly twice a period. The harmonic version gave four

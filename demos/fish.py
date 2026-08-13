@@ -63,6 +63,7 @@ TAU = 2.0 * math.pi
 
 SUB = 3          # baked horizontal subpixel phases (see premul())
 PH = 6           # baked tail-beat phases
+MAX_SQUASH_STEP_PX = 2.0   # widest one-step change in sprite width, in pixels
 WEED_PH = 24     # baked weed sway phases
 
 # The water. Not black: fish on pure black read as fish in space, and the LED
@@ -249,8 +250,15 @@ def bake_fish(length, amp, style, haze, water, nsq, detail=True):
     """
     table = []
     for k in range(nsq):
+        # Levels are uniform in *width*, not in velocity. The foreshortening
+        # curve (the 0.85 exponent) lives in render()'s lookup instead, which
+        # leaves the fish's dynamics exactly as they were while making every
+        # step of the table the same number of pixels. Spaced the other way,
+        # the steps bunch up at full profile and stretch out near head-on --
+        # so the widest jump lands precisely where the turn is fastest, which
+        # is the one place it shows.
         c = -1.0 + 2.0 * k / (nsq - 1)
-        squash = 0.22 + 0.78 * abs(c) ** 0.85
+        squash = 0.22 + 0.78 * abs(c)
         row = []
         for j in range(PH):
             rgb, a = fish_sprite(length, amp, style, j / float(PH), squash,
@@ -619,11 +627,23 @@ def build(args):
         if victim is f:                                     # never chase itself
             f["victim"] = fishes[order[0]]
 
-    # Bake. Small fish turn often and get more squash levels; the big ones
-    # cross most of the panel and mostly need profile and a hint of foreshorten,
-    # and their sprites are twenty times the area, so the table is kept short.
+    # Bake. The turn is quantised to this table, so what matters is not the
+    # fish's size class but how many *pixels* of width one step moves. Sizing
+    # the table by size class had it exactly backwards: it gave the big fish
+    # the fewest levels, so a 37 px fish crossed the panel in five steps and
+    # changed width by sixteen pixels at a time -- a snap, not a turn, and on
+    # the most visible fish in the tank.
+    #
+    # So solve for the step instead. The widest sprite is `length` and the
+    # narrowest is 0.22 of it, and the table covers that range *twice* -- once
+    # swimming left and once swimming right -- so each half gets (nsq-1)/2
+    # intervals and holding the step to MAX_SQUASH_STEP_PX needs
+    # 2*(0.78*length/step)+1 levels. Seven stays as a floor: below about a
+    # 13 px fish the step is already inside the target and more levels would be
+    # baking sprites nobody can tell apart.
     for f in fishes:
-        nsq = 7 if f["amp"] <= 4.5 else (5 if f["amp"] <= 7.0 else 3)
+        per_side = int(math.ceil(0.78 * f["len"] / MAX_SQUASH_STEP_PX))
+        nsq = max(7, 2 * per_side + 1)
         f["nsq"] = nsq
         f["tab"] = bake_fish(f["len"], f["amp"], f["style"], f["haze"],
                              water_mid, nsq, detail=f["amp"] >= 2.0)
@@ -828,7 +848,11 @@ def build(args):
             # only narrows near the ends, where it is actually turning.
             c = vx / f["vref"]
             c = 1.0 if c > 1.0 else (-1.0 if c < -1.0 else c)
-            k = int(round((c + 1.0) * 0.5 * (f["nsq"] - 1)))
+            # The 0.85 warp is applied here rather than baked into the table's
+            # spacing, so the table stays uniform in width (see bake_fish) and
+            # the foreshortening still eases the way it always did.
+            m = math.copysign(abs(c) ** 0.85, c)
+            k = int(round((m + 1.0) * 0.5 * (f["nsq"] - 1)))
 
             # Tail phase: a base rate plus a term in sin(2*theta), so the beat
             # speeds up mid-cruise and slows at both turning points. Written in

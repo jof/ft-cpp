@@ -117,7 +117,7 @@ def test_sprites_are_one_piece():
                         (84.0, 6.4)):
         for k in range(7):
             c = -1.0 + 2.0 * k / 6.0
-            squash = 0.22 + 0.78 * abs(c) ** 0.85
+            squash = 0.22 + 0.78 * abs(c)      # same spacing bake_fish uses
             for j in range(fish.PH):
                 _, a = fish.fish_sprite(length, amp, fish.STYLES[0],
                                         j / float(fish.PH), squash, 0.1, water)
@@ -168,7 +168,12 @@ def test_fish_turn():
                 x2, _ = fish._path(f, t + 0.05)
             c = (x2 - x) * 20.0 / f["vref"]
             c = max(-1.0, min(1.0, c))
-            ks.append(int(round((c + 1.0) * 0.5 * (f["nsq"] - 1))))
+            # Same warp render() applies: the table is uniform in width, so the
+            # foreshortening curve lives in the lookup. Kept in step with
+            # fish.py deliberately -- modelling the old mapping here would let
+            # a change in render() pass unnoticed.
+            m = math.copysign(abs(c) ** 0.85, c)
+            ks.append(int(round((m + 1.0) * 0.5 * (f["nsq"] - 1))))
         ks = np.asarray(ks)
         mid = (f["nsq"] - 1) // 2
         if not (ks.min() == 0 and ks.max() == f["nsq"] - 1):
@@ -432,6 +437,41 @@ def test_fish_face_the_way_they_swim():
           % (checked, 2 * fish.PH, len(bad), ("; " + bad[0]) if bad else ""))
 
 
+def test_turn_is_smooth():
+    """No single step of the squash table may jump more than a couple of pixels.
+
+    The turn is quantised to the table, so one step is one visible jump in the
+    fish's width. Sizing the table by size class gave the *biggest* fish the
+    fewest levels -- a 37 px fish crossed in five steps, changing width sixteen
+    pixels at a time, which reads as a snap rather than a turn. Two things fix
+    it and both are asserted here: enough levels for the fish's length, and
+    levels spaced uniformly in width rather than in velocity (spaced the other
+    way the widest jump lands right where the turn is fastest).
+
+    Measured off the rendered silhouettes, not recomputed from the formula, so
+    it fails if the spacing changes for any reason.
+    """
+    bad, checked = [], 0
+    for L in (7, 13, 27, 37, 44):
+        per_side = int(math.ceil(0.78 * L / fish.MAX_SQUASH_STEP_PX))
+        nsq = max(7, 2 * per_side + 1)
+        tab = fish.bake_fish(L, max(1.2, 0.14 * L), fish.VISITOR_STYLE, 0.0,
+                             (10, 40, 60), nsq)
+        widths = []
+        for row in tab:
+            _, ia = row[0]
+            a = 1.0 - ia[0, ..., 0]
+            widths.append(int(((a > 0.35).sum(axis=0) > 0).sum()))
+        step = max(abs(widths[i + 1] - widths[i]) for i in range(len(widths) - 1))
+        checked += 1
+        if step > fish.MAX_SQUASH_STEP_PX:
+            bad.append("len=%d nsq=%d steps %d px" % (L, nsq, step))
+    check("the turn never jumps more than %d px of width"
+          % fish.MAX_SQUASH_STEP_PX,
+          checked == 5 and not bad,
+          "%d sizes checked%s" % (checked, ("; " + bad[0]) if bad else ""))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--bench", action="store_true", help="also time a long run")
@@ -442,6 +482,7 @@ def main():
     test_body_wave_actually_moves()
     test_fish_turn()
     test_fish_face_the_way_they_swim()
+    test_turn_is_smooth()
     test_tail_phase_advances()
     test_jerk_chases()
     test_visitor_schedule()
