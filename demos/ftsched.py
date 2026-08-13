@@ -305,8 +305,13 @@ class Group(object):
         return self
 
     def to_json(self):
+        # `members` is what this rotation actually has, in the file's order, so
+        # the console can group the running order under these headings without
+        # inventing a membership of its own. Static for the life of the
+        # process, like the rest of /api/schema, and a few hundred bytes.
         return {"key": self.key, "label": self.label,
-                "description": self.description, "count": len(self.names)}
+                "description": self.description, "count": len(self.names),
+                "members": [n for n in self.members if n in self.names]}
 
 
 def load_groups(path, warn):
