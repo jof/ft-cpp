@@ -45,6 +45,20 @@ WARMUP = {
     # structure; maze needs the carve to be well under way rather than a
     # black screen; console needs a few lines on screen before it reads.
     "life": 12.0, "maze": 6.0, "console": 5.0,
+    # The long-cycle ones, where a two-second window from t=0 lands in dead
+    # air and the encoder collapses sixteen identical frames into a still.
+    # Each of these is aimed at the moment the demo is *about*:
+    #   hackfilm -- five seconds in the gate then 0.85 s of pull-down, so the
+    #               clip has to straddle a pull-down or it is one held frame.
+    #               Verified: without this it baked to literally 1 frame.
+    #   fine     -- the fire moves, but slowly, and the payoff is the speech
+    #               bubble at 76% of a 46 s cycle. Aimed just before it.
+    #   crash    -- holds each specimen, so like hackfilm the clip has to
+    #               straddle a change of exhibit rather than sit inside one.
+    #               Its hold is 8 s, so 3.4 sat safely inside one specimen and
+    #               baked a still; 7.2 crosses the 0.55 s gap into the next.
+    #   dominoes -- the tip is the whole point and the row stands still first.
+    "hackfilm": 4.4, "fine": 33.0, "crash": 7.2, "dominoes": 1.2,
     # wopr wants a few lines of dialogue on screen; defcon wants the exchange
     # well under way, since its own opening is deliberately sparse and its
     # ending is a caption rather than the effect. headroom needs no warmup at
@@ -121,6 +135,11 @@ WARMUP = {
     #   propagation -- near-static by design; it is a panel of numbers, and the
     #                 only motion is the blink, which the 2 s clip catches.
     #   tide, twister -- settled from the first frame.
+    #   muni       -- a still, and honestly so. Its only motion is buses
+    #                 creeping a pixel a minute toward a stop and the readout
+    #                 inverting to LEAVE NOW, neither of which happens inside
+    #                 two seconds. A warmup would rotate the phase and change
+    #                 nothing; faking motion here would misrepresent it.
     #   swell, sfmix -- both are periodic and moving at frame zero: swell's
     #                 wave train is at the buoy's own period and sfmix's comets
     #                 run from the first frame, so a warmup only rotates a
