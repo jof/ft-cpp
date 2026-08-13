@@ -86,7 +86,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
-        if path in ("/", "/index.html"):
+        # /panel is where the console answers once nginx is in front of this
+        # and the root belongs to the visitor's remote. / stays the console
+        # when the daemon is reached directly on :8081 -- which is how it runs
+        # without a front door, and how it is developed against.
+        if path in ("/", "/index.html", "/panel"):
             try:
                 with open(UI_FILE, "rb") as fh:
                     self._send(200, fh.read(), "text/html; charset=utf-8", "no-store")

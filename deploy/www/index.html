@@ -1,0 +1,632 @@
+<!-- The wall's front door: what is on it now, one tap to change the mood, and
+     everything anyone needs in order to draw on it themselves. A flat file
+     served by nginx at /.
+
+     This is the page the QR code on the frame points at, so it is written for
+     somebody standing in front of the wall with thirty seconds and no context:
+     one big now-playing block, a radio list of modes, brightness, and a way
+     out to the full console for the person who maintains it. It was the
+     about page; the reference material is still here, below the remote.
+
+     Vanilla, no build step, no framework. It polls /api/state once a second
+     while visible and is readable without any of it having worked. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Flaschen Taschen</title>
+
+<!-- Loaded without blocking the first paint: the shop wifi reaches the wall
+     long before it reaches Google, and a phone that never gets these still
+     gets the page in the system font at the same sizes. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" media="print" onload="this.media='all'"
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+/* Warm near-black rather than blue-black: the room is bright and fluorescent,
+   and the wall itself is warm. The console at /panel uses the same palette --
+   somebody who taps through should feel they stayed in the same place. */
+:root {
+  --bg: #12110e;
+  --card: #1b1a15;
+  --card-hi: #232219;
+  --line: #33312a;
+  --text: #eae6da;
+  --dim: #97907f;
+  --faint: #726b5b;
+  --on: #6cbf5f;
+  --build: #c08a5a;
+  --wait: #c9a24b;
+  --bad: #d98a86;
+  --pad: 20px;
+  --sans: "Bricolage Grotesque", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.4 var(--sans);
+  -webkit-text-size-adjust: 100%;
+  padding: 0 var(--pad) calc(34px + env(safe-area-inset-bottom));
+}
+main { max-width: 34rem; margin: 0 auto; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.eyebrow {
+  font-family: var(--mono); font-size: 11px; letter-spacing: .16em;
+  text-transform: uppercase; color: var(--dim);
+}
+
+/* ---- the top line ------------------------------------------------------ */
+.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 22px 0 0; }
+.live { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 11px;
+        letter-spacing: .08em; color: var(--on); }
+.live .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor;
+             animation: pulse 1.8s ease-in-out infinite; flex: none; }
+.live.off, .live.bad { color: var(--bad); }
+.live.bad .dot { animation: none; }
+@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .35 } }
+
+/* ---- now on the wall --------------------------------------------------- */
+.now { margin-top: 26px; }
+.now h1 {
+  font-size: clamp(32px, 10vw, 44px); font-weight: 800; letter-spacing: -.02em;
+  line-height: 1.02; margin: 4px 0 0; text-transform: capitalize; text-wrap: balance;
+}
+.now .caption { color: var(--dim); font-size: 15px; margin: 8px 0 0; min-height: 42px; text-wrap: pretty; }
+
+/* The preview is the page's one picture, and it is the shape of the wall. */
+.screen {
+  margin-top: 16px; position: relative; aspect-ratio: 5 / 1; background: #000;
+  border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+}
+.screen img {
+  display: block; width: 100%; height: 100%; object-fit: contain;
+  image-rendering: pixelated;             /* 320x64, every pixel is meant */
+  transition: opacity .2s;
+}
+.screen .missing {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  font-family: var(--mono); font-size: 12px; letter-spacing: .22em; color: var(--faint);
+  background: repeating-linear-gradient(135deg, #171610, #171610 8px, #1e1c15 8px, #1e1c15 16px);
+}
+.screen .slot { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--line); }
+.screen .slot i { display: block; height: 100%; width: 0; background: var(--on); transition: width .25s linear; }
+
+/* The honest acknowledgement: requested -> building -> on air, on the thing
+   that was tapped, from the moment it was tapped. Never claims the wall is
+   doing something it is not -- "building" is next.ready off the API, not a
+   guess, and "requested" says only that we sent it. */
+.ack {
+  position: absolute; left: 8px; top: 8px; display: flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 16px; background: var(--wait); color: #12110e;
+  font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .04em;
+}
+.ack::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #12110e;
+               animation: pulse 1s ease-in-out infinite; }
+.ack.building { background: var(--build); }
+.ack.onair { background: var(--on); }
+.ack.onair::before { animation: none; }
+
+/* ---- buttons ----------------------------------------------------------- */
+button { font: inherit; font-family: var(--sans); cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.big {
+  display: block; width: 100%; margin-top: 18px; padding: 17px;
+  border: none; border-radius: 11px; background: var(--on); color: #0f1a0d;
+  font-weight: 700; font-size: 17px; text-align: center; text-decoration: none;
+}
+.big:hover, .big:focus-visible { filter: brightness(1.06); }
+/* The way out to the console. Deliberately not the green one: it is the
+   primary action for exactly one person in the room. */
+.panel-link {
+  display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 15px 17px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 11px;
+  color: var(--text); text-decoration: none;
+}
+.panel-link:hover { background: var(--card-hi); }
+.panel-link > div { flex: 1; min-width: 0; }
+.panel-link b { font-size: 16px; font-weight: 700; display: block; }
+.panel-link small { color: var(--dim); font-size: 13px; }
+.panel-link .arrow { flex: none; color: var(--dim); font-size: 26px; line-height: 1; }
+
+/* ---- the modes --------------------------------------------------------- */
+/* Radio buttons, because that is what these are: seven themed sets and
+   everything, exactly one of them on at a time. Real <input type=radio> so a
+   thumb, a keyboard and a screen reader all get the same control. */
+h2 { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: .16em;
+     text-transform: uppercase; color: var(--dim); margin: 30px 0 8px; }
+.modes { border-top: 1px solid #26251e; }
+.mode {
+  display: flex; align-items: center; gap: 13px; padding: 13px 4px;
+  border-bottom: 1px solid #26251e; cursor: pointer;
+}
+.mode input { position: absolute; opacity: 0; width: 0; height: 0; }
+.mode .tick {
+  flex: none; width: 20px; height: 20px; border-radius: 50%;
+  border: 1.5px solid var(--faint); position: relative;
+}
+.mode input:checked + .tick { border-color: var(--on); }
+.mode input:checked + .tick::after {
+  content: ""; position: absolute; inset: 4px; border-radius: 50%; background: var(--on);
+}
+.mode input:focus-visible + .tick { outline: 2px solid var(--text); outline-offset: 3px; }
+.mode .label { font-size: 17px; font-weight: 700; }
+.mode .desc { color: var(--dim); font-size: 13px; text-wrap: pretty; }
+.mode .count { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--faint); flex: none; }
+.mode input:checked ~ .count { color: var(--on); }
+.mode:has(input:checked) .label { color: #8fd47f; }
+/* Somebody has flipped individual effects in the console, so the live set is
+   none of these. Saying "custom mix" beats leaving a radio lit for a mode the
+   wall is not in. */
+#custom { padding: 12px 4px; font-family: var(--mono); font-size: 12px; color: var(--build); }
+#modeNote { color: var(--faint); font-size: 12px; margin-top: 10px; }
+
+/* ---- the display row --------------------------------------------------- */
+.display { display: flex; align-items: center; gap: 14px; margin-top: 22px;
+           border-top: 1px solid #26251e; padding-top: 16px; }
+.display .bright { flex: 1; }
+.display .bright .row { display: flex; justify-content: space-between;
+                        font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.display input[type=range] { width: 100%; margin-top: 5px; accent-color: var(--on); }
+.display.nodimmer .bright { opacity: .4; pointer-events: none; }
+/* Turning the wall off in front of a room of guests is the one thing on this
+   page nobody does by accident, so it takes a held thumb rather than a tap.
+   There is no login to hide it behind; friction is the whole mechanism. */
+#power {
+  flex: none; position: relative; overflow: hidden; min-width: 8.5rem;
+  padding: 12px 15px; border-radius: 10px;
+  border: 1px solid #4a2e2c; background: #1c1310; color: var(--bad); font-weight: 600;
+}
+#power .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #5e2b28; }
+#power span.t { position: relative; }
+#power.on { border-color: var(--line); background: var(--card); color: var(--text); }
+
+/* ---- the reference half ------------------------------------------------ */
+.about { margin-top: 40px; padding-top: 4px; border-top: 1px solid #26251e; }
+p { margin: 0 0 12px; }
+a { color: var(--on); }
+.lede { color: var(--dim); }
+pre {
+  margin: 0 0 12px; padding: 13px 15px; background: var(--card);
+  border: 1px solid var(--line); border-radius: 10px; overflow-x: auto;
+  font-family: var(--mono); font-size: 13px; line-height: 1.55; color: #cbc4b0;
+}
+pre .c { color: var(--faint); }
+dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; }
+dt { color: var(--dim); }
+dd { margin: 0; }
+footer { margin-top: 36px; padding-top: 16px; border-top: 1px solid #26251e;
+         color: var(--dim); font-size: 13px; }
+
+#toast {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(14px + env(safe-area-inset-bottom)); z-index: 50;
+  max-width: calc(100% - 32px);
+  background: var(--card-hi); border: 1px solid var(--on); color: var(--text);
+  font-family: var(--mono); font-size: 13px; padding: 9px 16px; border-radius: 20px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.5); display: none;
+}
+#toast.bad { border-color: var(--bad); }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<main>
+  <div class="top">
+    <span class="eyebrow">Sequoia Fabrica</span>
+    <span class="live bad" id="live"><span class="dot"></span><span id="liveWord">connecting</span></span>
+  </div>
+
+  <section class="now">
+    <div class="eyebrow" id="nowLabel">Now on the wall</div>
+    <h1 id="nowName">Flaschen&nbsp;Taschen</h1>
+    <p class="caption" id="caption">A 320&times;64 LED wall in the shop. It plays a rotation of
+      demos on a loop, and it will draw whatever anyone on this network sends it.</p>
+
+    <div class="screen">
+      <img id="shot" alt="" hidden>
+      <div class="missing" id="missing">no preview</div>
+      <div class="ack" id="ack" hidden></div>
+      <div class="slot"><i id="slot"></i></div>
+    </div>
+
+    <button class="big" id="surprise">Show me something good &rarr;</button>
+
+    <a class="panel-link" href="/panel">
+      <div>
+        <b>Full console</b>
+        <small>every effect, its settings, running order and health</small>
+      </div>
+      <span class="arrow">&rsaquo;</span>
+    </a>
+  </section>
+
+  <section id="modeSection" hidden>
+    <h2>Mode</h2>
+    <div class="modes" id="modes" role="radiogroup" aria-label="Mode"></div>
+    <div id="custom" hidden>Custom mix &mdash; individual effects have been switched in the console</div>
+    <div id="modeNote">Picking a mode changes what plays next. Whatever is on the wall now finishes its slot first.</div>
+  </section>
+
+  <div class="display" id="displayRow" hidden>
+    <button id="power" aria-describedby="powerHint">
+      <span class="fill" id="powerFill"></span><span class="t" id="powerText">Hold to turn off</span>
+    </button>
+    <div class="bright">
+      <div class="row"><label for="dim">Brightness</label><output id="dimOut">100%</output></div>
+      <input type="range" id="dim" min="1" max="100" step="1" value="100" aria-label="Display brightness">
+    </div>
+  </div>
+
+  <section class="about">
+    <h2>Send it your own pixels</h2>
+    <p>The wall listens on UDP and speaks a one-frame-per-datagram dialect of
+       PPM. There is no handshake, no authentication and no session &mdash; a
+       datagram that arrives is drawn.</p>
+    <p>Draw on a <b>layer</b>, not on the bare wall. Layers stack like
+       transparencies on a projector: the <span class="mono">#FT: x y z</span>
+       line puts you on layer <span class="mono">z</span>, above the demos,
+       where black is see-through. Layer 0 is the one the rotation is painting
+       sixty times a second, so anything you send there is overwritten before
+       you can look up.</p>
+    <pre><span class="c"># a red square on layer 5, from anything that can write to a socket</span>
+python3 -c 'import socket
+f = b"P6\n64 64\n#FT: 128 0 5\n255\n" + bytes([255,0,0]) * 64 * 64
+socket.socket(2, 2).sendto(f, ("<span class="host">betelgeuse</span>", 1337))'</pre>
+    <p>A layer nobody refreshes is dropped after 15 seconds, so whatever you
+       leave behind cleans itself up &mdash; and to keep something on screen you
+       resend it, which is why the demos are a loop rather than a drawing.</p>
+    <dl>
+      <dt>Host</dt><dd class="mono"><span class="host">betelgeuse</span></dd>
+      <dt>Port</dt><dd class="mono">1337/udp</dd>
+      <dt>Size</dt><dd class="mono">320&times;64</dd>
+      <dt>Layers</dt><dd class="mono">0&ndash;15, topmost non-black wins</dd>
+    </dl>
+  </section>
+
+  <footer>
+    Clients, demos and the protocol in full:
+    <a href="https://github.com/FlaschenTaschen/ft-cpp">github.com/FlaschenTaschen/ft-cpp</a>
+  </footer>
+</main>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+
+/* Everything below is progressive: the page above is complete and readable
+   without it, because it has to work first time on whatever phone walks into
+   the room. Two independent daemons answer here -- the scheduler on /api and
+   the display on /api/display -- and either can be missing without taking the
+   other's controls off the page. */
+
+const $ = (id) => document.getElementById(id);
+
+for (const el of document.querySelectorAll(".host"))
+  el.textContent = location.hostname || "betelgeuse";
+
+let state = null;
+let groups = [];                  // [{key, label, description, count}]
+let modeInputs = new Map();       // key -> <input type=radio>
+// Local clock for the slot bar: the server publishes once a second and the bar
+// is advanced in between so it moves rather than steps.
+let elapsed = 0, duration = 1, lastTick = performance.now();
+
+function toast(msg, bad) {
+  const t = $("toast");
+  t.textContent = msg || "";
+  t.classList.toggle("bad", !!bad);
+  t.style.display = msg ? "block" : "none";
+  clearTimeout(toast.timer);
+  if (msg) toast.timer = setTimeout(() => { t.style.display = "none"; }, 3200);
+}
+
+async function post(op, extra) {
+  try {
+    const r = await fetch("/api/command", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(Object.assign({op}, extra || {}))
+    });
+    if (!r.ok) { toast("that did not go through: " + ((await r.json()).error || r.status), true); return false; }
+    refresh();                    // the command lands at the top of the next frame
+    return true;
+  } catch (e) { toast("cannot reach the wall", true); return false; }
+}
+
+/* ---- acknowledgement --------------------------------------------------- *
+ * A tap is answered on the screen immediately and honestly. "requested" means
+ * only that we sent it. "building" is next.ready off the state, so it is a
+ * real thing the scheduler told us and not a spinner. "on air" is the wall
+ * actually showing it. The gap between them is up to fourteen seconds for the
+ * expensive ones, which is precisely why it is drawn rather than hidden.
+ */
+let pending = null;               // {name, since}
+
+function requestEffect(name, index) {
+  pending = {name, since: performance.now()};
+  paintAck();
+  post("jump", {index});
+}
+
+function paintAck() {
+  const ack = $("ack");
+  if (!pending) { ack.hidden = true; return; }
+  const s = state;
+  let phase = "requested", label = "requested";
+  if (s) {
+    if (s.now && s.now.name === pending.name) { phase = "onair"; label = "on air"; }
+    else if (s.next && s.next.name === pending.name) {
+      phase = s.next.ready ? "queued" : "building";
+      label = s.next.ready ? "queued next" : "building";
+    }
+  }
+  // Cleared once it is up, and given up on after half a minute -- a jump that
+  // never arrives should stop claiming to be on its way.
+  if (phase === "onair" && performance.now() - pending.since > 2500) { pending = null; ack.hidden = true; return; }
+  if (performance.now() - pending.since > 30000) { pending = null; ack.hidden = true; return; }
+  ack.hidden = false;
+  ack.className = "ack " + phase;
+  ack.textContent = label;
+}
+
+/* ---- the modes --------------------------------------------------------- */
+
+function buildModes(list) {
+  groups = list;
+  const box = $("modes");
+  box.textContent = "";
+  modeInputs.clear();
+  $("modeSection").hidden = !list.length;
+  if (!list.length) return;       // an installation with no group file
+  for (const g of list) {
+    const row = document.createElement("label");
+    row.className = "mode";
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "mode";
+    input.value = g.key;
+    input.addEventListener("change", () => {
+      if (input.checked) {
+        post("select", {group: g.key});
+        toast(g.label + " — takes over after this slot");
+      }
+    });
+    const tick = document.createElement("span");
+    tick.className = "tick";
+    const text = document.createElement("span");
+    const label = document.createElement("span");
+    label.className = "label";
+    label.textContent = g.key === "all" ? "Everything" : g.label;
+    const desc = document.createElement("span");
+    desc.className = "desc";
+    desc.textContent = g.description || "";
+    text.append(label, document.createElement("br"), desc);
+    const count = document.createElement("span");
+    count.className = "count mono";
+    count.textContent = g.count ? g.count : "";
+    row.append(input, tick, text, count);
+    box.append(row);
+    modeInputs.set(g.key, input);
+  }
+}
+
+function paintModes(s) {
+  if (!groups.length) return;
+  for (const [key, input] of modeInputs)
+    if (document.activeElement !== input) input.checked = s.group === key;
+  $("custom").hidden = s.group != null;
+}
+
+/* ---- the wall ---------------------------------------------------------- */
+
+function paint(s) {
+  const now = s.now || {};
+  const live = s.rotation.filter(e => e.enabled).length;
+
+  $("nowName").textContent = now.name || "—";
+  $("nowLabel").textContent = now.position >= 0
+    ? "Now on the wall · " + (now.position + 1) + " of " + live
+    : "Now on the wall";
+  $("caption").textContent = captionFor(s);
+
+  const shot = $("shot"), missing = $("missing");
+  const src = now.name ? "/previews/" + encodeURIComponent(now.name) + ".webp" : "";
+  if (src && shot.dataset.name !== now.name) {
+    shot.dataset.name = now.name;
+    shot.hidden = false;
+    missing.hidden = true;
+    shot.alt = now.name + " on the wall";
+    shot.src = src;               // 12 of the 86 have none; onerror covers it
+  }
+
+  $("liveWord").textContent = blanked() ? "wall off" : "on air";
+  $("live").className = "live" + (blanked() ? " off" : "");
+
+  paintModes(s);
+  paintAck();
+
+  elapsed = now.elapsed || 0;
+  duration = Math.max(1, now.duration || 1);
+  lastTick = performance.now();
+}
+
+/* One quiet line under the title. Honest about what it knows: the mode, or the
+   length of a full pass, and nothing that pretends to describe an effect the
+   scheduler has never told us anything about. */
+function captionFor(s) {
+  const g = s.group && groups.find(x => x.key === s.group);
+  if (s.paused) return "Held on this one. The rotation is paused.";
+  if (g && g.key !== "all") return g.description + " — " + g.count + " of them, on a loop.";
+  const mins = Math.round((s.cycle_seconds || 0) / 60);
+  return mins ? "Playing everything in the rotation — a full pass takes " + mins + " minutes."
+              : "Playing the full rotation.";
+}
+
+$("shot").addEventListener("error", () => {
+  $("shot").hidden = true;
+  $("missing").hidden = false;
+});
+
+/* "Show me something good" is a jump to a random enabled effect other than the
+   one already up. No editorial list to keep in step with the rotation file --
+   and everything in the rotation is there because somebody thought it was
+   worth the wall. */
+$("surprise").addEventListener("click", () => {
+  if (!state) { toast("the scheduler is not answering", true); return; }
+  const pool = state.rotation.filter(e => e.enabled && e.name !== state.now.name);
+  if (!pool.length) return;
+  const pick = pool[Math.floor(Math.random() * pool.length)];
+  requestEffect(pick.name, pick.position);
+});
+
+function tick() {
+  if (state && !state.paused) elapsed += (performance.now() - lastTick) / 1000;
+  lastTick = performance.now();
+  $("slot").style.width = (100 * Math.min(1, elapsed / duration)) + "%";
+  requestAnimationFrame(tick);
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("api/state", {cache: "no-store"});
+    if (!r.ok) throw new Error(r.status);
+    const s = await r.json();
+    if (!s || !s.rotation) return;           // still starting up
+    state = s;
+    paint(s);
+  } catch (e) {
+    state = null;
+    $("live").className = "live bad";
+    $("liveWord").textContent = "scheduler down";
+    $("caption").textContent = "The scheduler is not answering. The wall itself may still be lit.";
+  }
+}
+
+async function loadSchema() {
+  try {
+    const r = await fetch("api/schema", {cache: "no-store"});
+    buildModes((await r.json()).groups || []);
+    refresh();
+  } catch (e) { /* no modes; the rest of the page still works */ }
+}
+
+/* ---- the display itself ------------------------------------------------ */
+/* ftctl, not the scheduler: this owns the panel hardware and keeps working
+   when the rotation does not. Absent entirely when the page is served without
+   nginx in front of it, and then the row simply is not here rather than being
+   here and dead. */
+
+let display = null, dimming = false;
+
+function blanked() { return !!(display && display.blanked); }
+
+async function postDisplay(body) {
+  try {
+    const r = await fetch("api/display", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body)
+    });
+    const s = await r.json();
+    if (!r.ok) { toast("display: " + (s.error || r.status), true); return; }
+    paintDisplay(s.display);
+  } catch (e) { toast("cannot reach the display", true); }
+}
+
+function paintDisplay(d) {
+  display = d;
+  const row = $("displayRow");
+  row.hidden = false;
+  if (!d) {                       // ftctl is up, ft_server is not
+    $("power").disabled = true;
+    $("powerText").textContent = "display offline";
+    row.classList.add("nodimmer");
+    return;
+  }
+  $("power").disabled = false;
+  $("power").classList.toggle("on", !!d.blanked);
+  $("powerText").textContent = d.blanked ? "Hold to turn on" : "Hold to turn off";
+  row.classList.toggle("nodimmer", !d.dimmer);
+  if (!dimming) {
+    $("dim").value = d.brightness;
+    $("dimOut").textContent = d.brightness + "%";
+  }
+  if (state) { $("liveWord").textContent = d.blanked ? "wall off" : "on air";
+               $("live").className = "live" + (d.blanked ? " off" : ""); }
+  $("shot").style.opacity = d.blanked ? ".18" : "1";
+}
+
+async function refreshDisplay() {
+  try {
+    const r = await fetch("api/display", {cache: "no-store"});
+    if (!r.ok) { $("displayRow").hidden = true; return; }
+    paintDisplay((await r.json()).display);
+  } catch (e) { $("displayRow").hidden = true; }
+}
+
+/* Hold, not tap. 900 ms of thumb, with the bar filling underneath so it is
+   obvious what is being asked of you and obvious that letting go stops it. */
+(function holdToPower() {
+  const btn = $("power"), fill = $("powerFill");
+  let raf = null, start = 0;
+  const HOLD = 900;
+
+  function frame() {
+    const pct = Math.min(1, (performance.now() - start) / HOLD);
+    fill.style.width = (pct * 100) + "%";
+    if (pct >= 1) { stop(); postDisplay({blanked: !blanked()}); return; }
+    raf = requestAnimationFrame(frame);
+  }
+  function stop() {
+    cancelAnimationFrame(raf); raf = null;
+    fill.style.width = "0";
+  }
+  btn.addEventListener("pointerdown", (ev) => {
+    if (btn.disabled) return;
+    ev.preventDefault();
+    btn.setPointerCapture && btn.setPointerCapture(ev.pointerId);
+    start = performance.now();
+    raf = requestAnimationFrame(frame);
+  });
+  for (const ev of ["pointerup", "pointercancel", "pointerleave"])
+    btn.addEventListener(ev, stop);
+  // A keyboard has no "hold": Enter or Space asks instead, which is the same
+  // amount of deliberateness by another route.
+  btn.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    ev.preventDefault();
+    if (confirm(blanked() ? "Turn the wall on?" : "Turn the wall off?"))
+      postDisplay({blanked: !blanked()});
+  });
+})();
+
+// Track while dragging, send on release: each change makes ft_server re-encode
+// the whole frame under the writer lock.
+$("dim").addEventListener("input", () => {
+  dimming = true;
+  $("dimOut").textContent = $("dim").value + "%";
+});
+for (const ev of ["change", "pointerup", "keyup"])
+  $("dim").addEventListener(ev, () => {
+    if (!dimming) return;
+    dimming = false;
+    postDisplay({brightness: Number($("dim").value)});
+  });
+
+// One poll a second while the page is in front of somebody. A backgrounded tab
+// should not keep a phone's radio awake for a page nobody is looking at.
+let timer = null;
+function poll(on) {
+  clearInterval(timer);
+  timer = on ? setInterval(() => { refresh(); refreshDisplay(); }, 1000) : null;
+  if (on) { refresh(); refreshDisplay(); }
+}
+document.addEventListener("visibilitychange", () => poll(!document.hidden));
+poll(true);
+loadSchema();
+requestAnimationFrame(tick);
+</script>

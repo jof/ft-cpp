@@ -4,282 +4,370 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
-<title>flaschen taschen — rotation</title>
+<title>flaschen taschen — console</title>
+
+<!-- The operator's console. The remote at / is the surface for everybody else:
+     what is on the wall, a mode, brightness. Everything that needs the whole
+     rotation in front of it -- per-effect enable, the generated settings
+     forms, the running order, render cost and frame-rate health -- is here,
+     and the two link to each other.
+
+     One hand-written file, no framework, no build step, read off disk per
+     request so it can be edited against a running daemon. -->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- Non-blocking: the shop wifi reaches the wall long before it reaches
+     Google, and the page is laid out to be correct in the system font. -->
+<link rel="stylesheet" media="print" onload="this.media='all'"
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
 <style>
-/* The wall is 320x64: everything here is 5:1, and the layout is built around
-   that rather than fighting it. One column on a phone, as many as fit on a
-   desktop, and a preview is never scaled up past its native 320px because a
-   blown-up LED panel looks like a mistake rather than like pixel art. */
+/* The wall is 320x64, so every preview here is 5:1 and never scaled past its
+   native width -- a blown-up LED panel looks like a mistake rather than like
+   pixel art. Same warm palette as the remote at /: tapping through should not
+   feel like arriving somewhere else. */
 :root {
-  --bg: #0b0d12;
-  --card: #151922;
-  --card-hi: #1d2230;
-  --line: #262c3a;
-  --text: #e8ecf4;
-  --dim: #8891a5;
-  --live: #ffb03a;
-  --on: #45d17a;
-  --off: #464e60;
-  --pad: 14px;
+  --bg: #12110e;
+  --card: #1b1a15;
+  --card-hi: #232219;
+  --line: #33312a;
+  --rule: #26251e;
+  --text: #eae6da;
+  --dim: #8f887a;
+  --faint: #726b5b;
+  --on: #6cbf5f;
+  --build: #c08a5a;
+  --wait: #c9a24b;
+  --bad: #d98a86;
+  --off: #403c33;
+  --pad: 16px;
+  --sans: "Bricolage Grotesque", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
 /* The UA rule for [hidden] is display:none at the lowest specificity, so any
-   class that sets display -- .missing does, below -- silently beats it and the
-   element stays on screen. */
+   class that sets display silently beats it and the element stays on screen. */
 [hidden] { display: none !important; }
 html, body { margin: 0; padding: 0; }
 body {
-  background: var(--bg);
-  color: var(--text);
-  font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg); color: var(--text);
+  font: 15px/1.4 var(--sans);
   -webkit-text-size-adjust: 100%;
-  padding: 0 var(--pad) calc(var(--pad) + env(safe-area-inset-bottom));
+  padding: 0 var(--pad) calc(28px + env(safe-area-inset-bottom));
 }
-h1 { font-size: 15px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; margin: 0; }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
-
-/* ---- header ---------------------------------------------------------- */
-header {
-  position: sticky; top: 0; z-index: 10;
-  margin: 0 calc(-1 * var(--pad));
-  padding: var(--pad) var(--pad) 10px;
-  background: linear-gradient(var(--bg) 78%, transparent);
-  backdrop-filter: blur(6px);
-}
-.bar { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-.bar .spacer { flex: 1 1 auto; }
-#health { color: var(--dim); font-size: 12px; }
-#health.warn { color: var(--live); }
-.about { color: var(--dim); font-size: 12px; text-decoration: none; }
-.about:hover { color: var(--text); }
-
-.now { margin-top: 10px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.now .title { font-size: 20px; font-weight: 650; }
-.now .title .pos { color: var(--dim); font-weight: 400; font-size: 14px; }
-.now .up { color: var(--dim); font-size: 13px; }
-.now .up b { color: var(--text); font-weight: 600; }
-
-#progress { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; margin-top: 9px; }
-#progress i { display: block; height: 100%; width: 0; background: var(--live); transition: width .25s linear; }
-
-.controls { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
-/* The display row, one step quieter than the rotation controls above it: these
-   affect the whole wall rather than what is scheduled on it, and a wall-off
-   button that looks like the primary action invites being pressed by mistake. */
-.controls.display { border-top: 1px solid var(--line); padding-top: 10px; }
-.controls.display label { font-size: 13px; }
-.controls.display input[type=range] { flex: 1 1 120px; min-width: 90px; accent-color: var(--live); }
-.controls.display output { min-width: 3.6em; text-align: right; font-size: 13px; color: var(--dim); }
-/* Off is the state worth noticing from across the room. */
-#btnPower[aria-pressed="true"] { border-color: var(--live); color: var(--live); }
-/* A slider for a dimmer the backend does not have would be a lie; the terminal
-   and LED-strip backends genuinely cannot do it. */
-.controls.display.nodimmer label,
-.controls.display.nodimmer input,
-.controls.display.nodimmer output { opacity: .4; pointer-events: none; }
-/* Pushes the bulk switches away from the transport controls on a desktop, and
-   collapses to nothing once the row wraps on a phone. */
+.wrap { max-width: 1040px; margin: 0 auto; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .gap { flex: 1 1 0; min-width: 0; }
-button.minor { color: var(--dim); padding: 9px 11px; }
-button.minor:hover { color: var(--text); }
-button.primary { border-color: var(--live); color: var(--live); }
+
 button {
-  font: inherit; color: var(--text); background: var(--card); cursor: pointer;
+  font: inherit; font-family: var(--sans); font-weight: 600;
+  color: var(--text); background: var(--card-hi); cursor: pointer;
   border: 1px solid var(--line); border-radius: 8px;
-  padding: 9px 14px; min-height: 40px;      /* thumb-sized on a phone */
+  padding: 8px 13px; min-height: 38px;      /* thumb-sized on a phone */
   -webkit-tap-highlight-color: transparent;
 }
-button:hover { background: var(--card-hi); }
+button:hover { background: #2b291f; }
 button:active { transform: translateY(1px); }
-button[aria-pressed="true"] { border-color: var(--live); color: var(--live); }
+a { color: var(--dim); }
 
-/* ---- the group buttons ------------------------------------------------ */
-/* Radio, not switches: these are modes and only one can be on. They wrap onto
-   another line rather than scrolling sideways -- a row that scrolls hides the
-   option somebody was looking for and gives no hint on a phone that it did. */
-.groups {
-  display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; align-items: center;
+/* ---- header ------------------------------------------------------------ */
+header {
+  position: sticky; top: 0; z-index: 10;
+  margin: 0 calc(-1 * var(--pad)); padding: 14px var(--pad) 10px;
+  background: linear-gradient(var(--bg) 82%, transparent);
+  backdrop-filter: blur(6px);
 }
-.groups button { padding: 7px 12px; min-height: 36px; font-size: 14px; }
-/* role=radio, so aria-checked rather than the aria-pressed the toggle buttons
-   above use; same look, because to a thumb it is the same kind of "this one". */
-.groups button[aria-checked="true"] { border-color: var(--live); color: var(--live); }
-#groupNote { color: var(--dim); font-size: 12px; }
+.bar { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+h1 { font-size: 22px; font-weight: 800; letter-spacing: -.01em; margin: 0; }
+.back { font-family: var(--mono); font-size: 12px; text-decoration: underline;
+        text-underline-offset: 3px; }
+.back:hover { color: var(--text); }
+#health { font-family: var(--mono); font-size: 12px; color: var(--faint); }
+#health.warn { color: var(--build); }
 
-/* ---- the rotation ----------------------------------------------------- */
-#grid {
-  display: grid; gap: 12px; margin-top: 14px;
-  /* 320 is the panel's native width; below that a phone gets one column. */
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+/* the now line -- one row, the same shape as a rotation row so the eye reads
+   them as the same kind of thing */
+.now {
+  display: flex; align-items: center; gap: 12px; margin-top: 10px;
+  padding: 10px 12px; background: var(--card); border: 1px solid var(--line);
+  border-radius: 11px;
 }
-.card {
-  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
-  overflow: hidden; display: flex; flex-direction: column;
+.now .thumb { width: 110px; flex: none; }
+.now .who { flex: 1; min-width: 0; }
+.now .title { font-size: 17px; font-weight: 700; }
+.now .title .pos { font-family: var(--mono); font-size: 12px; font-weight: 400; color: var(--dim); }
+.now .up { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.now .up b { color: var(--text); font-weight: 600; }
+.now .up .building { color: var(--build); }
+#progress { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; margin-top: 6px; }
+#progress i { display: block; height: 100%; width: 0; background: var(--on); transition: width .25s linear; }
+.now .transport { display: flex; gap: 6px; flex: none; }
+#btnPause[aria-pressed="true"] { border-color: var(--wait); color: var(--wait); }
+.now .title, .now .up { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 560px) {
+  /* Pause and Skip drop under the line rather than squeezing the name into a
+     column three characters wide. */
+  .now { flex-wrap: wrap; }
+  .now .thumb { width: 84px; }
+  .now .who { flex: 1 1 140px; }
+  .now .transport { flex: 1 0 100%; }
+  .now .transport button { flex: 1; }
 }
-.card.live { border-color: var(--live); box-shadow: 0 0 0 1px var(--live); }
-.card.disabled .shot, .card.disabled .name { opacity: .32; }
 
-.shot {
-  position: relative; display: block; width: 100%; aspect-ratio: 5 / 1;
-  border: 0; padding: 0; margin: 0; border-radius: 0; min-height: 0;
-  background: #000; cursor: pointer;
+/* ---- toolbar ----------------------------------------------------------- */
+.tools { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 14px 0 12px; }
+#search {
+  flex: 1 1 220px; min-width: 160px; font: inherit; font-family: var(--mono);
+  /* 16px, or iOS Safari zooms the page the instant the field takes focus. */
+  font-size: 16px;
+  background: #171610; border: 1px solid var(--line); border-radius: 10px;
+  padding: 9px 13px; color: var(--text);
 }
-.shot img {
-  display: block; width: 100%; height: 100%; object-fit: contain;
-  /* Nearest-neighbour: these are 320x64 and every pixel is meant. */
-  image-rendering: pixelated;
+#search:focus-visible { outline: 2px solid var(--on); outline-offset: 1px; }
+.seg { display: flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; flex: none; }
+.seg button { border: 0; border-radius: 0; background: transparent; color: var(--dim); min-height: 38px; }
+.seg button[aria-pressed="true"] { background: var(--on); color: #0f1a0d; }
+#count { font-family: var(--mono); font-size: 12px; color: var(--dim); }
+
+/* ---- the index: seven headings, not one wall of 86 --------------------- */
+.sections { border-top: 1px solid var(--rule); }
+.sec { border-bottom: 1px solid var(--rule); }
+.sec > .head {
+  display: flex; align-items: center; gap: 12px; padding: 13px 2px; width: 100%;
+  background: none; border: 0; border-radius: 0; text-align: left; min-height: 0;
 }
-.shot .missing {
+.sec > .head:hover { background: none; }
+.sec .caret { font-family: var(--mono); font-size: 13px; color: var(--dim); width: 14px; flex: none; }
+.sec .label { font-size: 19px; font-weight: 800; letter-spacing: -.01em; }
+.sec .desc { font-size: 13px; font-weight: 400; color: var(--dim); flex: 1; min-width: 0; text-wrap: pretty; }
+.sec .tally { font-family: var(--mono); font-size: 12px; color: var(--faint); flex: none; }
+.sec .tally.part { color: var(--build); }
+.sec .tally.full { color: var(--on); }
+.sec .setmode { flex: none; padding: 6px 11px; min-height: 32px; font-size: 12px; background: var(--card); }
+.sec .setmode[aria-checked="true"] { border-color: var(--on); color: var(--on); }
+.sec .body { padding: 0 0 10px 26px; }
+@media (max-width: 640px) {
+  .sec .desc { display: none; }             /* the heading carries it on a phone */
+  .sec .body { padding-left: 0; }
+}
+@media (max-width: 430px) {
+  .row .thumb { width: 72px; }
+  .row .meta .len { display: none; }
+}
+
+/* ---- a rotation row ---------------------------------------------------- */
+.row { display: flex; align-items: center; gap: 11px; padding: 7px 6px; border-radius: 8px; }
+.row.live { background: #1e2418; }
+.row.pending { background: #221f16; }
+.row.disabled .thumb, .row.disabled .name { opacity: .38; }
+.thumb {
+  flex: none; width: 84px; aspect-ratio: 5 / 1; padding: 0; min-height: 0;
+  background: #000; border: 1px solid var(--line); border-radius: 5px; overflow: hidden;
+  position: relative;
+}
+.thumb img { display: block; width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; }
+.thumb .missing {
   position: absolute; inset: 0; display: grid; place-items: center;
-  color: var(--off); font-size: 12px; letter-spacing: .1em; text-transform: uppercase;
+  font-family: var(--mono); font-size: 7px; letter-spacing: .1em; color: var(--faint);
 }
-.shot .badge {
-  position: absolute; left: 8px; top: 8px;
-  background: rgba(0,0,0,.66); color: #fff; border-radius: 5px;
-  padding: 1px 6px; font-size: 11px;
+.row .who { flex: 1; min-width: 0; }
+/* One line each, whatever the name is and however many chips it has: a row
+   that grows to three lines on a phone turns the list into a scroll of ragged
+   blocks and loses the shape of the running order. */
+.row .name, .row .meta { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .name { font-weight: 600; font-size: 15px; }
+.row .meta { font-family: var(--mono); font-size: 10px; color: var(--dim); }
+.row .meta .ms.warm { color: var(--build); }
+.row .meta .ms.hot { color: var(--bad); }
+.chip {
+  font-family: var(--mono); font-size: 9px; font-weight: 600; letter-spacing: .06em;
+  padding: 1px 7px; border-radius: 8px; margin-left: 6px; white-space: nowrap;
 }
-.card.live .shot .badge { background: var(--live); color: #1a1200; font-weight: 700; }
-
-.row { display: flex; align-items: center; gap: 10px; padding: 9px 11px; }
-.name { font-weight: 600; }
-.meta { color: var(--dim); font-size: 12px; }
-.meta .solo, .meta .cust { color: var(--live); }
-
-/* Only on cards whose demo actually declares options, so its presence is the
-   answer to "can I change this one". */
-.cog {
-  flex: none; width: 36px; min-height: 36px; padding: 0;
-  color: var(--dim); font-size: 15px; line-height: 1;
-}
+.chip.cust { color: var(--build); border: 1px solid #43331f; }
+.chip.solo { color: var(--dim); border: 1px solid var(--line); }
+/* The acknowledgement, on the row that was tapped, from the moment it was
+   tapped: requested -> queued -> building -> on air. See the note in the
+   script -- none of these claim more than the API actually said. */
+.chip.st { color: #12110e; background: var(--wait); }
+.chip.st.building { background: var(--build); }
+.chip.st.onair { background: var(--on); }
+.cog { flex: none; width: 30px; min-height: 30px; padding: 0; color: var(--dim); font-size: 14px; }
 .cog:hover { color: var(--text); }
-.cog.custom { color: var(--live); border-color: var(--live); }
+.cog.custom { color: var(--build); border-color: #43331f; }
 
 /* A checkbox styled as a switch, so it stays a real control: focusable,
-   toggleable with the keyboard, and announced properly by a screen reader. */
-.sw { margin-left: auto; position: relative; width: 46px; height: 28px; flex: none; }
+   toggleable from the keyboard, announced properly by a screen reader. */
+.sw { flex: none; position: relative; width: 44px; height: 26px; }
 .sw input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
-.sw span {
-  position: absolute; inset: 0; border-radius: 999px; background: var(--off);
-  transition: background .15s; pointer-events: none;
-}
-.sw span::after {
-  content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px;
-  border-radius: 50%; background: #fff; transition: transform .15s;
-}
+.sw span { position: absolute; inset: 0; border-radius: 999px; background: var(--off);
+           transition: background .15s; pointer-events: none; }
+.sw span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+                  border-radius: 50%; background: var(--text); transition: transform .12s; }
 .sw input:checked + span { background: var(--on); }
 .sw input:checked + span::after { transform: translateX(18px); }
 .sw input:focus-visible + span { outline: 2px solid var(--text); outline-offset: 2px; }
 
-/* ---- the settings editor ---------------------------------------------- */
+/* ---- the running order ------------------------------------------------- */
+#order { border-top: 1px solid var(--rule); }
+#order .row { border-bottom: 1px solid #201f19; border-radius: 0; padding: 8px 4px; gap: 13px; }
+#order .num { font-family: var(--mono); font-size: 13px; color: var(--dim); width: 32px;
+              text-align: right; flex: none; }
+#order .thumb { width: 96px; }
+#order .cost { font-family: var(--mono); font-size: 11px; width: 54px; text-align: right; flex: none; color: var(--dim); }
+#order .cost.warm { color: var(--build); }
+#order .cost.hot { color: var(--bad); }
+#order .slot { font-family: var(--mono); font-size: 11px; color: var(--dim); width: 108px;
+               text-align: right; flex: none; }
+@media (max-width: 640px) { #order .slot { display: none; } }
+
+#empty { color: var(--dim); padding: 26px 4px; }
+
+/* ---- the bottom of the page: the display, and the sharp edges ---------- */
+/* Kept away from everything routine and behind a confirmation each. There is
+   no authentication here by design -- it is a wall in a workshop -- so the
+   only thing standing between a mis-tap and a dark wall is where the button
+   sits and what it asks. */
+.zone {
+  margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--rule);
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+}
+.zone .tag { font-family: var(--mono); font-size: 11px; color: var(--faint);
+             letter-spacing: .1em; text-transform: uppercase; }
+.zone.display input[type=range] { flex: 1 1 130px; min-width: 100px; accent-color: var(--on); }
+.zone.display output { font-family: var(--mono); font-size: 12px; color: var(--dim); min-width: 3.4em; text-align: right; }
+.zone.display label { font-size: 13px; color: var(--dim); }
+.zone.display.nodimmer label, .zone.display.nodimmer input, .zone.display.nodimmer output {
+  opacity: .4; pointer-events: none;
+}
+.danger { border-color: #4a2e2c; background: #1c1310; color: var(--bad); }
+.danger:hover { background: #241713; }
+#btnPower[aria-pressed="true"] { border-color: var(--bad); color: var(--bad); }
+
+/* ---- the settings editor ----------------------------------------------- */
 /* <dialog> rather than a hand-rolled overlay: it comes with the backdrop, the
-   focus trap, Esc, and inertness of everything behind it, all of which are
-   easy to write and tedious to get right. On a phone it is a sheet up from
-   the bottom, where a thumb is; on a desktop it is a centred panel. */
+   focus trap, Esc, and inertness of everything behind it. A sheet up from the
+   bottom on a phone, where a thumb is; a centred panel on a desktop. */
 dialog {
-  border: 1px solid var(--line); border-radius: 14px; padding: 0;
+  border: 1px solid var(--line); border-radius: 16px; padding: 0;
   background: var(--card); color: var(--text); overflow: hidden;
-  width: min(560px, calc(100% - 24px)); max-height: min(86vh, 760px);
+  width: min(560px, calc(100% - 24px)); max-height: min(88vh, 780px);
 }
 dialog[open] { display: flex; flex-direction: column; }
-dialog::backdrop { background: rgba(4, 6, 10, .66); }
+dialog::backdrop { background: rgba(8, 7, 5, .68); }
 #editorForm { display: flex; flex-direction: column; min-height: 0; }
-.ed-head, .ed-foot { display: flex; align-items: center; gap: 10px; flex: none; padding: 12px 14px; }
+.ed-head, .ed-foot { display: flex; align-items: center; gap: 10px; flex: none; padding: 13px 15px; }
 .ed-head { border-bottom: 1px solid var(--line); }
 .ed-foot { border-top: 1px solid var(--line); }
-.ed-head b { font-size: 17px; }
-.ed-head .mod { color: var(--dim); font-size: 12px; }
-.ed-x { width: 36px; min-height: 36px; padding: 0; color: var(--dim); }
-.ed-body { overflow-y: auto; -webkit-overflow-scrolling: touch; min-height: 0; padding: 2px 14px 14px; }
-.ed-note { color: var(--dim); font-size: 12px; padding-top: 12px; }
+.ed-head b { font-size: 19px; font-weight: 800; }
+.ed-head .mod { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.ed-x { width: 32px; min-height: 32px; padding: 0; color: var(--dim); }
+.ed-body { overflow-y: auto; -webkit-overflow-scrolling: touch; min-height: 0; padding: 2px 15px 15px; }
+.ed-note { color: var(--dim); font-size: 12px; padding-top: 12px; text-wrap: pretty; }
+.ed-empty { padding: 20px; text-align: center; color: var(--dim);
+            background: #171610; border: 1px dashed var(--line); border-radius: 10px; margin-top: 12px; }
+.save { background: var(--on); color: #0f1a0d; border-color: var(--on); font-weight: 700; }
+.save:hover { background: #7ccd6f; }
 
-.fld { padding: 11px 0; border-bottom: 1px solid var(--line); }
+.fld { padding: 11px 0; border-bottom: 1px solid var(--rule); }
 .fld .top { display: flex; align-items: center; gap: 12px; }
 .fld .lbl { font-weight: 600; }
-.fld .lbl em { color: var(--dim); font-weight: 400; font-style: normal; font-size: 12px; }
+.fld .lbl em { font-family: var(--mono); color: var(--faint); font-weight: 400; font-style: normal; font-size: 11px; }
 .fld .ctl { margin-left: auto; flex: none; }
-.fld .hlp { color: var(--dim); font-size: 12px; margin-top: 5px; }
-/* Long text -- a splitflap board, a console script -- gets the full width on
-   its own line instead of a slot at the end of the label row. */
+.fld .hlp { color: var(--dim); font-size: 12px; margin-top: 5px; text-wrap: pretty; }
 .fld > .ctl { margin: 8px 0 0; width: 100%; }
 .fld input[type=text], .fld input[type=number], .fld select, .fld textarea {
-  font: inherit;
-  /* 16px, or iOS Safari zooms the page the instant a field takes focus and
-     never zooms back out again. */
-  font-size: 16px;
-  color: var(--text); background: var(--bg); width: 100%;
+  font: inherit; font-family: var(--mono); font-size: 16px;
+  color: var(--text); background: #171610; width: 100%;
   border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; min-height: 40px;
 }
-.fld input[type=number] { width: 9ch; }
+.fld input[type=number] { width: 9ch; text-align: right; }
 .fld select { width: auto; max-width: 15rem; }
 .fld textarea { resize: vertical; min-height: 84px; line-height: 1.45; }
 .fld input:focus-visible, .fld select:focus-visible, .fld textarea:focus-visible {
-  outline: 2px solid var(--live); outline-offset: 1px; border-color: var(--live);
+  outline: 2px solid var(--on); outline-offset: 1px; border-color: var(--on);
 }
 @media (max-width: 520px) {
-  dialog {
-    width: 100%; max-width: 100%; max-height: 92vh;
-    margin: auto auto 0;                    /* sits on the bottom edge */
-    border-radius: 14px 14px 0 0; border-bottom: 0;
-  }
-  .ed-foot { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+  dialog { width: 100%; max-width: 100%; max-height: 92vh; margin: auto auto 0;
+           border-radius: 16px 16px 0 0; border-bottom: 0; }
+  .ed-foot { padding-bottom: calc(13px + env(safe-area-inset-bottom)); }
   .fld input[type=number] { width: 8ch; }
 }
 
-#err {
+#toast {
   position: fixed; left: 50%; transform: translateX(-50%);
-  bottom: calc(12px + env(safe-area-inset-bottom));
-  background: #40121a; border: 1px solid #7d2233; color: #ffd7dd;
-  padding: 8px 14px; border-radius: 8px; font-size: 13px; display: none;
+  bottom: calc(14px + env(safe-area-inset-bottom)); z-index: 50;
+  max-width: calc(100% - 32px);
+  background: var(--card-hi); border: 1px solid var(--on); color: var(--text);
+  font-family: var(--mono); font-size: 13px; padding: 9px 16px; border-radius: 20px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.5); display: none;
 }
+#toast.bad { border-color: var(--bad); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 </head>
 <body>
+<div class="wrap">
 
 <header>
   <div class="bar">
-    <h1>Flaschen Taschen</h1>
-    <span class="spacer"></span>
-    <!-- Only present when something is fronting this at the root; served
-         standalone on :8081 the link is a 404, so it is not in the way. -->
-    <a class="about" href="/about">about</a>
-    <span id="health" class="mono"></span>
+    <h1>Console</h1>
+    <!-- Only meaningful when nginx is fronting this; served standalone on
+         :8081 the root is this same page, which is harmless. -->
+    <a class="back" href="/">&larr; Remote</a>
+    <span class="gap"></span>
+    <span id="health"></span>
   </div>
+
   <div class="now">
-    <span class="title"><span id="nowName">—</span> <span class="pos mono" id="nowPos"></span></span>
-    <span class="up">next <b id="nextName">—</b></span>
-  </div>
-  <div id="progress"><i></i></div>
-  <div class="controls">
-    <button id="btnPause" aria-pressed="false">Pause</button>
-    <button id="btnNext">Skip &rsaquo;&rsaquo;</button>
-    <span class="gap"></span>
-    <!-- "Enable all" and the All group button do the same thing on purpose:
-         one is the bulk switch that has always been here, the other is the
-         neutral position of the radio row, and each is where you look for it. -->
-    <button id="btnAllOn" class="minor">Enable all</button>
-    <button id="btnAllOff" class="minor">Disable all</button>
-  </div>
-  <!-- Themed sets, from rotation-groups.json by way of /api/schema. Empty and
-       hidden where there is no group file, so an installation without one is
-       exactly as it was. -->
-  <div class="groups" id="groupBar" role="radiogroup" aria-label="Themed set" hidden></div>
-  <!-- The display itself rather than the rotation: this talks to ft_server via
-       ftctl, not to the scheduler. Hidden until /api/display answers, so the
-       panel is unchanged when served standalone on :8081 or before nginx is
-       routing it. -->
-  <div class="controls display" id="displayBar" hidden>
-    <button id="btnPower" aria-pressed="false">Wall off</button>
-    <label class="dim" for="dim">Brightness</label>
-    <input type="range" id="dim" min="1" max="100" step="1" value="100"
-           aria-label="Display brightness">
-    <output id="dimOut" class="mono">100%</output>
-    <span class="gap"></span>
-    <button id="btnWipe" class="minor">Wipe</button>
+    <span class="thumb" id="nowThumb"><img id="nowImg" alt="" hidden><span class="missing" id="nowMissing">no preview</span></span>
+    <div class="who">
+      <div class="title"><span id="nowName">—</span> <span class="pos" id="nowPos"></span></div>
+      <div class="up">next · <b id="nextName">—</b><span class="building" id="nextBuilding" hidden> · building</span></div>
+      <div id="progress"><i></i></div>
+    </div>
+    <div class="transport">
+      <button id="btnPause" aria-pressed="false">Pause</button>
+      <button id="btnNext">Skip</button>
+    </div>
   </div>
 </header>
 
-<div id="grid"></div>
+<div class="tools">
+  <input type="search" id="search" placeholder="Search the rotation…" aria-label="Search the rotation" autocomplete="off">
+  <div class="seg" role="group" aria-label="View">
+    <button id="viewIndex" aria-pressed="true">Index</button>
+    <button id="viewOrder" aria-pressed="false">Order</button>
+  </div>
+  <span id="count"></span>
+  <span class="gap"></span>
+  <button id="btnAllOn">Enable all</button>
+</div>
+
+<!-- Grouped by theme, from rotation-groups.json by way of /api/schema. The
+     groups were always meaningful; until now they were only a bulk switch and
+     not a way to look through 86 things. -->
+<div class="sections" id="sections"></div>
+<!-- The same entries as the running order actually plays them, which is the
+     other question an operator asks and the grouping cannot answer. -->
+<div id="order" hidden></div>
+<div id="empty" hidden>Nothing matches that.</div>
+
+<div class="zone display" id="displayZone" hidden>
+  <span class="tag">Display</span>
+  <button id="btnPower" aria-pressed="false">Wall off</button>
+  <label for="dim">Brightness</label>
+  <input type="range" id="dim" min="1" max="100" step="1" value="100" aria-label="Display brightness">
+  <output id="dimOut">100%</output>
+</div>
+
+<div class="zone">
+  <span class="tag">Destructive &middot; each one asks first</span>
+  <button class="danger" id="btnAllOff">Disable all</button>
+  <button class="danger" id="btnWipe">Wipe every layer</button>
+</div>
+
+</div><!-- /wrap -->
 
 <dialog id="editor" aria-labelledby="edName">
   <!-- method="dialog" so Enter in a field closes rather than navigates; every
@@ -288,43 +376,41 @@ dialog::backdrop { background: rgba(4, 6, 10, .66); }
   <form id="editorForm" method="dialog">
     <div class="ed-head">
       <b id="edName">—</b>
-      <span class="mod mono" id="edModule"></span>
+      <span class="mod" id="edModule"></span>
       <span class="gap"></span>
       <button type="button" class="ed-x" id="edClose" aria-label="Close">&#10005;</button>
     </div>
     <div class="ed-body" id="edBody"></div>
     <div class="ed-foot">
-      <button type="button" class="minor" id="edReset">Restore defaults</button>
+      <button type="button" id="edReset">Restore shipped</button>
       <span class="gap"></span>
       <button type="button" id="edCancel">Cancel</button>
-      <button type="button" class="primary" id="edSave">Save</button>
+      <button type="button" class="save" id="edSave">Save</button>
     </div>
   </form>
 </dialog>
 
-<div id="err"></div>
+<div id="toast"></div>
 
 <script>
 "use strict";
 
-const grid = document.getElementById("grid");
-const errBox = document.getElementById("err");
-const bar = document.querySelector("#progress i");
-const groupBar = document.getElementById("groupBar");
+const $ = (id) => document.getElementById(id);
+const sections = $("sections");
+const orderBox = $("order");
 
 let state = null;
-let cards = new Map();          // name -> {el, img, sw, badge}
-// module -> [{name, label, flags, type, default, choices, help}], read once.
-// Empty until /api/schema answers, which is what decides whether a card gets
-// a settings button at all, so the cards are rebuilt when it lands.
+let rows = new Map();             // name -> {row, img, missing, box, meta, cog, chips}
+let orderRows = new Map();        // name -> the same, in the Order view
+// module -> [option specs], read once with the groups. Empty until
+// /api/schema answers, which is what decides whether a row gets a settings
+// button at all, so the rows are rebuilt when it lands.
 let schema = {};
-// [{key, label, description, count}] and key -> button, read once with the
-// schema. Empty where the scheduler has no group file, which is what leaves
-// the row off the page entirely.
-let groups = [];
-let groupBtns = new Map();
-let groupNote = null;
-// The server publishes once a second; the progress bar is advanced locally in
+let groups = [];                  // [{key, label, description, count, members}]
+let view = "index";
+let query = "";
+let open = {};                    // group key -> expanded
+// The server publishes once a second; the slot bar is advanced locally in
 // between so it moves smoothly instead of stepping.
 let localElapsed = 0, localDuration = 1, lastTick = performance.now();
 
@@ -333,9 +419,13 @@ function fmtTime(s) {
   return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 }
 
-function say(msg) {
-  errBox.textContent = msg;
-  errBox.style.display = msg ? "block" : "none";
+function toast(msg, bad) {
+  const t = $("toast");
+  t.textContent = msg || "";
+  t.classList.toggle("bad", !!bad);
+  t.style.display = msg ? "block" : "none";
+  clearTimeout(toast.timer);
+  if (msg) toast.timer = setTimeout(() => { t.style.display = "none"; }, 3600);
 }
 
 async function post(op, extra) {
@@ -345,105 +435,124 @@ async function post(op, extra) {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify(Object.assign({op}, extra || {}))
     });
-    if (!r.ok) say("command failed: " + (await r.json()).error);
-    else { say(""); refresh(); }            // the command lands next frame
-  } catch (e) { say("offline"); }
+    if (!r.ok) { toast("command failed: " + ((await r.json()).error || r.status), true); return; }
+    refresh();                    // the command lands at the top of the next frame
+  } catch (e) { toast("offline", true); }
 }
 
-/* ---- the group buttons ------------------------------------------------ *
- * Themed sets: "just the data ones", "just the movie ones", "just the Sequoia
- * Fabrica ones". Selecting one enables its members and disables everything
- * else, in a single command, so the wall changes at the top of one frame
- * rather than flickering through a half-applied set.
+/* ---- acknowledgement --------------------------------------------------- *
+ * The loudest complaint about the old panel was that tapping something
+ * appeared to do nothing: the command is queued and applied at the top of the
+ * next render frame, this page only learns the outcome on its next 1 Hz poll,
+ * and a segment that has not been rendered yet has to be built first --
+ * usually fast, occasionally fourteen seconds.
  *
- * Radio-style, because the modes are exclusive. Membership is not -- tide is
- * honestly both a data panel and a San Francisco one, and lives in both --
- * which is exactly why the page does not try to work out which group is on
- * from the cards. The scheduler answers that, over the state, and answers
- * null once the live set matches none of them.
+ * So a tap marks its row immediately and the row then says what is actually
+ * true, in this order: `requested` (we sent it, nothing more), `queued next`
+ * (the scheduler has it as next and it is ready), `building` (it is next and
+ * next.ready is false -- the scheduler's word, not a spinner) and `on air`.
+ * Nothing here claims the wall is doing something it is not.
  */
+const pending = new Map();        // name -> when it was tapped
 
-function buildGroups(list) {
-  groups = list;
-  groupBtns.clear();
-  groupBar.textContent = "";
-  groupBar.hidden = !list.length;
-  if (!list.length) return;
-  for (const g of list) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.setAttribute("role", "radio");
-    b.setAttribute("aria-checked", "false");
-    b.textContent = g.label;
-    b.title = g.description + (g.count ? " — " + g.count + " entries" : "");
-    // No confirmation, unlike "Disable all" next door. That one is a chore to
-    // undo from a phone; this is one tap, it is the entire point of the row,
-    // and the way back is the first button in it.
-    b.addEventListener("click", () => post("select", {group: g.key}));
-    groupBar.append(b);
-    groupBtns.set(g.key, b);
+function markPending(name) {
+  pending.set(name, performance.now());
+  if (state) paint(state);        // no wait for the next poll to acknowledge
+}
+
+function statusOf(name) {
+  if (!state) return null;
+  const since = pending.get(name);
+  const live = state.now && state.now.name === name;
+  if (live) {
+    // Seen it land: keep the badge on for a moment and then let it go.
+    if (since !== undefined && performance.now() - since > 2500) pending.delete(name);
+    return since === undefined ? null : {cls: "onair", text: "on air"};
   }
-  groupNote = document.createElement("span");
-  groupNote.id = "groupNote";
-  groupNote.textContent = "custom mix";
-  groupNote.hidden = true;
-  groupBar.append(groupNote);
+  if (since === undefined) return null;
+  if (performance.now() - since > 30000) { pending.delete(name); return null; }
+  if (state.next && state.next.name === name)
+    return state.next.ready ? {cls: "queued", text: "queued next"}
+                            : {cls: "building", text: "building"};
+  return {cls: "requested", text: "requested"};
 }
 
-function paintGroups(s) {
-  if (!groups.length) return;
-  const active = s.group == null ? null : s.group;
-  for (const [key, b] of groupBtns)
-    b.setAttribute("aria-checked", String(active === key));
-  // Somebody has flipped a card since a group was chosen, so the live set is
-  // none of these any more. Leaving the last button lit would be claiming a
-  // mode the wall is not in; say what is actually true instead.
-  groupNote.hidden = active !== null;
+/* ---- building the two views -------------------------------------------- */
+
+function thumbFor(name, onClick) {
+  const b = document.createElement("button");
+  b.className = "thumb";
+  b.type = "button";
+  b.title = "Play " + name + " now";
+  b.setAttribute("aria-label", "Play " + name + " now");
+  const img = document.createElement("img");
+  img.loading = "lazy";           // 74 clips, 3.4 MB, mostly in shut sections
+  img.alt = "";
+  img.src = "/previews/" + encodeURIComponent(name) + ".webp";
+  const missing = document.createElement("span");
+  missing.className = "missing";
+  missing.textContent = "no prev";
+  missing.hidden = true;
+  // 12 of the 86 have no preview at all. That tile is a state, not a bug.
+  img.addEventListener("error", () => { img.hidden = true; missing.hidden = false; });
+  b.append(img, missing);
+  b.addEventListener("click", onClick);
+  return {el: b, img, missing};
 }
 
-/* ---- the cards -------------------------------------------------------- */
+/* Jumping to something switched off would put it on the wall and then never
+   come back to it, which reads as a bug. Turn it on as well. */
+function jumpTo(e) {
+  markPending(e.name);
+  if (!e.enabled) post("toggle", {name: e.name, on: true});
+  post("jump", {index: positionOf(e.name)});
+}
 
-function buildCards(rotation) {
-  grid.textContent = "";
-  cards.clear();
-  for (const e of rotation) {
-    const card = document.createElement("div");
-    card.className = "card";
+function positionOf(name) {
+  const e = state && state.rotation.find(x => x.name === name);
+  return e ? e.position : 0;
+}
 
-    const shot = document.createElement("button");
-    shot.className = "shot";
-    shot.title = "Jump to " + e.name;
-    const img = document.createElement("img");
-    img.loading = "lazy";
-    img.alt = e.name + " preview";
-    img.src = "/previews/" + encodeURIComponent(e.name) + ".webp";
-    const missing = document.createElement("div");
-    missing.className = "missing";
-    missing.textContent = "no preview";
-    missing.hidden = true;
-    img.addEventListener("error", () => { img.hidden = true; missing.hidden = false; });
-    const badge = document.createElement("div");
-    badge.className = "badge mono";
-    shot.append(img, missing, badge);
-    // Jumping to something switched off would put it on the wall and then
-    // never come back to it, which reads as a bug. Turn it on as well.
-    shot.addEventListener("click", () => {
-      if (!e.enabled) post("toggle", {name: e.name, on: true});
-      post("jump", {index: cardPosition(e.name)});
-    });
+function makeRow(e, withNumber) {
+  const row = document.createElement("div");
+  row.className = "row";
 
-    const row = document.createElement("div");
-    row.className = "row";
-    const name = document.createElement("div");
-    name.className = "name";
-    name.textContent = e.name;
-    const meta = document.createElement("div");
-    meta.className = "meta mono";
-    const spacer = document.createElement("span");
-    spacer.className = "gap";
+  let num = null;
+  if (withNumber) {
+    num = document.createElement("span");
+    num.className = "num";
+    row.append(num);
+  }
+
+  const t = thumbFor(e.name, () => jumpTo(entryFor(e.name) || e));
+  row.append(t.el);
+
+  const who = document.createElement("div");
+  who.className = "who";
+  const nameLine = document.createElement("div");
+  nameLine.className = "name";
+  const nameText = document.createElement("span");
+  nameText.textContent = e.name;
+  const chips = document.createElement("span");
+  nameLine.append(nameText, chips);
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  who.append(nameLine, meta);
+  row.append(who);
+
+  let slot = null, cost = null;
+  if (withNumber) {               // the Order view puts the numbers in columns
+    slot = document.createElement("span");
+    slot.className = "slot";
+    cost = document.createElement("span");
+    cost.className = "cost";
+    row.append(slot, cost);
+  }
+
+  let cog = null, box = null;
+  if (!withNumber) {
     // Only where there is something to edit: an exec entry is somebody else's
     // program, and a demo that declares no options has no form to show.
-    let cog = null;
     if (e.kind !== "exec" && (schema[e.module] || []).length) {
       cog = document.createElement("button");
       cog.type = "button";
@@ -452,118 +561,334 @@ function buildCards(rotation) {
       cog.title = "Settings for " + e.name;
       cog.setAttribute("aria-label", "Settings for " + e.name);
       cog.addEventListener("click", () => openEditor(e.name));
+      row.append(cog);
     }
     const sw = document.createElement("label");
     sw.className = "sw";
-    const box = document.createElement("input");
+    box = document.createElement("input");
     box.type = "checkbox";
     box.checked = e.enabled;
     box.setAttribute("aria-label", "Play " + e.name + " in the rotation");
     box.addEventListener("change", () => post("toggle", {name: e.name, on: box.checked}));
     sw.append(box, document.createElement("span"));
-    row.append(name, meta, spacer);
-    if (cog) row.append(cog);
     row.append(sw);
+  }
 
-    card.append(shot, row);
-    grid.append(card);
-    cards.set(e.name, {card, badge, box, meta, cog});
+  return {row, img: t.img, missing: t.missing, box, meta, cog, chips, num, slot, cost};
+}
+
+function entryFor(name) {
+  return state && state.rotation.find(x => x.name === name);
+}
+
+function buildIndex(rotation) {
+  sections.textContent = "";
+  rows.clear();
+  const placed = new Set();
+  const byName = new Map(rotation.map(e => [e.name, e]));
+
+  const buckets = groups.filter(g => g.key !== "all" && (g.members || []).length)
+                        .map(g => ({key: g.key, label: g.label, desc: g.description,
+                                    members: g.members.filter(n => byName.has(n))}));
+  for (const b of buckets) for (const n of b.members) placed.add(n);
+  // Overlapping membership is fine and intended -- tide is honestly both a
+  // data panel and a San Francisco one -- but something in no group at all
+  // would otherwise be unreachable from this view.
+  const loose = rotation.filter(e => !placed.has(e.name));
+  if (loose.length)
+    buckets.push({key: null, label: "Ungrouped", desc: "In no themed set",
+                  members: loose.map(e => e.name)});
+
+  for (const b of buckets) {
+    const sec = document.createElement("div");
+    sec.className = "sec";
+
+    const head = document.createElement("button");
+    head.className = "head";
+    head.type = "button";
+    const caret = document.createElement("span");
+    caret.className = "caret";
+    const label = document.createElement("span");
+    label.className = "label";
+    label.textContent = b.label;
+    const desc = document.createElement("span");
+    desc.className = "desc";
+    desc.textContent = b.desc || "";
+    const tally = document.createElement("span");
+    tally.className = "tally";
+    head.append(caret, label, desc, tally);
+
+    const body = document.createElement("div");
+    body.className = "body";
+    body.hidden = true;
+    head.setAttribute("aria-expanded", "false");
+    head.addEventListener("click", () => {
+      open[b.key] = !open[b.key];
+      applyOpen();
+    });
+
+    let setmode = null;
+    if (b.key) {
+      // One tap, no confirmation, unlike the switches at the bottom of the
+      // page: it is the point of the row and the way back is Enable all.
+      setmode = document.createElement("button");
+      setmode.type = "button";
+      setmode.className = "setmode";
+      setmode.setAttribute("role", "radio");
+      setmode.setAttribute("aria-checked", "false");
+      setmode.textContent = "Set as mode";
+      setmode.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        post("select", {group: b.key});
+      });
+      head.append(setmode);
+    }
+
+    for (const n of b.members) {
+      const e = byName.get(n);
+      if (!e) continue;
+      const r = makeRow(e, false);
+      body.append(r.row);
+      // A name in two groups gets two rows; both are painted, and the map
+      // holds a list rather than pretending there is only one.
+      if (!rows.has(n)) rows.set(n, []);
+      rows.get(n).push(r);
+    }
+
+    sec.append(head, body);
+    sec._parts = {caret, body, head, tally, setmode, key: b.key,
+                  members: b.members};
+    sections.append(sec);
+  }
+  applyOpen();
+}
+
+function buildOrder(rotation) {
+  orderBox.textContent = "";
+  orderRows.clear();
+  for (const e of rotation) {
+    const r = makeRow(e, true);
+    orderBox.append(r.row);
+    orderRows.set(e.name, r);
   }
 }
 
-function cardPosition(name) {
-  const e = state.rotation.find(x => x.name === name);
-  return e ? e.position : 0;
+/* A shut section hides its rows; a search opens whatever it matches, so a
+   query is never answered by a page of closed headings. */
+function applyOpen() {
+  for (const sec of sections.children) {
+    const p = sec._parts;
+    const hits = query ? p.members.filter(n => n.includes(query)).length : null;
+    const expanded = query ? hits > 0 : !!open[p.key];
+    p.body.hidden = !expanded;
+    p.caret.textContent = expanded ? "▾" : "▸";
+    p.head.setAttribute("aria-expanded", String(expanded));
+    sec.hidden = query ? hits === 0 : false;
+  }
+}
+
+function paintRow(r, e, s) {
+  const live = e.name === s.now.name;
+  const st = statusOf(e.name);
+  r.row.classList.toggle("live", live);
+  r.row.classList.toggle("pending", !live && !!st);
+  r.row.classList.toggle("disabled", !e.enabled);
+  if (r.box && document.activeElement !== r.box) r.box.checked = e.enabled;
+
+  r.chips.textContent = "";
+  if (st) {
+    const c = document.createElement("span");
+    c.className = "chip st " + st.cls;
+    c.textContent = st.text;
+    r.chips.append(c);
+  }
+  if (e.customised) r.chips.append(chip("cust", "custom"));
+  if (e.solo && e.kind !== "exec") r.chips.append(chip("solo", "solo"));
+
+  const ms = e.ms ? e.ms.toFixed(1) : null;
+  const heat = e.ms > 33 ? "hot" : e.ms > 18 ? "warm" : "";
+  if (r.num) {                              // Order view: numbers in columns
+    r.num.textContent = e.enabled ? (e.position + 1) : "—";
+    r.slot.textContent = [fmtTime(e.seconds), e.kind === "exec" ? "external"
+                          : (e.fps ? e.fps + " fps" : "")].filter(Boolean).join(" · ");
+    r.cost.textContent = ms ? ms + " ms" : "";
+    r.cost.className = "cost " + heat;
+    r.meta.textContent = live ? "on air" : (e.enabled ? "" : "not in the rotation");
+  } else {
+    r.meta.textContent = "";
+    r.meta.append(live ? "on air" : (e.enabled ? "#" + (e.position + 1) : "off"));
+    // The slot length is the same 40 seconds for nearly everything, so it is
+    // the first thing to go when the row is narrower than the line: position,
+    // rate and cost are what somebody is actually reading down the column for.
+    const len = document.createElement("span");
+    len.className = "len";
+    len.textContent = " · " + fmtTime(e.seconds);
+    r.meta.append(len);
+    const rate = e.kind === "exec" ? "external" : (e.fps ? e.fps + " fps" : "");
+    if (rate) r.meta.append(" · " + rate);
+    if (ms) {
+      r.meta.append(" · ");
+      const el = document.createElement("span");
+      el.className = "ms " + heat;
+      el.textContent = ms + " ms";
+      r.meta.append(el);
+    }
+  }
+  if (r.cog) r.cog.classList.toggle("custom", !!e.customised);
 }
 
 function paint(s) {
-  const names = s.rotation.map(e => e.name).join(" ");
-  if (names !== paint.names) { buildCards(s.rotation); paint.names = names; }
-
-  for (const e of s.rotation) {
-    const c = cards.get(e.name);
-    if (!c) continue;
-    const live = e.name === s.now.name;
-    c.card.classList.toggle("live", live);
-    c.card.classList.toggle("disabled", !e.enabled);
-    if (document.activeElement !== c.box) c.box.checked = e.enabled;
-    c.badge.textContent = live ? "ON AIR"
-      : e.enabled ? "#" + (e.position + 1) : "off";
-    // exec entries are external programs, so they have no preview to bake and
-    // no render cost of ours to report. Saying so beats an unexplained gap.
-    c.meta.innerHTML = [fmtTime(e.seconds),
-                        e.kind === "exec" ? "external" : "",
-                        e.fps ? e.fps + " fps" : "",
-                        e.ms ? e.ms.toFixed(1) + " ms" : "",
-                        e.solo && e.kind !== "exec"
-                          ? '<span class="solo">solo</span>' : "",
-                        e.customised ? '<span class="cust">custom</span>' : ""]
-                       .filter(Boolean).join(" &middot; ");
-    if (c.cog) c.cog.classList.toggle("custom", !!e.customised);
+  // Rebuild only when the rotation itself changed, not once a second.
+  const names = s.rotation.map(e => e.name).join(" ");
+  if (names !== paint.names) {
+    buildIndex(s.rotation);
+    buildOrder(s.rotation);
+    paint.names = names;
   }
 
-  paintGroups(s);
+  for (const e of s.rotation) {
+    for (const r of (rows.get(e.name) || [])) paintRow(r, e, s);
+    const o = orderRows.get(e.name);
+    if (o) paintRow(o, e, s);
+  }
 
-  document.getElementById("nowName").textContent = s.now.name || "—";
-  document.getElementById("nowPos").textContent =
-    s.now.position >= 0
-      ? (s.now.position + 1) + "/" + s.rotation.filter(e => e.enabled).length
-      : "";
-  document.getElementById("nextName").textContent =
-    (s.next.name || "—") + (s.next.ready ? "" : " (building)");
+  // Section tallies and which one is the live mode. The scheduler answers
+  // that -- it is `group` in the state, and null once somebody has flipped an
+  // individual switch and the set matches no mode exactly.
+  for (const sec of sections.children) {
+    const p = sec._parts;
+    const on = p.members.filter(n => { const e = entryFor(n); return e && e.enabled; }).length;
+    p.tally.textContent = on + "/" + p.members.length + " on";
+    p.tally.className = "tally " + (on === p.members.length ? "full" : on ? "part" : "");
+    if (p.setmode) {
+      const active = s.group === p.key;
+      p.setmode.setAttribute("aria-checked", String(active));
+      p.setmode.textContent = active ? "Playing" : "Set as mode";
+    }
+  }
 
-  const btn = document.getElementById("btnPause");
+  const enabled = s.rotation.filter(e => e.enabled).length;
+  $("count").textContent = s.rotation.length + " effects · " + enabled + " on"
+    + (s.group == null ? " · custom mix"
+       : s.group === "all" ? "" : " · " + s.group);
+
+  $("nowName").textContent = s.now.name || "—";
+  $("nowPos").textContent = s.now.position >= 0 ? (s.now.position + 1) + "/" + enabled : "";
+  $("nextName").textContent = s.next.name || "—";
+  $("nextBuilding").hidden = !(s.next.name && !s.next.ready);
+  if (s.now.name && $("nowImg").dataset.name !== s.now.name) {
+    $("nowImg").dataset.name = s.now.name;
+    $("nowImg").hidden = false;
+    $("nowMissing").hidden = true;
+    $("nowImg").src = "/previews/" + encodeURIComponent(s.now.name) + ".webp";
+  }
+
+  const btn = $("btnPause");
   btn.setAttribute("aria-pressed", String(s.paused));
   btn.textContent = s.paused ? "Paused" : "Pause";
 
   const h = s.health;
-  const el = document.getElementById("health");
-  el.textContent = h.actual_fps.toFixed(1) + "/" + h.target_fps + " fps  "
-    + h.ms_per_frame.toFixed(1) + " ms  " + fmtTime(h.uptime) + " up"
-    + (h.late_frames ? "  " + h.late_frames + " late" : "");
+  const el = $("health");
+  el.textContent = h.actual_fps.toFixed(1) + "/" + h.target_fps + " fps · "
+    + h.ms_per_frame.toFixed(1) + " ms · " + fmtTime(h.uptime) + " up"
+    + (h.late_frames ? " · " + h.late_frames + " late" : "");
   // Only shout when we are actually missing the frame rate, not for the odd
   // late frame during a transition, which is normal and expected.
   el.classList.toggle("warn", h.actual_fps < h.target_fps * 0.9);
+
+  applyFilter();
 
   localElapsed = s.now.elapsed;
   localDuration = Math.max(1, s.now.duration);
   lastTick = performance.now();
 }
 
-/* ---- the settings editor ---------------------------------------------- *
+$("nowImg").addEventListener("error", () => {
+  $("nowImg").hidden = true;
+  $("nowMissing").hidden = false;
+});
+
+/* ---- search and the view switch ---------------------------------------- */
+
+function applyFilter() {
+  let shown = 0;
+  for (const [name, list] of rows)
+    for (const r of list) {
+      const hit = !query || name.includes(query);
+      r.row.hidden = !hit;
+      if (hit) shown++;
+    }
+  for (const [name, r] of orderRows) {
+    const hit = !query || name.includes(query);
+    r.row.hidden = !hit;
+  }
+  applyOpen();
+  const any = !query || (view === "index" ? shown > 0
+                         : [...orderRows.keys()].some(n => n.includes(query)));
+  $("empty").hidden = any;
+}
+
+$("search").addEventListener("input", () => {
+  query = $("search").value.trim().toLowerCase();
+  applyFilter();
+});
+
+function setView(v) {
+  view = v;
+  sections.hidden = v !== "index";
+  orderBox.hidden = v !== "order";
+  $("viewIndex").setAttribute("aria-pressed", String(v === "index"));
+  $("viewOrder").setAttribute("aria-pressed", String(v === "order"));
+  applyFilter();
+}
+$("viewIndex").addEventListener("click", () => setView("index"));
+$("viewOrder").addEventListener("click", () => setView("order"));
+setView("index");
+
+/* ---- the settings editor ----------------------------------------------- *
  * The form is generated from the schema the server read off each demo's own
  * argparse, so there is nothing here that knows what a firefly is. Adding an
  * option to a demo puts a control in this dialog and nothing has to be
- * touched on this side -- which is the only version of this that stays true
- * a year from now.
+ * touched on this side -- which is the only version of this that stays true a
+ * year from now.
  */
 
-const dlg = document.getElementById("editor");
-const edBody = document.getElementById("edBody");
-let editing = null;             // name of the entry the dialog is showing
-let fields = [];                // [{o, el}] for the form currently in it
+const dlg = $("editor");
+const edBody = $("edBody");
+let editing = null;               // name of the entry the dialog is showing
+let fields = [];                  // [{o, el}] for the form currently in it
 
 async function loadSchema() {
   try {
     const r = await fetch("/api/schema", {cache: "no-store"});
     const j = await r.json();
     schema = j.modules || {};
-    // The group row rides on the same fetch: it is fixed for the life of the
-    // daemon, so polling it every second would be a second of radio for an
-    // answer that never changes.
-    buildGroups(j.groups || []);
-    paint.names = null;         // the cards were built without their buttons
+    // The groups ride on the same fetch: fixed for the life of the daemon, so
+    // polling them would be a second of radio for an answer that never
+    // changes. Which one is active does change, and is in the state.
+    groups = j.groups || [];
+    // The data section is the one somebody opening this page is most often
+    // after, and a page of shut headings is a worse first screen than one
+    // open one.
+    if (groups.some(g => g.key === "data")) open.data = true;
+    paint.names = null;           // rebuild: the rows were made without groups
     refresh();
-  } catch (e) { /* no editors, no groups, everything else still works */ }
+  } catch (e) { /* no editors, no grouping; everything else still works */ }
 }
 
 /* Effective settings: what the entry overrides, over the demo's defaults. */
 function settingsOf(e) {
   const out = {};
   for (const o of schema[e.module] || [])
-    out[o.name] = (e.options && o.name in e.options) ? e.options[o.name]
-                                                     : o.default;
+    out[o.name] = (e.options && o.name in e.options) ? e.options[o.name] : o.default;
   return out;
+}
+
+function chip(cls, text) {
+  const el = document.createElement("span");
+  el.className = "chip " + cls;
+  el.textContent = text;
+  return el;
 }
 
 function makeField(o, value) {
@@ -577,9 +902,7 @@ function makeField(o, value) {
   lbl.textContent = o.label;
   // The person retyping the splitflap board from a phone is often the person
   // who has run it from a terminal, so show what it is called there -- but
-  // only the flags the label does not already say. "--flies" next to "flies"
-  // is noise; "--12h" next to "ampm", or "--no-trails" next to "trails", is
-  // the whole point.
+  // only the flags the label does not already say.
   const extra = o.flags.filter(f => f.replace(/^-+/, "") !== o.label);
   if (extra.length) {
     const flags = document.createElement("em");
@@ -600,7 +923,6 @@ function makeField(o, value) {
   } else if (o.type === "bool") {
     el = document.createElement("input");
     el.type = "checkbox";
-    el.checked = !!value;
   } else if (o.type === "int" || o.type === "float") {
     el = document.createElement("input");
     el.type = "number";
@@ -615,12 +937,13 @@ function makeField(o, value) {
     if (!wide) el.type = "text";
     el.value = value == null ? "" : String(value);
   }
+  if (o.type === "bool") el.checked = !!value;
   el.id = "ed-" + o.name;
   lbl.htmlFor = el.id;
 
   let ctl;
   if (o.type === "bool") {
-    // The same switch as on the cards, so on/off looks like one thing.
+    // The same switch as on the rows, so on/off looks like one thing.
     ctl = document.createElement("label");
     ctl.className = "ctl sw";
     ctl.append(el, document.createElement("span"));
@@ -632,8 +955,8 @@ function makeField(o, value) {
 
   top.append(lbl);
   box.append(top);
-  // A message or a script gets its own full-width line; everything else sits
-  // at the end of the label row.
+  // A message board or a script gets its own full-width line; everything else
+  // sits at the end of the label row.
   if (wide) { box.classList.add("wide"); box.append(ctl); }
   else top.append(ctl);
   if (o.help) {
@@ -647,29 +970,34 @@ function makeField(o, value) {
 }
 
 function openEditor(name) {
-  const e = state && state.rotation.find(x => x.name === name);
+  const e = entryFor(name);
   if (!e) return;
   const spec = schema[e.module] || [];
-  if (!spec.length) return;
 
   editing = name;
   fields = [];
-  document.getElementById("edName").textContent = e.name;
-  document.getElementById("edModule").textContent =
-    e.module === e.name ? "" : e.module + ".py";
+  $("edName").textContent = e.name;
+  $("edModule").textContent = e.module === e.name ? "" : e.module + ".py";
   edBody.textContent = "";
-  const current = settingsOf(e);
-  for (const o of spec) edBody.append(makeField(o, current[o.name]));
+  if (!spec.length) {
+    const none = document.createElement("div");
+    none.className = "ed-empty";
+    none.textContent = "This effect declares no options.";
+    edBody.append(none);
+  } else {
+    const current = settingsOf(e);
+    for (const o of spec) edBody.append(makeField(o, current[o.name]));
+  }
 
   const note = document.createElement("div");
   note.className = "ed-note";
   // Both halves matter: the wall will not change under you the moment you
-  // press Save unless this is the effect on air, and the ms figure on the
-  // card was measured against the settings the rotation shipped with.
+  // press Save unless this is the effect on air, and the ms figure on the row
+  // was measured against the settings the rotation shipped with.
   note.textContent = state.now.name === name
     ? "Saving plays " + name + " again from the top with the new settings."
     : "Applies the next time " + name + " comes round. The render cost on the"
-      + " card was measured with the settings it shipped with.";
+      + " row was measured with the settings it shipped with.";
   edBody.append(note);
 
   if (dlg.showModal) dlg.showModal(); else dlg.setAttribute("open", "");
@@ -683,8 +1011,8 @@ function closeEditor() {
 }
 
 /* Read the form back. Only what differs from the demo's own default is sent,
-   so an entry nobody has really changed does not end up carrying a frozen
-   copy of every setting that a later edit to the demo could not reach. */
+   so an entry nobody has really changed does not end up carrying a frozen copy
+   of every setting that a later edit to the demo could not reach. */
 function collect() {
   const out = {};
   for (const {o, el} of fields) {
@@ -716,26 +1044,26 @@ function applyEditor(options) {
   post("configure", {name, options, restart: live});
 }
 
-document.getElementById("edSave").addEventListener("click", () => {
+$("edSave").addEventListener("click", () => {
   let options;
   try { options = collect(); }
-  catch (err) { say(err.message); return; }
+  catch (err) { toast(err.message, true); return; }
   applyEditor(options);
 });
-document.getElementById("edReset").addEventListener("click", () => {
+$("edReset").addEventListener("click", () => {
   // Confirmed only when there is something to lose. It sits a thumb's width
   // from Save on a phone, and somebody may have spent a while on these.
-  const e = state && state.rotation.find(x => x.name === editing);
+  const e = entryFor(editing);
   if (e && e.customised
       && !confirm("Put " + editing + " back to the settings it shipped with?"))
     return;
-  // null, not {}: back to what the rotation file says, which is what the
-  // wall was installed with -- not the demo's bare argparse defaults, which
-  // nobody chose.
+  // null, not {}: back to what the rotation file says, which is what the wall
+  // was installed with -- not the demo's bare argparse defaults, which nobody
+  // chose.
   applyEditor(null);
 });
-document.getElementById("edCancel").addEventListener("click", closeEditor);
-document.getElementById("edClose").addEventListener("click", closeEditor);
+$("edCancel").addEventListener("click", closeEditor);
+$("edClose").addEventListener("click", closeEditor);
 dlg.addEventListener("cancel", closeEditor);            // Esc
 // A click that lands on the dialog element itself is a click on the backdrop:
 // everything inside is a child.
@@ -745,47 +1073,49 @@ function tick() {
   const now = performance.now();
   if (state && !state.paused) localElapsed += (now - lastTick) / 1000;
   lastTick = now;
-  bar.style.width = (100 * Math.min(1, localElapsed / localDuration)) + "%";
+  document.querySelector("#progress i").style.width =
+    (100 * Math.min(1, localElapsed / localDuration)) + "%";
   requestAnimationFrame(tick);
 }
 
 async function refresh() {
+  let s;
+  // Only the fetch is guarded. A failure to draw is a bug in this file and
+  // should be reported as one, not swallowed and shown as "the scheduler is
+  // not answering" -- which is how it would then be diagnosed.
   try {
     const r = await fetch("/api/state", {cache: "no-store"});
-    const s = await r.json();
-    if (!s || !s.rotation) return;          // still starting up
-    state = s;
-    paint(s);
-    say("");
+    s = await r.json();
   } catch (e) {
-    say("cannot reach the scheduler");
+    toast("cannot reach the scheduler", true);
+    return;
   }
+  if (!s || !s.rotation) return;            // still starting up
+  state = s;
+  paint(s);
 }
 
-document.getElementById("btnNext").addEventListener("click", () => post("next"));
-document.getElementById("btnAllOn").addEventListener("click", () => post("all", {on: true}));
-document.getElementById("btnAllOff").addEventListener("click", () => {
-  // Irreversible-ish from a phone -- putting 35 switches back one at a time is
-  // nobody's afternoon -- and it is right next to Skip, so confirm it.
+$("btnNext").addEventListener("click", () => post("next"));
+$("btnPause").addEventListener("click", () => post(state && state.paused ? "resume" : "pause"));
+$("btnAllOn").addEventListener("click", () => post("all", {on: true}));
+$("btnAllOff").addEventListener("click", () => {
+  // Irreversible-ish from a phone -- putting 85 switches back one at a time is
+  // nobody's afternoon.
   if (confirm("Switch every effect off except the one on air?"))
     post("all", {on: false});
 });
-document.getElementById("btnPause").addEventListener("click",
-  () => post(state && state.paused ? "resume" : "pause"));
 
-/* ---- the display itself ----------------------------------------------- */
+/* ---- the display itself ------------------------------------------------ */
 /* Not the scheduler: brightness and blanking belong to ft_server, which owns
    the panel, and these go to ftctl over /api/display. Which is also why they
-   keep working when the rotation does not -- and why the bar simply is not
-   there when nothing is answering that path, rather than showing dead
-   controls. */
+   keep working when the rotation does not -- and why the row simply is not
+   there when nothing answers that path, rather than showing dead controls. */
 
-const displayBar = document.getElementById("displayBar");
-const btnPower = document.getElementById("btnPower");
-const dimSlider = document.getElementById("dim");
-const dimOut = document.getElementById("dimOut");
+const displayZone = $("displayZone");
+const btnPower = $("btnPower");
+const dimSlider = $("dim");
 let display = null;
-let dimming = false;            // a finger is on the slider; do not fight it
+let dimming = false;              // a finger is on the slider; do not fight it
 
 async function postDisplay(body) {
   try {
@@ -795,45 +1125,49 @@ async function postDisplay(body) {
       body: JSON.stringify(body)
     });
     const s = await r.json();
-    if (!r.ok) { say("display: " + (s.error || r.status)); return; }
-    say("");
+    if (!r.ok) { toast("display: " + (s.error || r.status), true); return; }
     paintDisplay(s.display);
-  } catch (e) { say("cannot reach the display"); }
+  } catch (e) { toast("cannot reach the display", true); }
 }
 
 function paintDisplay(d) {
   display = d;
-  if (!d) {                     // ftctl is up but ft_server is not
-    displayBar.hidden = false;
+  if (!d) {                       // ftctl is up but ft_server is not
+    displayZone.hidden = false;
     btnPower.disabled = true;
     btnPower.textContent = "display offline";
-    displayBar.classList.add("nodimmer");
+    displayZone.classList.add("nodimmer");
     return;
   }
-  displayBar.hidden = false;
+  displayZone.hidden = false;
   btnPower.disabled = false;
   btnPower.textContent = d.blanked ? "Wall on" : "Wall off";
   btnPower.setAttribute("aria-pressed", d.blanked ? "true" : "false");
-  displayBar.classList.toggle("nodimmer", !d.dimmer);
+  displayZone.classList.toggle("nodimmer", !d.dimmer);
   if (!dimming) {
     dimSlider.value = d.brightness;
-    dimOut.textContent = d.brightness + "%";
+    $("dimOut").textContent = d.brightness + "%";
   }
 }
 
 async function refreshDisplay() {
   try {
     const r = await fetch("/api/display", {cache: "no-store"});
-    if (!r.ok) { displayBar.hidden = true; return; }   // not routed here
+    if (!r.ok) { displayZone.hidden = true; return; }   // not routed here
     paintDisplay((await r.json()).display);
   } catch (e) {
-    displayBar.hidden = true;   // served standalone, or ftctl is not running
+    displayZone.hidden = true;    // served standalone, or ftctl is not running
   }
 }
 
-btnPower.addEventListener("click",
-  () => postDisplay({blanked: !(display && display.blanked)}));
-document.getElementById("btnWipe").addEventListener("click", () => {
+btnPower.addEventListener("click", () => {
+  // The remote makes this a held thumb; here it is a question. Either way it
+  // is not something that happens on a stray tap in front of a room.
+  const off = !(display && display.blanked);
+  if (off && !confirm("Turn the wall off?")) return;
+  postDisplay({blanked: off});
+});
+$("btnWipe").addEventListener("click", () => {
   // Clears every layer, background included, so it takes out whatever any
   // other client had put up -- worth one question.
   if (confirm("Clear the whole display, including other clients' layers?"))
@@ -845,15 +1179,14 @@ document.getElementById("btnWipe").addEventListener("click", () => {
 // once and not fine sixty times a second.
 dimSlider.addEventListener("input", () => {
   dimming = true;
-  dimOut.textContent = dimSlider.value + "%";
+  $("dimOut").textContent = dimSlider.value + "%";
 });
-for (const ev of ["change", "pointerup", "keyup"]) {
+for (const ev of ["change", "pointerup", "keyup"])
   dimSlider.addEventListener(ev, () => {
     if (!dimming) return;
     dimming = false;
     postDisplay({brightness: Number(dimSlider.value)});
   });
-}
 
 // One poll a second while visible. A backgrounded tab on a phone should not
 // keep the radio awake for a page nobody is looking at.
