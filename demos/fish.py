@@ -255,7 +255,7 @@ def bake_fish(length, amp, style, haze, water, nsq, detail=True):
         for j in range(PH):
             rgb, a = fish_sprite(length, amp, style, j / float(PH), squash,
                                  haze, water, detail)
-            if c > 0:                       # baked facing left; mirror for right
+            if c < 0:                       # baked facing right; mirror for left
                 rgb = rgb[:, ::-1].copy()
                 a = a[:, ::-1].copy()
             row.append(premul(rgb, a))
@@ -645,7 +645,7 @@ def build(args):
         for j in range(PH):
             rgb, a = fish_sprite(vlen, 6.4, VISITOR_STYLE, j / float(PH),
                                  1.0, 0.22, water_mid, detail=True)
-            if visitor["dir"] > 0:
+            if visitor["dir"] < 0:          # baked facing right; mirror for left
                 rgb = rgb[:, ::-1].copy()
                 a = a[:, ::-1].copy()
             rgbs.append(premul(rgb, a))

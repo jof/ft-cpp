@@ -369,6 +369,69 @@ def bench():
     print("  build(): %.0f ms" % ((time.perf_counter() - t0) * 1000.0))
 
 
+def _facing(alpha, thresh=0.35):
+    """Which way a baked sprite points, from its silhouette alone.
+
+    A fish tapers to a point at the nose, swells through the body, necks down
+    to a thin peduncle and then flares out again into the caudal fin. So the
+    two ends are told apart by the waist: the tail end dips to a local minimum
+    before its final flare, and the nose end just runs out. Returns "left",
+    "right", or None when the shape is too squashed to call.
+    """
+    h = (alpha > thresh).sum(axis=0).astype(float)
+    nz = np.nonzero(h)[0]
+    if len(nz) < 6:
+        return None
+    body = h[nz[0]:nz[-1] + 1]
+    mid = int(np.argmax(body))
+
+    def waist(seg):
+        if len(seg) < 4:
+            return False
+        m = int(np.argmin(seg))
+        return 0 < m < len(seg) - 1 and seg[m] < 0.65 * max(seg[0], seg[-1])
+
+    tail_left = waist(body[:mid + 1][::-1])
+    tail_right = waist(body[mid:])
+    if tail_left == tail_right:
+        return None
+    return "right" if tail_left else "left"
+
+
+def test_fish_face_the_way_they_swim():
+    """A fish must point where it is going.
+
+    bake_fish promises index 0 is full profile swimming left and the last
+    index is full profile swimming right, and fish_sprite bakes a right-facing
+    fish -- so exactly the *left* half of the table may be mirrored. That
+    condition was inverted, and every fish in the tank swam tail-first.
+
+    No still frame catches this and none of the other checks can: a mirrored
+    fish is a perfectly good fish, one-piece, correctly shaded, beating its
+    tail. It only reads as wrong once it is moving, which is why the test has
+    to compare the silhouette against the direction the table index means.
+    """
+    nsq = 9
+    tab = fish.bake_fish(26, 6.0, fish.VISITOR_STYLE, 0.0, (10, 40, 60), nsq)
+    bad, checked = [], 0
+    for k, want in ((0, "left"), (nsq - 1, "right")):
+        for j in range(fish.PH):
+            _, ia = tab[k][j]
+            got = _facing(1.0 - ia[0, ..., 0])
+            if got is None:
+                bad.append("k=%d j=%d silhouette unreadable" % (k, j))
+                continue
+            checked += 1
+            if got != want:
+                bad.append("k=%d j=%d faces %s, swims %s" % (k, j, got, want))
+    # Every full-profile sprite must be readable and right: at full profile
+    # there is no squash to blur the shape, so a None here is itself a failure.
+    check("full-profile fish face their direction of travel",
+          checked == 2 * fish.PH and not bad,
+          "%d/%d sprites checked, %d wrong%s"
+          % (checked, 2 * fish.PH, len(bad), ("; " + bad[0]) if bad else ""))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--bench", action="store_true", help="also time a long run")
@@ -378,6 +441,7 @@ def main():
     test_sprites_are_one_piece()
     test_body_wave_actually_moves()
     test_fish_turn()
+    test_fish_face_the_way_they_swim()
     test_tail_phase_advances()
     test_jerk_chases()
     test_visitor_schedule()
