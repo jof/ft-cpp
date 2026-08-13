@@ -318,9 +318,9 @@
       "kind": "py",
       "name": "adsb",
       "module": "adsb",
-      "seconds": 40,
+      "seconds": 46.0,
       "fps": 30,
-      "ms": 8.0,
+      "ms": 5.0,
       "enabled": true,
       "solo": false,
       "options": {}
