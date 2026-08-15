@@ -41,6 +41,7 @@ Run:
 import argparse
 import json
 import os
+import select
 import socket
 import struct
 import sys
@@ -75,6 +76,38 @@ THUMBNAIL_TTL = 2.0
 # 320x64 frame is several times quicker than level 6 and lands within a few kB.
 PNG_LEVEL = 1
 _BLANKED_TABLE = None
+
+# -- the live stream --------------------------------------------------------
+#
+# Measured on betelgeuse, which is what these defaults are chosen against: a
+# snapshot round trip is 4.2 ms, encode_png is 5.2 ms, and the PNG lands between
+# 2.7 and 8.4 kB depending on how much of the wall is lit. So one viewer at 20
+# fps is about 1.1 Mbps and 0.43 of a core -- against a wifi link that tops out
+# near 12 Mbps and three cores that are not the isolated one driving the panel.
+#
+# 20 fps because that is what ftsched renders at; asking for more would only
+# resend frames the wall never had.
+LIVE_FPS = 20
+# Two, and the reason is the radio rather than the CPU: the frame is encoded once
+# however many people are watching, so a second viewer costs one more sendall().
+# What it does cost is another 1.1 Mbps out of a 2.4 GHz SDIO link whose airtime
+# the wall's own traffic is not competing for but the shop's everything else is.
+LIVE_MAX_VIEWERS = 2
+LIVE_BOUNDARY = "ftframe"
+# A viewer that cannot absorb a 7 kB frame in this long is not watching a wall,
+# it is holding a socket open. Dropping it is how one bad link stays one bad
+# link; without it a dead client parks a viewer slot until TCP gives up on it.
+LIVE_SEND_TIMEOUT = 10.0
+# How long a viewer waits for a new frame before writing two bytes at its client
+# just to find out whether anyone is still there.
+#
+# This exists because of a still wall. A viewer only discovers its client has
+# gone by writing to it, and it only writes when there is a new frame -- so on a
+# wall that is not changing, a browser that closed an hour ago would hold a
+# viewer slot and keep the producer running, forever, with nobody watching. The
+# probe is a bare CRLF between multipart parts, which every client ignores and a
+# closed socket refuses.
+LIVE_IDLE_PROBE = 2.0
 
 
 def blanked_table():
@@ -477,6 +510,130 @@ class Bridge(object):
             self.desired.save()
 
 
+# -- live stream -----------------------------------------------------------
+
+class FrameBroadcaster(object):
+    """The wall as a stream of PNGs: encoded once, handed to every viewer.
+
+    The thumbnail above answers "what is on the wall" for something that asks
+    about once a second. This answers "what is the wall doing" for somebody
+    watching a demo from the other end of a tailnet, which is a different
+    problem: it wants twenty frames a second, and it must not cost the wall
+    anything to provide them.
+
+    Three properties, in the order they matter:
+
+      One encode, however many viewers. The producer thread renders a frame and
+      publishes the bytes; viewer threads write that same immutable object. A
+      second viewer is one more sendall(), not a second deflate. This is the
+      whole reason the fan-out lives here rather than each request rendering for
+      itself the way the thumbnail does -- and it is why the viewer cap is about
+      the radio and not about this Pi.
+
+      A slow viewer drops frames rather than holding anything up. The producer
+      never touches a socket and never waits for a viewer. Whoever was still
+      writing when frame N went out simply misses it and picks up N+1 -- which
+      is the right answer for live video anyway, and more importantly is what
+      keeps somebody's bad hotel wifi from turning into judder on the wall.
+
+      Nothing runs when nobody is watching. The thread starts on the first
+      viewer and exits with the last, so an unwatched wall pays exactly nothing.
+      A wall in a workshop is unwatched almost all of the time.
+    """
+
+    def __init__(self, render, fps=LIVE_FPS, max_viewers=LIVE_MAX_VIEWERS):
+        self.render = render            # () -> (raw_pixels, png), or None
+        self.period = 1.0 / max(1, fps)
+        self.max_viewers = max_viewers
+        self._cond = threading.Condition()
+        self._seq = 0                   # bumped only when the picture changes
+        self._png = None
+        self._viewers = 0
+        self._thread = None             # the running producer, or None
+
+    def join(self):
+        """Claim a viewer slot, starting the producer if it is the first.
+
+        False when the slots are full, which the caller turns into a 503. The
+        count is what bounds the bandwidth, so it is taken here and released in
+        a finally: a viewer that leaks a slot costs the next person the stream.
+        """
+        with self._cond:
+            if self._viewers >= self.max_viewers:
+                return False
+            self._viewers += 1
+            if self._thread is None:
+                thread = threading.Thread(target=self._run, daemon=True)
+                # Published before start() so the thread's own identity check
+                # cannot lose a race against a viewer that leaves immediately.
+                self._thread = thread
+                thread.start()
+            return True
+
+    def leave(self):
+        with self._cond:
+            self._viewers = max(0, self._viewers - 1)
+            if not self._viewers:
+                # Dropping the reference is the stop signal: the producer
+                # compares identity on each pass and returns when it is no
+                # longer the current thread. No flag to get out of step, and a
+                # viewer arriving in the meantime just starts a fresh one.
+                self._thread = None
+                self._cond.notify_all()
+
+    def next_frame(self, seen, timeout=LIVE_IDLE_PROBE):
+        """Wait for a frame the caller has not had. (seq, png), or None.
+
+        `seen` is the sequence the caller last wrote, or None for "give me
+        whatever is current" -- so a viewer joining a static wall gets a picture
+        immediately rather than waiting for one to change.
+        """
+        with self._cond:
+            self._cond.wait_for(
+                lambda: self._png is not None and self._seq != seen, timeout)
+            if self._png is None or self._seq == seen:
+                return None             # timed out; the caller decides
+            return self._seq, self._png
+
+    def _run(self):
+        me = threading.current_thread()
+        nxt = time.time()
+        last_raw = None
+        while True:
+            with self._cond:
+                if self._thread is not me:
+                    return              # the last viewer left
+            frame = None
+            try:
+                frame = self.render()
+            except Exception as exc:    # a broken render must not kill the loop
+                sys.stderr.write("ftctl: live render failed (%s)\n" % exc)
+            if frame is not None:
+                raw, png = frame
+                # An unchanged wall costs a socket read and a 61 kB memcmp, and
+                # nothing else: no deflate, no sequence bump, so no viewer is
+                # sent a frame identical to the one it is already showing. A
+                # blanked or paused wall is very nearly free to be watching.
+                # The first render always publishes: last_raw is None and raw
+                # is bytes, so the very first frame cannot compare equal.
+                if raw != last_raw:
+                    last_raw = raw
+                    with self._cond:
+                        self._seq += 1
+                        self._png = png
+                        self._cond.notify_all()
+            # Against a fixed deadline rather than sleeping a period: encode
+            # time would otherwise accumulate into drift and 20 fps would
+            # quietly become 17. If we have fallen behind entirely, give up on
+            # the frames we missed instead of trying to catch up in a burst.
+            nxt += self.period
+            delay = nxt - time.time()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                nxt = time.time()
+
+
 # -- HTTP ------------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
@@ -507,6 +664,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, self.server.bridge.snapshot())
         elif path == "/api/thumbnail.png":
             self._thumbnail()
+        elif path == "/api/live.png":
+            # HEAD gets the headers and no stream: something asking whether this
+            # exists must not be given a viewer slot and held open forever.
+            if self.command == "HEAD":
+                self._send(200, b"", "multipart/x-mixed-replace; boundary=" +
+                           LIVE_BOUNDARY)
+            else:
+                self._live()
         elif path == "/healthz":
             # Deliberately 200 even with the display unreachable: this process
             # being alive and the wall being reachable are different questions,
@@ -584,17 +749,96 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(200, png, "image/png")
 
+    def _client_gone(self):
+        """True once the viewer has hung up, without waiting to write at it.
+
+        A closed connection is readable and yields nothing, which is the whole
+        test. Anything it did send is treated the same way: this response said
+        Connection: close, so there is no next request on here to be had, and a
+        client talking anyway is one to stop streaming at rather than parse.
+        """
+        try:
+            ready, _, _ = select.select([self.connection], [], [], 0)
+            return bool(ready)
+        except (socket.error, OSError, ValueError):
+            return True
+
+    def _live(self):
+        """The wall as multipart/x-mixed-replace, which is to say: an <img>.
+
+        A stream a browser can display without a line of JavaScript, and that
+        curl and mpv understand too. The alternative was a WebSocket and a
+        canvas, which would buy client-driven rates and delta frames; at 1.1
+        Mbps against a link that does twelve there is nothing yet to buy them
+        with, and this needs no framing code and no nginx upgrade dance.
+
+        Streaming under HTTP/1.1 without a Content-Length means the response
+        ends when the connection does, so it says so: BaseHTTPRequestHandler
+        does not chunk, and leaving keep-alive on would strand the next request
+        behind a body that never finishes.
+        """
+        caster = self.server.caster
+        if not caster.join():
+            self.send_response(503)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", "0")
+            self.send_header("Retry-After", "5")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            return
+        try:
+            # So a viewer that stops reading is dropped rather than parking a
+            # slot until TCP eventually gives up on it.
+            self.connection.settimeout(LIVE_SEND_TIMEOUT)
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "multipart/x-mixed-replace; boundary=" +
+                             LIVE_BOUNDARY)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            seen = None
+            while True:
+                frame = caster.next_frame(seen)
+                if frame is None:
+                    # A still wall, not a dead one -- so far as this knows yet.
+                    # Ask the socket both ways, because neither question alone
+                    # is prompt: a client's close arrives here as end-of-file on
+                    # the read side straight away, while writing at it would
+                    # succeed once more and only fail on the probe after that.
+                    if self._client_gone():
+                        break
+                    self.wfile.write(b"\r\n")   # legal between parts, ignored
+                    self.wfile.flush()
+                    continue
+                seen, png = frame
+                self.wfile.write(
+                    b"--" + LIVE_BOUNDARY.encode("ascii") + b"\r\n"
+                    b"Content-Type: image/png\r\n"
+                    b"Content-Length: " + str(len(png)).encode("ascii") +
+                    b"\r\n\r\n" + png + b"\r\n")
+                self.wfile.flush()
+        except (socket.error, OSError, ValueError):
+            pass                        # the viewer went away, which is normal
+        finally:
+            caster.leave()
+
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     timeout = 30
 
-    def __init__(self, addr, bridge, previews, thumbnail_ttl=THUMBNAIL_TTL):
+    def __init__(self, addr, bridge, previews, thumbnail_ttl=THUMBNAIL_TTL,
+                 live_fps=LIVE_FPS, live_max_viewers=LIVE_MAX_VIEWERS):
         ThreadingHTTPServer.__init__(self, addr, Handler)
         self.bridge = bridge
         self.previews = previews
         self.thumbnail_ttl = thumbnail_ttl
+        self.caster = FrameBroadcaster(self._live_frame, live_fps,
+                                       live_max_viewers)
         self._screen_lock = threading.Lock()
         self._screen_png = None
         self._screen_at = 0.0
@@ -624,20 +868,38 @@ class Server(ThreadingHTTPServer):
                 self._screen_png, self._screen_at = png, now
             return png
 
-    def _render_screen(self):
+    def _live_frame(self):
+        """The wall right now, as (raw bytes, PNG) -- or None if it cannot be had.
+
+        Both halves because the broadcaster wants to know whether the picture
+        changed, and comparing the 61 kB it already has is far cheaper than
+        deflating it again to find out. The comparison is on the dimmed bytes
+        deliberately: blanking the wall has to read as a change.
+
+        No baked-preview fallback here, unlike the thumbnail. A still that
+        quietly stands in for a live view is worse than a live view that stops,
+        because the whole reason to watch is to find out what is really on the
+        panel.
+        """
         snap = self.bridge.control.snapshot()
         if snap is None:
-            # No snapshot: an older ft_server, or the socket has gone. Fall back
-            # to the baked preview so Home Assistant keeps showing something.
-            sched = self.bridge.snapshot()["scheduler"]
-            name = (sched or {}).get("now", {}).get("name")
-            return self.thumbnail(name) if name else None
+            return None
         pixels = snap["pixels"]
         if snap.get("blanked"):
             # The same dimming the login banner uses, so the two agree about
             # what a dark wall looks like.
             pixels = pixels.translate(blanked_table())
-        return encode_png(snap["width"], snap["height"], pixels)
+        return pixels, encode_png(snap["width"], snap["height"], pixels)
+
+    def _render_screen(self):
+        frame = self._live_frame()
+        if frame is None:
+            # No snapshot: an older ft_server, or the socket has gone. Fall back
+            # to the baked preview so Home Assistant keeps showing something.
+            sched = self.bridge.snapshot()["scheduler"]
+            name = (sched or {}).get("now", {}).get("name")
+            return self.thumbnail(name) if name else None
+        return frame[1]
 
     def thumbnail(self, name):
         """The baked preview clip for an effect. Only a fallback now."""
@@ -686,6 +948,13 @@ def main():
                     help="seconds to reuse the captured PNG of the wall before "
                          "taking another; caps what Home Assistant's polling "
                          "costs, however many dashboards are open")
+    ap.add_argument("--live-fps", type=float, default=LIVE_FPS,
+                    help="frame rate of /api/live.png; there is no point above "
+                         "the rate the rotation actually renders at")
+    ap.add_argument("--live-max-viewers", type=int, default=LIVE_MAX_VIEWERS,
+                    help="concurrent viewers of /api/live.png before 503; this "
+                         "bounds the wifi, not the CPU -- the frame is encoded "
+                         "once however many are watching")
     ap.add_argument("--state-file", default="/var/lib/ftctl/desired.json",
                     help="remembered brightness and on/off; '' to not persist")
     ap.add_argument("--no-pause-when-off", dest="pause_when_off",
@@ -737,7 +1006,8 @@ def main():
     bridge = Bridge(control, scheduler, desired, args.pause_when_off)
 
     host, port = parse_addr(args.listen)
-    httpd = Server((host, port), bridge, args.previews, args.thumbnail_ttl)
+    httpd = Server((host, port), bridge, args.previews, args.thumbnail_ttl,
+                   args.live_fps, args.live_max_viewers)
 
     if args.motd_file:
         import ftmotd
