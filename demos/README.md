@@ -3647,9 +3647,23 @@ fetcher needs to read its own last record". It writes no sidecar.
 The baseline is removed before storing. A broadband vault wanders a couple of
 thousand counts over six hours with the temperature and the tide, which at this
 scale is half a lane of slow drift that has nothing to do with anything, so a
-two-minute box smoothing of the column midpoints is subtracted. That is the
-modern version of the pen's zero adjustment, and nothing a local earthquake
+two-minute running **median** of the column midpoints is subtracted. That is
+the modern version of the pen's zero adjustment, and nothing a local earthquake
 does is slower than two minutes.
+
+Both halves of that are load-bearing and each was learned by getting it wrong.
+The **median** rather than a mean, because an M3.8 in San Leandro put two
+columns of a million counts into the window and dragged a *mean* by two whole
+lanes, so every quiet column within a minute of the event was drawn outside its
+own lane and the largest local earthquake in months rendered as a pair of black
+holes. And **two minutes** rather than the ten the fix for that briefly used,
+because a baseline is a high-pass filter and its window is the corner: this
+vault's midpoint also wanders on periods of a few minutes, not only over hours,
+and a ten-minute window leaves all of it in, where it arrives on the drum as
+ink shoved out of its lane and drawn in the clip colour. Measured on a
+six-hour window with no earthquake in it, the share of columns leaving their
+lane runs 0.40% at two minutes against 1.32% at ten. Robustness comes from the
+estimator; the window length only sets the corner.
 
 **The events are borrowed, not refetched.** `quake-usgs` is already in the
 cache with a week of located events in it, so any event that falls inside the
