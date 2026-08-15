@@ -99,17 +99,39 @@ h1 { font-size: 22px; font-weight: 800; letter-spacing: -.01em; margin: 0; }
 .now {
   display: flex; align-items: center; gap: 12px; margin-top: 10px;
   padding: 10px 12px; background: var(--card); border: 1px solid var(--line);
-  border-radius: 11px; flex-wrap: wrap;
+  border-radius: 11px; flex-wrap: wrap; position: relative;
 }
 /* Its own row, the whole width. The 5:1 aspect-ratio on .thumb does the rest:
    inside a 1040px wrap that lands about 200px tall, a bit over 3x the wall's
    320 -- and object-fit: contain with image-rendering: pixelated means the
    upscale stays square-edged instead of turning into soup. */
 .now .thumb { flex: 1 0 100%; width: auto; }
-/* Both overlays sit on a tile many times the size they were written for. */
-.now .thumb .live { font-size: 9px; top: 5px; right: 7px; gap: 4px; }
-.now .thumb .live::before { width: 6px; height: 6px; }
+/* The "no preview" text sits on a tile many times the size it was written for. */
 .now .thumb .missing { font-size: 12px; }
+
+/* Which of the two pictures this is. The baked preview and the live wall look
+   alike at a glance -- near enough that an operator could watch a canned clip
+   of a demo and conclude the wall was fine. So the live one says so, and the
+   tile without the dot is the one not to trust.
+
+   It hangs off .now rather than .thumb because .thumb has overflow: hidden and
+   nothing inside it can leave the frame. Anchored here it can be over the
+   picture on a wide screen and beside it on a narrow one, which is the whole
+   point of the media query below. Offsets are the card's padding plus its
+   border plus the inset the badge wants inside the tile. */
+.now .live {
+  position: absolute; top: 16px; right: 20px;
+  display: flex; align-items: center; gap: 4px;
+  font-family: var(--mono); font-size: 9px; letter-spacing: .12em;
+  color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000; pointer-events: none;
+}
+.now .live::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%; background: #f33;
+  box-shadow: 0 0 4px #f33; animation: livepulse 2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .now .live::before { animation: none; }
+}
 .now .who { flex: 1; min-width: 0; }
 .now .title { font-size: 17px; font-weight: 700; }
 .now .title .pos { font-family: var(--mono); font-size: 12px; font-weight: 400; color: var(--dim); }
@@ -127,7 +149,20 @@ h1 { font-size: 22px; font-weight: 800; letter-spacing: -.01em; margin: 0; }
      other size -- on a phone held upright that is the only way it is legible at
      all, and it is still only a fifth as tall as it is wide. */
   .now .who { flex: 1 1 140px; }
-  .now .transport { flex: 1 0 100%; }
+  /* And the badge comes off the picture entirely. There is much less wall on a
+     phone and every pixel of it is content somebody wants to see; a chip in the
+     corner covers a twentieth of it. Out here it rides the end of the name line
+     instead, which costs the picture nothing.
+
+     The three orders have to be spelled out together. The badge comes before
+     .who in the markup and has to render after it, but .transport is a full
+     width row that has to stay below them both -- so ordering only the badge
+     sends it past the buttons and onto a line of its own at the bottom. */
+  .now .live {
+    position: static; order: 1; flex: none; align-self: center;
+    color: var(--dim); text-shadow: none;
+  }
+  .now .transport { flex: 1 0 100%; order: 2; }
   .now .transport button { flex: 1; }
 }
 
@@ -187,23 +222,7 @@ h1 { font-size: 22px; font-weight: 800; letter-spacing: -.01em; margin: 0; }
   position: absolute; inset: 0; display: grid; place-items: center;
   font-family: var(--mono); font-size: 7px; letter-spacing: .1em; color: var(--faint);
 }
-/* Which of the two pictures this is. The baked preview and the live panel look
-   alike at 110px -- near enough that an operator could watch a canned clip of a
-   demo and conclude the wall was fine. So the live one says so, and the tile
-   without the dot is the one not to trust. */
-.thumb .live {
-  position: absolute; top: 2px; right: 3px; display: flex; align-items: center;
-  gap: 3px; font-family: var(--mono); font-size: 6px; letter-spacing: .12em;
-  color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000; pointer-events: none;
-}
-.thumb .live::before {
-  content: ""; width: 4px; height: 4px; border-radius: 50%; background: #f33;
-  box-shadow: 0 0 4px #f33; animation: livepulse 2s ease-in-out infinite;
-}
 @keyframes livepulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
-@media (prefers-reduced-motion: reduce) {
-  .thumb .live::before { animation: none; }
-}
 .row .who { flex: 1; min-width: 0; }
 /* One line each, whatever the name is and however many chips it has: a row
    that grows to three lines on a phone turns the list into a scroll of ragged
@@ -353,7 +372,10 @@ dialog::backdrop { background: rgba(8, 7, 5, .68); }
   </div>
 
   <div class="now">
-    <span class="thumb" id="nowThumb"><img id="nowImg" alt="" hidden><span class="missing" id="nowMissing">no preview</span><span class="live" id="nowLive" hidden>LIVE</span></span>
+    <span class="thumb" id="nowThumb"><img id="nowImg" alt="" hidden><span class="missing" id="nowMissing">no preview</span></span>
+    <!-- Outside the tile on purpose: .thumb clips its children, and on a phone
+         this badge sits beside the picture rather than on top of it. -->
+    <span class="live" id="nowLive" hidden>LIVE</span>
     <div class="who">
       <div class="title"><span id="nowName">—</span> <span class="pos" id="nowPos"></span></div>
       <div class="up">next · <b id="nextName">—</b><span class="building" id="nextBuilding" hidden> · building</span></div>
