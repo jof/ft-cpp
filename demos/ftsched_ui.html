@@ -109,28 +109,53 @@ h1 { font-size: 22px; font-weight: 800; letter-spacing: -.01em; margin: 0; }
 /* The "no preview" text sits on a tile many times the size it was written for. */
 .now .thumb .missing { font-size: 12px; }
 
-/* Which of the two pictures this is. The baked preview and the live wall look
-   alike at a glance -- near enough that an operator could watch a canned clip
-   of a demo and conclude the wall was fine. So the live one says so, and the
-   tile without the dot is the one not to trust.
+/* Make it look like the thing it is: 320x64 discrete emitters on a black
+   board, not a smooth picture of one.
 
-   It hangs off .now rather than .thumb because .thumb has overflow: hidden and
-   nothing inside it can leave the frame. Anchored here it can be over the
-   picture on a wide screen and beside it on a narrow one, which is the whole
-   point of the media query below. Offsets are the card's padding plus its
-   border plus the inset the badge wants inside the tile. */
-.now .live {
-  position: absolute; top: 16px; right: 20px;
-  display: flex; align-items: center; gap: 4px;
-  font-family: var(--mono); font-size: 9px; letter-spacing: .12em;
-  color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000; pointer-events: none;
+   The mask punches one round aperture per LED. mask-size is the tile divided by
+   the panel's own dimensions, so the apertures stay registered to the pixels at
+   any card width -- there is no fixed pitch to drift out of alignment. Between
+   them the board shows through, which is what gives the dot texture.
+
+   The aperture is soft-edged rather than a hard circle. A real LED is brightest
+   at the middle and falls off into its diffuser, and the gradient is both a
+   better likeness and much kinder to the sampler: at a hair over 3 screen
+   pixels per LED a hard circle aliases into a moire, and a soft one does not.
+
+   Brightness is pushed back up because the mask throws away well over half the
+   light, and an unlit gap reads as darker still next to a bright neighbour. */
+.now .thumb img {
+  --led-cols: 320;
+  --led-rows: 64;
+  -webkit-mask-image: radial-gradient(circle,
+    rgba(0,0,0,1) 0 30%, rgba(0,0,0,.65) 46%, rgba(0,0,0,0) 62%);
+  mask-image: radial-gradient(circle,
+    rgba(0,0,0,1) 0 30%, rgba(0,0,0,.65) 46%, rgba(0,0,0,0) 62%);
+  -webkit-mask-size: calc(100% / var(--led-cols)) calc(100% / var(--led-rows));
+  mask-size: calc(100% / var(--led-cols)) calc(100% / var(--led-rows));
+  filter: brightness(1.45) saturate(1.12);
 }
-.now .live::before {
-  content: ""; width: 6px; height: 6px; border-radius: 50%; background: #f33;
-  box-shadow: 0 0 4px #f33; animation: livepulse 2s ease-in-out infinite;
-}
-@media (prefers-reduced-motion: reduce) {
-  .now .live::before { animation: none; }
+/* The board behind the emitters. Not pure black -- a dark panel in a lit room
+   is never quite black, and a little lift makes the unlit LEDs read as objects
+   sitting there rather than as holes in the card. */
+.now .thumb { background: #090909; }
+/* The two things that make it read as hardware rather than as a texture.
+
+   The seams: betelgeuse is not one 320x64 panel, it is five 64x64 panels in a
+   chain, and on the real wall you can see where they butt together. Every 20%
+   is exactly that join.
+
+   The vignette: a panel is a physical object under a light, so the middle is
+   brighter than the corners. Both are far too faint to read as decoration and
+   that is the point -- they are the difference between a picture of a wall and
+   a wall. */
+.now .thumb::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background:
+    repeating-linear-gradient(90deg,
+      rgba(255,255,255,.05) 0 1px, transparent 1px 20%),
+    radial-gradient(120% 150% at 50% 45%,
+      transparent 45%, rgba(0,0,0,.35) 100%);
 }
 .now .who { flex: 1; min-width: 0; }
 .now .title { font-size: 17px; font-weight: 700; }
@@ -149,20 +174,15 @@ h1 { font-size: 22px; font-weight: 800; letter-spacing: -.01em; margin: 0; }
      other size -- on a phone held upright that is the only way it is legible at
      all, and it is still only a fifth as tall as it is wide. */
   .now .who { flex: 1 1 140px; }
-  /* And the badge comes off the picture entirely. There is much less wall on a
-     phone and every pixel of it is content somebody wants to see; a chip in the
-     corner covers a twentieth of it. Out here it rides the end of the name line
-     instead, which costs the picture nothing.
-
-     The three orders have to be spelled out together. The badge comes before
-     .who in the markup and has to render after it, but .transport is a full
-     width row that has to stay below them both -- so ordering only the badge
-     sends it past the buttons and onto a line of its own at the bottom. */
-  .now .live {
-    position: static; order: 1; flex: none; align-self: center;
-    color: var(--dim); text-shadow: none;
+  .now .transport { flex: 1 0 100%; }
+  /* A phone gives each LED barely one screen pixel, which is not enough to put
+     a hole in the middle of: the apertures land between samples and the picture
+     turns to moire. The wall renders flat down here, and legibility is worth
+     more than the texture. */
+  .now .thumb img {
+    -webkit-mask-image: none; mask-image: none;
+    filter: none;
   }
-  .now .transport { flex: 1 0 100%; order: 2; }
   .now .transport button { flex: 1; }
 }
 
@@ -222,7 +242,6 @@ h1 { font-size: 22px; font-weight: 800; letter-spacing: -.01em; margin: 0; }
   position: absolute; inset: 0; display: grid; place-items: center;
   font-family: var(--mono); font-size: 7px; letter-spacing: .1em; color: var(--faint);
 }
-@keyframes livepulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 .row .who { flex: 1; min-width: 0; }
 /* One line each, whatever the name is and however many chips it has: a row
    that grows to three lines on a phone turns the list into a scroll of ragged
@@ -373,9 +392,6 @@ dialog::backdrop { background: rgba(8, 7, 5, .68); }
 
   <div class="now">
     <span class="thumb" id="nowThumb"><img id="nowImg" alt="" hidden><span class="missing" id="nowMissing">no preview</span></span>
-    <!-- Outside the tile on purpose: .thumb clips its children, and on a phone
-         this badge sits beside the picture rather than on top of it. -->
-    <span class="live" id="nowLive" hidden>LIVE</span>
     <div class="who">
       <div class="title"><span id="nowName">—</span> <span class="pos" id="nowPos"></span></div>
       <div class="up">next · <b id="nextName">—</b><span class="building" id="nextBuilding" hidden> · building</span></div>
@@ -1257,19 +1273,17 @@ for (const ev of ["change", "pointerup", "keyup"])
 //
 // A 503 means somebody else has the slots and is an ordinary outcome, not an
 // error to shout about: the tile quietly goes back to being what it was before,
-// a baked preview of whatever is playing, and the LIVE dot stays off to say so.
+// a baked preview of whatever is playing.
 let live = false;
 function liveOn() {
   if (live) return;
   live = true;
   const img = $("nowImg");
-  img.onload = () => { $("nowLive").hidden = false; };
   img.onerror = () => {
     // No stream to be had. Drop back to the preview and let the state poll
     // repaint it by clearing the name it thinks it is showing.
     live = false;
-    $("nowLive").hidden = true;
-    img.onload = img.onerror = null;
+    img.onerror = null;
     img.dataset.name = "";
   };
   img.hidden = false;
@@ -1280,11 +1294,10 @@ function liveOff() {
   if (!live) return;
   live = false;
   const img = $("nowImg");
-  img.onload = img.onerror = null;
+  img.onerror = null;
   // Clearing src is what actually closes the connection and frees the slot.
   img.removeAttribute("src");
   img.dataset.name = "";
-  $("nowLive").hidden = true;
 }
 
 // One poll a second while visible. A backgrounded tab on a phone should not
