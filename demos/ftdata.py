@@ -6660,15 +6660,27 @@ HELI_INTERVAL = 300
 # own lane. On the panel the earthquake came out as a pair of black holes with
 # the trace missing, which is the exact opposite of what a helicorder is for.
 #
-# A median ignores anything occupying less than half its window, and ten
-# minutes of window means five minutes of continuous strong shaking before it
-# can be moved at all -- far more than any local event puts on this trace. It
-# is longer than the old mean because it can afford to be: the thing being
-# removed is the thermal and tidal wander of a broadband vault, which is an
-# hours-long drift, and a median does not smear a burst outward across its
-# window the way a mean does. Everything slower than about ten minutes goes
-# with it, and nothing an earthquake does is that slow.
-HELI_BASE_S = 600.0
+# A median ignores anything occupying less than half its window, so at two
+# minutes -- eleven columns -- the two columns of an S-wave still cannot move
+# it, and neither can a full minute of continuous strong shaking. Robustness
+# is what the estimator buys; it is not what the window length buys.
+#
+# The window went to ten minutes with that fix, on the reasoning that a median
+# could afford a longer one, and that is what put the red back on the panel. A
+# baseline is a high-pass filter and its window is the corner: the vault's
+# midpoint wanders on periods of a couple of minutes -- ocean infragravity and
+# barometric, not just the hours-long thermal and tidal drift -- and a
+# ten-minute window leaves all of it in. Measured on the live record for
+# 2026-08-15, with everything else held fixed, the share of columns whose ink
+# leaves its own lane and draws in the clip colour goes:
+#
+#     60 s  0.13%   120 s  0.40%   180 s  0.92%   240 s  1.58%   600 s  1.32%
+#
+# So ten minutes was tripling the red on a six-hour window with no earthquake
+# in it, which is a panel crying wolf. Two minutes is the corner this trace
+# actually wants and is the one it had for months before the fix. The fix was
+# the mean becoming a median; the window coming with it was not part of it.
+HELI_BASE_S = 120.0
 
 # The response -- counts per m/s -- changes when somebody recalibrates the
 # vault, which is a thing that has happened eight times since 1996 and never
@@ -6899,7 +6911,7 @@ def _heli_centre(lo, hi, have):
         ext = np.concatenate([np.full(pad, mid[0]), mid, np.full(pad, mid[-1])])
         # The window as an explicit (k, n) stack and one median down it. Not
         # sliding_window_view: the wall's Pi is on numpy 1.19 and does not
-        # have it. k is 51 and n is at most 1800, so this is 92k floats and a
+        # have it. k is 11 and n is at most 1800, so this is 20k floats and a
         # sort, which is a millisecond and happens once per fetch.
         base = np.median(np.stack([ext[i:i + len(mid)] for i in range(k)]), 0)
     else:

@@ -425,6 +425,43 @@ def test_baseline_is_robust():
           "worst midpoint %d counts over a 16000 count ramp" % worst)
 
 
+def test_baseline_window_is_short_enough():
+    """The zero adjustment must remove the wander a few minutes long, too.
+
+    The other way to get this wrong, and the one that followed the 2026-08-13
+    fix into the tree. Making the estimator a median is what buys robustness
+    against an earthquake; the window length buys nothing there and the fix
+    lengthened it from two minutes to ten anyway. But a baseline is a high-pass
+    filter and its window is the corner. This vault's midpoint wanders on
+    periods of a few minutes -- ocean infragravity and barometric, not only the
+    hours-long thermal and tidal drift the long window was reasoned about --
+    and a ten-minute window leaves every bit of it in the trace. It arrives on
+    the panel as ink shoved bodily out of its lane and drawn in the clip
+    colour: on the live record for 2026-08-15, with no earthquake anywhere in
+    the six hours, ten minutes put 1.32% of columns into the clip colour where
+    two minutes puts 0.40%. A drum that cries wolf three times as often is
+    reporting the filter and not the ground.
+
+    So this is a check on the corner and not on the constant: wander well
+    inside the drift band, at an amplitude that would clip, has to come out
+    smaller than the background it sits on.
+    """
+    print("\nthe zero adjustment removes the wander a few minutes long")
+    n = 300
+    quiet = 3000                       # peak-to-peak of the flat background
+    swing = 4000                       # more than half a lane at this gain
+    t = np.arange(n) * BIN_S
+    for period in (240.0, 300.0, 360.0, 480.0):
+        wander = swing * np.sin(2.0 * math.pi * t / period)
+        lo = (wander - quiet // 2).astype(np.int32)
+        hi = (wander + quiet // 2).astype(np.int32)
+        clo, chi = ftdata._heli_centre(lo, hi, np.ones(n, bool))
+        worst = int(np.abs((clo + chi) * 0.5).max())
+        check("%.0f s of wander comes out under the background" % period,
+              worst < quiet, "worst midpoint %d counts, background %d"
+              % (worst, quiet))
+
+
 def test_big_event_is_one_mark():
     """A clipped event must reach the panel as one continuous mark.
 
@@ -845,6 +882,7 @@ def main():
     test_steim()
     test_lane_order()
     test_baseline_is_robust()
+    test_baseline_window_is_short_enough()
     test_big_event_is_one_mark()
     test_scale()
     test_gaps_and_pen()
