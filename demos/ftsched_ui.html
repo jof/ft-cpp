@@ -86,14 +86,30 @@ h1 { font-size: 22px; font-weight: 800; letter-spacing: -.01em; margin: 0; }
 #health { font-family: var(--mono); font-size: 12px; color: var(--faint); }
 #health.warn { color: var(--build); }
 
-/* the now line -- one row, the same shape as a rotation row so the eye reads
-   them as the same kind of thing */
+/* The now block: the wall across the top, and who/what/transport on the line
+   underneath it.
+
+   This used to be a single row shaped like a rotation row, matching them so the
+   eye read the two as the same kind of thing. That was right while the tile
+   held a baked clip -- a 110px strip is plenty to confirm which demo is up. It
+   is the wrong shape for a live view, which is not an identifying thumbnail but
+   the thing you actually came to look at, and at 110px you cannot read a wall
+   320 pixels wide. So it gets the full width of the card and the rest moves
+   down a row. */
 .now {
   display: flex; align-items: center; gap: 12px; margin-top: 10px;
   padding: 10px 12px; background: var(--card); border: 1px solid var(--line);
-  border-radius: 11px;
+  border-radius: 11px; flex-wrap: wrap;
 }
-.now .thumb { width: 110px; flex: none; }
+/* Its own row, the whole width. The 5:1 aspect-ratio on .thumb does the rest:
+   inside a 1040px wrap that lands about 200px tall, a bit over 3x the wall's
+   320 -- and object-fit: contain with image-rendering: pixelated means the
+   upscale stays square-edged instead of turning into soup. */
+.now .thumb { flex: 1 0 100%; width: auto; }
+/* Both overlays sit on a tile many times the size they were written for. */
+.now .thumb .live { font-size: 9px; top: 5px; right: 7px; gap: 4px; }
+.now .thumb .live::before { width: 6px; height: 6px; }
+.now .thumb .missing { font-size: 12px; }
 .now .who { flex: 1; min-width: 0; }
 .now .title { font-size: 17px; font-weight: 700; }
 .now .title .pos { font-family: var(--mono); font-size: 12px; font-weight: 400; color: var(--dim); }
@@ -107,9 +123,9 @@ h1 { font-size: 22px; font-weight: 800; letter-spacing: -.01em; margin: 0; }
 .now .title, .now .up { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 560px) {
   /* Pause and Skip drop under the line rather than squeezing the name into a
-     column three characters wide. */
-  .now { flex-wrap: wrap; }
-  .now .thumb { width: 84px; }
+     column three characters wide. The wall keeps the full width it has at every
+     other size -- on a phone held upright that is the only way it is legible at
+     all, and it is still only a fifth as tall as it is wide. */
   .now .who { flex: 1 1 140px; }
   .now .transport { flex: 1 0 100%; }
   .now .transport button { flex: 1; }
