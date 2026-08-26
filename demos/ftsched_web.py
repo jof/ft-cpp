@@ -36,6 +36,8 @@ UI_FILE = os.path.join(_HERE, "ftsched_ui.html")
 # loop's command handler.
 OPS = {"jump": ("index",), "toggle": ("name", "on"), "all": ("on",),
        "next": (), "pause": (), "resume": (), "restart": (),
+       # Fire a cue by hand, which is the only way to see one before 9:25.
+       "cue": ("name",),
        # options is the whole set for that entry, not a patch, so an editor
        # that has been open a while cannot half-apply against a rotation that
        # moved under it. null means "back to what the rotation file says".
@@ -139,6 +141,17 @@ class Handler(BaseHTTPRequestHandler):
         if missing:
             self._json(400, {"error": "%s needs %s" % (op, ", ".join(missing))})
             return
+        if op == "cue":
+            # Checked here as well as in the scheduler, exactly as select and
+            # configure are: an unknown name should come back as a sentence
+            # naming what there is, not be accepted and then dropped a frame
+            # later where only the journal sees it.
+            known = [c["name"] for c in self.server.sched.cues_json()]
+            if payload["name"] not in known:
+                self._json(404, {"error": "no cue called %r; there is %s"
+                                          % (payload["name"],
+                                             ", ".join(known) or "none")})
+                return
         if op == "configure":
             # Checked here as well as in the scheduler so a typo comes back as
             # a sentence the editor can put under the field, rather than as a

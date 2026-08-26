@@ -23,6 +23,18 @@
   --pad: 14px;
 }
 * { box-sizing: border-box; }
+/* Cues: what plays at a time of day rather than in the running order. A chip
+   each, the times it is wanted at, and a way to see it before 9:25 -- which
+   is the whole reason the button exists, since otherwise the only way to
+   check a cue is to be standing here at 9:25. */
+.cues { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 var(--pad) 10px; }
+.cue { display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+       border: 1px solid var(--line); border-radius: 999px; background: var(--card); }
+.cue b { font-weight: 600; }
+.cue .at { color: var(--dim); font-variant-numeric: tabular-nums; }
+.cue .done { color: var(--on); }
+.cue[data-playing="true"] { border-color: var(--live); }
+.cue button { padding: 2px 10px; border-radius: 999px; font-size: 12px; }
 /* The UA rule for [hidden] is display:none at the lowest specificity, so any
    class that sets display -- .missing does, below -- silently beats it and the
    element stays on screen. */
@@ -230,6 +242,9 @@ dialog::backdrop { background: rgba(4, 6, 10, .66); }
     <button id="btnAllOn" class="minor">Enable all</button>
     <button id="btnAllOff" class="minor">Disable all</button>
   </div>
+  <!-- Only drawn when this wall has a cue file. A row that is always there
+       and usually empty teaches people to ignore that part of the page. -->
+  <div id="cues" class="cues" hidden></div>
 </header>
 
 <div id="grid"></div>
@@ -366,6 +381,39 @@ function buildCards(rotation) {
   }
 }
 
+// The cue row. Rebuilt from the snapshot each second rather than diffed:
+// there are one or two of these, not sixty, and a chip that is rebuilt cannot
+// hold a stale time.
+function paintCues(cues) {
+  const box = document.getElementById("cues");
+  box.hidden = cues.length === 0;
+  box.textContent = "";
+  for (const c of cues) {
+    const el = document.createElement("div");
+    el.className = "cue";
+    el.dataset.playing = String(!!c.playing);
+    const name = document.createElement("b");
+    name.textContent = c.name;
+    const at = document.createElement("span");
+    at.className = "at";
+    // Struck through once it has been today, so somebody looking at the page
+    // at ten in the morning can see the 9:25 has already been and gone.
+    at.append(...c.at.map(t => {
+      const one = document.createElement("span");
+      one.textContent = t;
+      if ((c.fired_today || []).includes(t)) one.className = "done";
+      return one;
+    }).flatMap((n, i) => i ? [document.createTextNode(" · "), n] : [n]));
+    const go = document.createElement("button");
+    go.type = "button";
+    go.textContent = c.playing ? "on air" : "Play now";
+    go.disabled = !!c.playing;
+    go.addEventListener("click", () => post("cue", { name: c.name }));
+    el.append(name, at, go);
+    box.append(el);
+  }
+}
+
 function cardPosition(name) {
   const e = state.rotation.find(x => x.name === name);
   return e ? e.position : 0;
@@ -397,6 +445,7 @@ function paint(s) {
     if (c.cog) c.cog.classList.toggle("custom", !!e.customised);
   }
 
+  paintCues(s.cues || []);
   document.getElementById("nowName").textContent = s.now.name || "—";
   document.getElementById("nowPos").textContent =
     s.now.position >= 0

@@ -73,6 +73,52 @@ so it rides the ordinary transition rather than cutting. What is switched off
 persists across restarts via `--state-file`; the running order itself does
 not, since that belongs in the rotation file, where it gets reviewed.
 
+**Cues — a demo that belongs at a time.** The rotation answers *what is
+next*. Some things want to answer *what is at 9:25*, and those are different
+questions, so they are kept apart in
+[`rotation-cues.json`](rotation-cues.example.json): an entry name, the local
+times it is wanted at, and how long a slot it wants.
+
+```json
+{"version": 1, "cues": [
+  {"name": "dolly", "at": ["09:25", "21:25"], "seconds": 60,
+   "punctual": true, "window": 600}]}
+```
+
+When a cue comes due the scheduler **pins** its entry onto the next index the
+playhead will reach. Pinning is not jumping, and the difference is the whole
+design. A jump moves the rotation's offset, so the running order would stay
+rotated by one for the rest of the day, and it can only reach an entry that is
+switched on. A pin leaves the offset alone: that one index plays the cue
+instead of what it held, every index after it maps exactly where it always
+did, and the entry a cue names can be — and usually is — switched off in the
+rotation, because a demo that is only right at a particular minute should not
+come up at random.
+
+`punctual` ends the current segment immediately so the cue lands within a
+transition of its minute; `false` waits for the slot boundary instead, up to a
+segment late, and never truncates anything. A cued entry cuts in and out
+rather than dissolving: it is on the wall because of what time it is, and
+crossfading a data panel into a clock lands the joke two seconds late.
+
+`window` is how late it may still fire. A wall that was rebooting at 9:25
+plays it at 9:27; one that was off all morning does not ambush somebody with
+it at noon. Which cues have already gone off today is written to the
+`--state-file`, so a restart at 9:26 — which is exactly when somebody restarts
+it, having just watched the thing — does not play it a second time.
+
+The times are local and that is deliberate: the wall is in one place, the
+people reading it are in that place, and daylight saving is then the C
+library's problem, which it has right.
+
+The panel grows a chip per cue showing its times, with the ones that have
+already been today marked, and a **Play now** button — because otherwise the
+only way to check a cue is to be standing in front of the wall at 9:25.
+`scripts/test-cues.py` covers the rest: `due()` is a pure function of (cues,
+now, already-fired) with no clock in it, so a restart two minutes late, a
+second showing at 21:25 and a Tuesday-only cue on a Wednesday are questions
+that can be asked rather than waited for.
+
 **Settings.** The gear on a card opens an editor for that effect's own
 options — the splitflap board's messages, the number of fireflies, which
 palette `life` burns through.
