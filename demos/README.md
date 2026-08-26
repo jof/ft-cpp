@@ -7863,6 +7863,67 @@ $ FT_DATA_CACHE=/tmp/nothing python3 opencircuit.py    # the no-data card
 $ python3 scripts/test-opencircuit.py            # the assertions
 ```
 
+### dolly
+
+![dolly](previews/dolly.webp)
+
+Sixty seconds of hot pink for Dolly Parton, and the only demo here that is not
+in the running order. It belongs at 9:25 and the joke is the time: the panel
+puts up a clock reading **9:25** with the colon blinking the way every clock
+radio in America blinked, and underneath it says WE'RE WORKIN' 9:25. CLOSE
+ENOUGH. It is reached by a cue (see [Cues](#cues) below) at 09:25 and 21:25,
+and by nothing else — a clock gag at twenty past three is not a gag, it is a
+wall telling the wrong time, so the rotation entry is switched off on purpose.
+
+Then it stops being a joke and starts being the reason. Twelve butterflies —
+one a month, which is what her Imagination Library mails a child from birth to
+five — lift off a ridgeline, cross the panel and land as books, and the pile
+of spines they make is the year. The figure that follows is the programme's
+own 2025 year-end number, **304,539,509**, with the year printed next to it,
+because a number on a wall without a date on it is a number that will rot.
+Then a line of hers, and then the ask: give a kid a book.
+
+Her dates go on the last card in the smallest type in the file. It is
+deliberately not solemn — a panel that went grey and quiet for Dolly Parton
+would be the one thing she never was.
+
+**Pink is the only colour decision.** The whole picture is a single (64, 320)
+intensity field — sky, ridge, butterflies, type, rhinestones — taken through
+one 256-entry ramp running unlit, plum, magenta, hot pink, blush, gold,
+rhinestone white. Nothing on the panel chooses its own colour, so nothing on
+it can clash: a butterfly is bright, so it comes out gold; the ridge it rises
+off is dim, so it comes out plum. Hot pink is `#FF2D95`, gold is `#FFC46E`,
+and those two are the whole identity. The forty rhinestones are most of the
+design and cost a sine of a forty-element array — run `--sparkle 0` and the
+panel is instantly a weather graphic.
+
+**Cost.** 4.7 ms p50, 6.4 p95, 8.8 worst over a whole cue, measured on this
+Pi under the numpy 2.0.2 the scheduler runs; 6.4 / 8.9 under the system numpy
+1.19.5. Inside the 41 ms a 24 fps frame has, with room to spare, which is what
+a sixty-second slot at the top of the hour ought to cost.
+
+**Type is data.** Every line lives in one `TEXT` table with the size it goes
+up at, and the draw calls name a line rather than repeat its words. A headline
+at scale 2 is twelve pixels a character, so 320 pixels is twenty-six
+characters and not one more, and a line that overruns does not look broken —
+it looks like a sentence with the last two words missing. `12 A YEAR, 60 BY
+AGE FIVE.` was `TWELVE A YEAR. SIXTY BY FIVE.` until somebody looked at the
+pixels. `scripts/test-dolly.py` now measures every line against the panel, and
+`fit_scale()` steps a line down a size rather than let a narrow panel eat the
+end of it.
+
+Four acts, dissolving through the shared sky rather than cutting, and the last
+one does not dissolve out: its final frame is what the wall is holding when
+the minute ends and the rotation cuts back in, so it is the one frame in the
+file guaranteed to be photographed.
+
+```console
+$ python3 dolly.py --host 127.0.0.1
+$ python3 dolly.py --at 47              # the closing card, for a photograph
+$ python3 dolly.py --sparkle 0          # what the rhinestones were doing
+$ python3 scripts/test-dolly.py         # the assertions
+```
+
 ## Group buttons
 
 Sixty-three cards is a lot of switches. The thing people actually want from the
@@ -7993,6 +8054,54 @@ Movies — the exchange it works through is a real one.
 Bandwidth for a network group was considered and dropped. `bgp` and `sfmix`
 would have been the whole of it, both are honestly data panels, and two members
 does not earn a button on a phone.
+
+## Cues
+
+The rotation answers *what is next*. `dolly` answers *what is at 9:25*, and
+those are different questions, so they live apart in
+[`rotation-cues.json`](rotation-cues.json): an entry name, the local times it
+is wanted at, and the slot it wants.
+
+```json
+{"name": "dolly", "at": ["09:25", "21:25"], "seconds": 60,
+ "punctual": true, "window": 600}
+```
+
+When a cue comes due the scheduler **pins** its entry onto the next index the
+playhead will reach. Pinning is not jumping, and that difference is the whole
+design. A jump moves the rotation's offset, so the running order would stay
+rotated by one for the rest of the day, and it can only reach an entry that is
+switched **on** — whereas the entry a cue names is normally switched off,
+because a demo that is only right at one minute should not come up at random.
+A pin leaves the offset alone: that one index plays the cue instead of what it
+held, and every index after it maps exactly where it always did. The cue does
+take that slot; whatever the rotation had there waits until the next time
+round, which on a ninety-odd entry cycle is invisible.
+
+`punctual` ends the current segment immediately so the cue lands within a
+transition of its minute — which for a demo whose first frame is a clock is
+the whole point. `false` waits for the slot boundary instead, up to a segment
+late, and never truncates anything. A cued entry cuts in and out rather than
+dissolving: it is on the wall because of what time it is, and crossfading a
+data panel into a clock lands the joke two seconds late.
+
+`window` is how late it may still fire. A wall that was rebooting at 9:25
+plays it at 9:27; one that was off all morning does not ambush somebody with
+it at noon. Which cues have already been today is written to the state file,
+so a restart at 9:26 — which is exactly when somebody restarts it, having just
+watched the thing — does not play it twice.
+
+Times are local, which makes daylight saving the C library's problem, and it
+has that right.
+
+The panel grows a zone with a chip per cue: its times, the ones that have been
+today struck through, and a **Play now** button — because otherwise the only
+way to check a cue is to stand in front of the wall at 9:25.
+`scripts/test-cues.py` covers the rest. `due()` is a pure function of (cues,
+now, already-fired) with no clock in it, so a restart two minutes late, the
+second showing at 21:25 and a Tuesday-only cue on a Wednesday are questions
+that can be asked rather than waited for — and it asserts the one thing the
+mechanism must guarantee, that a pin does not move the carousel.
 
 ## where the wall is — `site.json` and `ftsite.py`
 

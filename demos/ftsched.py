@@ -60,6 +60,7 @@ Run:  python3 ftsched.py --host localhost --listen 0.0.0.0:8081
       python3 ftsched.py --dump-rotation > rotation.json
 """
 
+import copy
 import gc
 import json
 import os
@@ -361,6 +362,183 @@ def resolve_groups(groups, entries, warn):
 
 
 # --------------------------------------------------------------------------
+# Cues: a demo that belongs at a time rather than in a running order.
+#
+# The rotation answers "what is next"; a cue answers "what is at 9:25". They
+# are different questions and this keeps them apart. A cue names an entry, a
+# list of wall-clock times, and how long a slot it wants; when one comes due
+# the scheduler pins that entry onto the next index the playhead will reach,
+# lets it play, and then does nothing.
+#
+# The cue *takes* that slot rather than being inserted before it, so the entry
+# the rotation had at that index waits until the next time round. What it does
+# not do is move the rotation's offset: every later index still maps exactly
+# where it did, so the running order is not left rotated by one for the rest
+# of the day and nothing downstream of the cue plays out of order. On a
+# thirty-entry, half-hour cycle, one slot given up once a morning is invisible;
+# a running order permanently one out of step is not.
+#
+# That is the whole design, and it is why this is not implemented as a jump.
+# A jump moves the offset (so the running order is permanently rotated by one
+# afterwards) and can only reach an *enabled* entry, whereas the point of a
+# cue is usually an entry that should never come up on its own. A pinned index
+# has neither problem.
+#
+# Times are local. The wall is in one place, the people reading it are in that
+# place, and daylight saving is then somebody else's problem -- specifically
+# the C library's, which has it right.
+# --------------------------------------------------------------------------
+
+CUES_FILE = os.path.join(_HERE, "rotation-cues.json")
+
+DEFAULT_WINDOW = 600.0                   # how late a cue may still fire
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+class Cue(object):
+    """One entry, and the times of day it is wanted at."""
+
+    def __init__(self, name, times, days="*", seconds=0.0,
+                 punctual=True, window=DEFAULT_WINDOW):
+        self.name = name
+        self.times = list(times)
+        self.days = days
+        self.seconds = float(seconds or 0.0)
+        self.punctual = bool(punctual)
+        self.window = float(window)
+        self.entry = None                # the clone, once resolved
+
+    def on_day(self, wday):
+        if self.days == "*" or not self.days:
+            return True
+        return DAYS[wday] in [d.lower()[:3] for d in self.days]
+
+    def to_json(self):
+        return {"name": self.name, "at": list(self.times), "days": self.days,
+                "seconds": self.seconds, "punctual": self.punctual,
+                "window": self.window}
+
+
+def parse_hhmm(text):
+    """'9:25' or '21:25' -> minutes past midnight, or None if it is neither."""
+    try:
+        hh, mm = str(text).split(":")
+        hh, mm = int(hh), int(mm)
+    except (ValueError, AttributeError):
+        return None
+    if not (0 <= hh < 24 and 0 <= mm < 60):
+        return None
+    return hh * 60 + mm
+
+
+def fired_key(name, now, at):
+    """What 'this cue has already gone off' is remembered as.
+
+    Name, date and time-of-day, so the 9:25 morning showing and the 9:25
+    evening one are different events, and both are different tomorrow.
+    """
+    return "%s@%04d-%02d-%02d@%s" % (name, now.tm_year, now.tm_mon,
+                                     now.tm_mday, at)
+
+
+def due(cues, now, fired):
+    """Which cues want to play at `now`, as (cue, at, key). Pure.
+
+    `now` is a time.struct_time in local time and `fired` is the set of keys
+    that have already gone off, so this is a total function of its arguments
+    with no clock and no state in it -- which is the only reason the awkward
+    cases (a restart two minutes late, a second showing at 21:25, the same
+    minute arriving twice because the frame loop is faster than a second) are
+    testable at all. See scripts/test-cues.py.
+
+    A cue fires from its minute until `window` seconds after it, so a wall
+    that was rebooting at 9:25 still plays the thing at 9:27, and one that was
+    off all morning does not ambush somebody with it at noon.
+    """
+    out = []
+    minutes = now.tm_hour * 60 + now.tm_min
+    for cue in cues:
+        if not cue.on_day(now.tm_wday):
+            continue
+        for at in cue.times:
+            want = parse_hhmm(at)
+            if want is None:
+                continue
+            late = (minutes - want) * 60.0 + now.tm_sec
+            if 0.0 <= late <= cue.window:
+                key = fired_key(cue.name, now, at)
+                if key not in fired:
+                    out.append((cue, at, key))
+    return out
+
+
+def load_cues(path, warn):
+    """The cue file, or nothing at all if there is not one.
+
+    Absent is a normal state and not a warning: most walls do not have a demo
+    that belongs at a time, and the scheduler they run is this same file.
+    """
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+    except Exception as exc:
+        warn("cues: %s unreadable (%s); carrying on without any" % (path, exc))
+        return []
+    out = []
+    for d in doc.get("cues", []):
+        try:
+            cue = Cue(d["name"], d.get("at") or [], d.get("days", "*"),
+                      d.get("seconds", 0.0), d.get("punctual", True),
+                      d.get("window", DEFAULT_WINDOW))
+        except KeyError as exc:
+            warn("cues: skipping an entry with no %s" % exc)
+            continue
+        bad = [a for a in cue.times if parse_hhmm(a) is None]
+        for a in bad:
+            warn("cues: %s has %r, which is not a HH:MM" % (cue.name, a))
+        cue.times = [a for a in cue.times if parse_hhmm(a) is not None]
+        if cue.times:
+            out.append(cue)
+    return out
+
+
+def resolve_cues(cues, entries, warn):
+    """Bind each cue to its own copy of the entry it names.
+
+    Its own copy, because a cue usually wants a different slot length from the
+    rotation's idea of one and because the entry it names is typically
+    disabled -- it exists to be cued and nothing else. The copy is built and
+    cached like any other entry; the original keeps whatever the rotation file
+    said, and switching the rotation entry on does not change the cue.
+
+    A cue naming an entry this installation does not have is dropped with a
+    sentence, which is what makes one cue file safe to carry across walls with
+    different rotations.
+    """
+    by_name = {e.name: e for e in entries}
+    kept = []
+    for cue in cues:
+        entry = by_name.get(cue.name)
+        if entry is None:
+            warn("cues: nothing in the rotation is called %r; ignoring it"
+                 % cue.name)
+            continue
+        clone = copy.copy(entry)
+        clone.options = dict(entry.options)
+        if cue.seconds > 0:
+            clone.seconds = cue.seconds
+        # Cut in and cut out. A cue is punctual by definition -- it is on the
+        # wall because of what time it is -- and dissolving a data panel into
+        # a clock that is the joke would land the joke two seconds late.
+        clone.solo = True
+        cue.entry = clone
+        kept.append(cue)
+    return kept
+
+
+# --------------------------------------------------------------------------
 # The steerable running order.
 # --------------------------------------------------------------------------
 
@@ -532,12 +710,43 @@ class Builder(mega.Builder):
         # would be filed against an index that now means something else, and
         # the wall would play the effect you just jumped away from.
         self.gen = 0
+        # index -> entry, for the handful of indices a cue has claimed. Empty
+        # on a wall with no cue file, which is why entry_at() tests it first.
+        self.pin = {}
         # The base class keeps a fixed list; ours is in the Rotation. It is
         # still read for len() in a couple of places, so keep it plausible.
         mega.Builder.__init__(self, rotation.all, args, lead)
 
     def entry_at(self, index):
-        return self.rot.at(index)
+        # A pinned index plays what it was pinned to whether or not that entry
+        # is enabled, or in the rotation at all. Read without the lock: dict
+        # lookup is atomic, this is on the frame loop's path several times a
+        # frame, and a pin that lands between two reads is a pin that lands on
+        # the next frame instead.
+        entry = self.pin.get(index) if self.pin else None
+        return entry if entry is not None else self.rot.at(index)
+
+    def pin_at(self, index, entry):
+        """Make one future index play `entry`, whatever the rotation says.
+
+        Deliberately not a jump. A jump moves the rotation's offset, so the
+        running order would stay rotated by one for the rest of the day, and
+        it can only reach an entry that is switched on. A pin leaves the
+        offset alone: this index plays the cue instead of what it held, and
+        every index after it maps exactly where it always did.
+        """
+        with self.lock:
+            self.pin[index] = entry
+            self.gen += 1
+            self.wake.notify_all()
+
+    def unpin_before(self, index):
+        """Forget pins the playhead has passed, so they cannot accumulate."""
+        if not self.pin:
+            return
+        with self.lock:
+            for i in [i for i in self.pin if i < index]:
+                del self.pin[i]
 
     def spec(self, index):
         with self.lock:
@@ -737,12 +946,18 @@ class Show(mega.Show):
 
 class Scheduler(object):
 
-    def __init__(self, args, entries, groups=None):
+    def __init__(self, args, entries, groups=None, cues=None):
         self.args = args
         self.rot = Rotation(entries)
         # Already resolved against `entries` by the caller, so nothing in here
         # names a slot that does not exist and select() cannot half-apply.
         self.groups = list(groups or [])
+        # Already resolved against `entries` by the caller, so every cue here
+        # has an entry to play and none of them can half-fire.
+        self.cues = list(cues or [])
+        self.fired = set()                   # keys of cues already gone off
+        self.cued = None                     # (index, cue) currently claimed
+        self._cue_checked = 0.0
         self.commands = []                   # (op, payload), drained per frame
         self.cmd_lock = threading.Lock()
         self.state_lock = threading.Lock()
@@ -818,6 +1033,10 @@ class Scheduler(object):
                 self.show.skip(t, self.args.transition)
         elif op == "configure":
             self._configure(payload, t)
+        elif op == "cue":
+            # By hand, from the panel. Same path the clock takes, so what a
+            # button does at half past four is exactly what 9:25 does.
+            self._fire(self._cue_named(payload["name"]), None, t)
         elif op == "next":
             self.show.skip(t, self.args.transition)
         elif op == "restart":
@@ -987,6 +1206,86 @@ class Scheduler(object):
         for layer in (entry.clears if entry else ()):
             self._blank(layer)
 
+    # -- cues -------------------------------------------------------------
+
+    def cues_json(self):
+        """The cues, and when each next wants the wall.
+
+        In the state snapshot rather than in /api/schema, unlike the option
+        schemas: what a cue *is* is static, but whether it has already gone
+        off today is not, and the panel wants to say "9:25 pm" under a button
+        rather than make somebody work it out.
+        """
+        if not self.cues:
+            return []
+        now = time.localtime()
+        out = []
+        for cue in self.cues:
+            times = sorted(cue.times, key=parse_hhmm)
+            done = [a for a in times if fired_key(cue.name, now, a) in self.fired]
+            out.append(dict(cue.to_json(),
+                            playing=bool(self.cued and self.cued[1] is cue),
+                            fired_today=done))
+        return out
+
+    def _cue_named(self, name):
+        for cue in self.cues:
+            if cue.name == name:
+                return cue
+        raise ValueError("no cue called %r" % (name,))
+
+    def _fire(self, cue, key, t):
+        """Claim the next index for a cue and, if it is punctual, cut to it.
+
+        The *next* index rather than this one: the effect on air keeps the
+        instance it was built with and plays out its slot, exactly as a toggle
+        or a group select does. Punctual then ends that slot immediately, so
+        the cue lands within a transition of its minute instead of up to a
+        whole segment after it; the alternative -- wait for the natural
+        boundary -- is offered per cue because for some things being on time
+        matters less than never cutting anything short.
+        """
+        index = self.show.index + 1
+        self.builder.pin_at(index, cue.entry)
+        self.builder.invalidate_from(index)
+        if cue.punctual:
+            self.show.skip(t, self.args.transition)
+        self.cued = (index, cue)
+        if key is not None:
+            self.fired.add(key)
+            self.dirty.set()
+        self.warn("cue %s: %.0f s at index %d%s"
+                  % (cue.name, cue.entry.seconds, index,
+                     "" if cue.punctual else ", at the next slot boundary"))
+
+    def _check_cues(self, t):
+        """Once a second, ask the clock whether anything is due.
+
+        Once a second rather than once a frame because it reads the wall clock
+        and the answer cannot change faster than that, and because a cue that
+        is a second late is a cue nobody can tell was late.
+        """
+        now = time.monotonic()
+        if now - self._cue_checked < 1.0:
+            return
+        self._cue_checked = now
+        if not self.cues:
+            return
+        for cue, at, key in due(self.cues, time.localtime(), self.fired):
+            self._fire(cue, key, t)
+            break                            # one wall, one cue at a time
+
+    def _forget_old_cues(self):
+        """Drop pins the playhead has passed, and yesterday's fired keys."""
+        self.builder.unpin_before(self.show.index)
+        if self.cued and self.show.index > self.cued[0]:
+            self.warn("cue %s: done; the running order carries on unmoved"
+                      % self.cued[1].name)
+            self.cued = None
+        if len(self.fired) > 64:
+            today = time.strftime("@%Y-%m-%d@")
+            self.fired = {k for k in self.fired if today in k}
+
     # -- the frame loop ---------------------------------------------------
 
     def run(self):
@@ -1024,6 +1323,8 @@ class Scheduler(object):
         while not self.stop.is_set():
             t = time.monotonic() - t0
             self._drain(t)
+            self._check_cues(t)
+            self._forget_old_cues()
             dt = 1.0 / self._rate()
             if self.show.paused:
                 self.show.hold(dt)           # the effect runs on; the slot never ends
@@ -1151,6 +1452,7 @@ class Scheduler(object):
                 "ready": (show.index + 1) in self.builder.ready,
             },
             "paused": show.paused,
+            "cues": self.cues_json(),
             # null once the live set stops matching any group exactly. Computed
             # here rather than in the page so that every phone looking at the
             # wall agrees, and because it is a handful of set comparisons once
@@ -1179,7 +1481,7 @@ class Scheduler(object):
         if self.dirty.is_set():
             self.dirty.clear()
             try:
-                save_state(self.args.state_file, self.rot)
+                save_state(self.args.state_file, self.rot, self.fired)
             except OSError as exc:
                 self.warn("could not write %s (%s)" % (self.args.state_file, exc))
 
@@ -1213,6 +1515,10 @@ def add_arguments(ap):
     ap.add_argument("--groups", default=GROUPS_FILE,
                     help="JSON file of themed entry groups for the panel's "
                          "group buttons (empty to leave the row off)")
+    ap.add_argument("--cues", default=CUES_FILE,
+                    help="JSON file of demos that belong at a time of day")
+    ap.add_argument("--no-cues", action="store_true",
+                    help="ignore the cue file; the carousel and nothing else")
     ap.add_argument("--state-file", default=None,
                     help="persist which effects are switched off, across restarts")
     ap.add_argument("--transition", type=float, default=2.0,
@@ -1235,17 +1541,18 @@ def load_state(path, entries, warn):
     no longer applies, with a line about it, rather than refusing to start.
     """
     if not path or not os.path.exists(path):
-        return
+        return set()
     try:
         with open(path) as fh:
             saved = json.load(fh)
         off = set(saved.get("disabled", []))
+        fired = set(saved.get("fired") or [])
         tweaks = saved.get("options") or {}
         if not isinstance(tweaks, dict):
             raise ValueError("options is not an object")
     except Exception as exc:
         warn("ignoring unreadable state file %s (%s)" % (path, exc))
-        return
+        return set()
     restored = 0
     for e in entries:
         if e.name in off:
@@ -1261,16 +1568,26 @@ def load_state(path, entries, warn):
     if off or restored:
         warn("restored %d switched-off and %d reconfigured entries from %s"
              % (len(off), restored, path))
+    return fired
 
 
-def save_state(path, rot):
+def save_state(path, rot, fired):
     if not path:
         return
     # Only what differs from the rotation file. An entry left alone should not
     # get a copy of its settings frozen here, or a later edit to the rotation
     # would be silently overridden by a state file nobody remembers writing.
     state = {"disabled": [e.name for e in rot.all if not e.enabled],
-             "options": {e.name: e.options for e in rot.all if e.customised}}
+             "options": {e.name: e.options for e in rot.all if e.customised},
+             # Which cues have already gone off today. Without this a restart
+             # at 9:26 -- which is exactly when somebody restarts it, having
+             # just watched it -- plays the 9:25 cue a second time.
+             # Required rather than defaulted: this is called from the
+             # publish tick as well as at shutdown, and a call site that
+             # forgot it would quietly write an empty record over a good one
+             # -- which is precisely what happened the first time it had a
+             # default, and what a cue firing twice in a morning looks like.
+             "fired": sorted(fired)}
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(state, fh, indent=1, sort_keys=True)
@@ -1292,11 +1609,17 @@ def main():
         sys.stderr.flush()
 
     entries = load_rotation(args.rotation) if args.rotation else default_rotation()
-    load_state(args.state_file, entries, warn)
+    fired = load_state(args.state_file, entries, warn)
     pair_check(entries, args.fps, warn)
     groups = resolve_groups(load_groups(args.groups, warn), entries, warn)
+    cues = [] if args.no_cues else resolve_cues(load_cues(args.cues, warn),
+                                                entries, warn)
+    for cue in cues:
+        warn("cue %s at %s, %.0f s" % (cue.name, ", ".join(cue.times),
+                                       cue.entry.seconds))
 
-    sched = Scheduler(args, entries, groups)
+    sched = Scheduler(args, entries, groups, cues)
+    sched.fired = set(fired)
     server = ftsched_web.serve(args.listen, sched, args.previews, warn) \
         if args.listen else None
 
@@ -1310,7 +1633,7 @@ def main():
     try:
         sched.run()
     finally:
-        save_state(args.state_file, sched.rot)
+        save_state(args.state_file, sched.rot, sched.fired)
         if server is not None:
             server.shutdown()
 

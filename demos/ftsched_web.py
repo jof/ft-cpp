@@ -35,6 +35,8 @@ UI_FILE = os.path.join(_HERE, "ftsched_ui.html")
 # through, so a typo in a client is a 400 and not a stack trace in the render
 # loop's command handler.
 OPS = {"jump": ("index",), "toggle": ("name", "on"), "all": ("on",),
+       # Fire a cue by hand, which is the only way to see one before 9:25.
+       "cue": ("name",),
        "next": (), "pause": (), "resume": (), "restart": (),
        # One command, not an `all(off)` and a toggle per member: the whole
        # group lands at the top of one frame, so the wall is never briefly
@@ -163,6 +165,17 @@ class Handler(BaseHTTPRequestHandler):
             if payload["group"] not in known:
                 self._json(404, {"error": "no group called %r; there is %s"
                                           % (payload["group"],
+                                             ", ".join(known) or "none")})
+                return
+        if op == "cue":
+            # Checked here as well as in the scheduler, exactly as select and
+            # configure are: an unknown name should come back as a sentence
+            # naming what there is, not be accepted and then dropped a frame
+            # later where only the journal sees it.
+            known = [c["name"] for c in self.server.sched.cues_json()]
+            if payload["name"] not in known:
+                self._json(404, {"error": "no cue called %r; there is %s"
+                                          % (payload["name"],
                                              ", ".join(known) or "none")})
                 return
         if op == "configure":

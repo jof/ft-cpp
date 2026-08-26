@@ -1,0 +1,26 @@
+{
+  "about": [
+    "Demos that belong at a time of day rather than in the running order.",
+    "See rotation-cues.example.json for what every field means, and the cue",
+    "section of ftsched.py for why this is a pin rather than a jump.",
+    "",
+    "dolly is switched off in rotation-betelgeuse.json on purpose. It is a",
+    "clock gag -- the panel reads 9:25 with the colon blinking -- and a clock",
+    "gag at twenty past three is not a gag, it is a wall telling the wrong",
+    "time. So it is reached from here and from nowhere else.",
+    "",
+    "Twice: once for the morning and once for the evening, because the room",
+    "has people in it at both and the joke works in both."
+  ],
+  "version": 1,
+  "cues": [
+    {
+      "name": "dolly",
+      "at": ["09:25", "21:25"],
+      "days": "*",
+      "seconds": 60,
+      "punctual": true,
+      "window": 600
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "about": [
+    "Demos that belong at a time of day rather than in the running order.",
+    "",
+    "The rotation answers 'what is next'. This answers 'what is at 9:25', and",
+    "they are different questions. When a cue comes due the scheduler pins the",
+    "entry it names onto the next slot, lets it play for its own length, and",
+    "then does nothing: the rotation's offset was never touched, so every",
+    "index after the cue maps exactly where it did and the running order is",
+    "not left rotated by one for the rest of the day. The cue does take that",
+    "one slot -- whatever the rotation held there waits until the next time",
+    "round.",
+    "",
+    "The entry a cue names is usually switched off in the rotation. That is",
+    "the normal case rather than an odd one: a demo that is only right at a",
+    "particular minute should not come up at random, and a cue can reach a",
+    "disabled entry where the panel's jump button cannot.",
+    "",
+    "Copy this to rotation-cues.json to use it. Nothing here is required --",
+    "with no cue file the scheduler is exactly the carousel it always was.",
+    "",
+    "  name      an entry in the rotation. A name this wall has not got is",
+    "            skipped with a line, so one cue file is safe across walls.",
+    "  at        local times, HH:MM, as many as you like.",
+    "  days      '*', or a list like ['mon','tue'].",
+    "  seconds   the slot the cue wants. 0 means the entry's own length.",
+    "  punctual  true cuts the current effect short so the cue lands on its",
+    "            minute; false waits for the slot boundary, up to a segment",
+    "            late, and never truncates anything.",
+    "  window    how late the cue may still fire, in seconds. A wall that was",
+    "            rebooting at 9:25 plays it at 9:27; one that was off all",
+    "            morning does not ambush somebody with it at noon."
+  ],
+  "version": 1,
+  "cues": [
+    {
+      "name": "dolly",
+      "at": ["09:25", "21:25"],
+      "days": "*",
+      "seconds": 60,
+      "punctual": true,
+      "window": 600
+    }
+  ]
+}

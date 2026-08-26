@@ -65,6 +65,12 @@ WARMUP = {
     # all -- it is full from the first frame -- but a couple of seconds gets
     # past the opening pose sweep into the stutter, which is the point of it.
     "headroom": 2.0, "wopr": 8.0, "defcon": 34.0,
+    # dolly is four acts in a minute and only one of them is the identity: the
+    # clock reading 9:25 with the colon blinking. Aimed at 9.0 s, which is
+    # after both lines of the gag have typed on and inside the hold, so the
+    # two-second clip catches two blinks of the colon rather than one edge of
+    # a dissolve.
+    "dolly": 9.0,
     # tron wants a board with ribbons already laid down rather than two dots at
     # the spawns; sneakers wants to be mid-flight, which is the only part of it
     # that is not just type sitting still; fsn wants to be about to pass through

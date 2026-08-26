@@ -1089,7 +1089,7 @@
       "solo": false,
       "options": {
         "plasma_frames": 60,
-        "text": "SEQUOIA FABRICA  ✦  FLASCHENTASCHEN LIVES  ✦  320 X 64 OF PURE PHOTONS  ✦     "
+        "text": "SEQUOIA FABRICA  \u2726  FLASCHENTASCHEN LIVES  \u2726  320 X 64 OF PURE PHOTONS  \u2726     "
       }
     },
     {
@@ -1101,6 +1101,17 @@
       "ms": 9.2,
       "enabled": true,
       "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
+      "name": "dolly",
+      "module": "dolly",
+      "seconds": 60.0,
+      "fps": 24,
+      "ms": 4.7,
+      "enabled": false,
+      "solo": true,
       "options": {}
     }
   ]

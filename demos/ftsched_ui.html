@@ -46,6 +46,16 @@
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
+/* Cues: what plays at a time of day rather than in the running order. A chip
+   each, the times it is wanted at, and a way to see it before 9:25 -- which
+   is the whole reason the button is there, since otherwise the only way to
+   check a cue is to be standing here at 9:25. */
+.cuelist { display: flex; flex-wrap: wrap; gap: 8px; }
+.cue { display: flex; align-items: center; gap: 8px; padding: 4px 8px;
+       border: 1px solid var(--line); border-radius: 999px; }
+.cue .at { opacity: 0.7; font-variant-numeric: tabular-nums; }
+.cue .at .done { text-decoration: line-through; }
+.cue[data-playing="true"] { border-color: var(--live); }
 /* The UA rule for [hidden] is display:none at the lowest specificity, so any
    class that sets display silently beats it and the element stays on screen. */
 [hidden] { display: none !important; }
@@ -423,6 +433,13 @@ dialog::backdrop { background: rgba(8, 7, 5, .68); }
      other question an operator asks and the grouping cannot answer. -->
 <div id="order" hidden></div>
 <div id="empty" hidden>Nothing matches that.</div>
+
+<!-- Only drawn when this wall has a cue file. A zone that is always there
+     and usually empty teaches people to ignore that part of the page. -->
+<div class="zone cues" id="cuesZone" hidden>
+  <span class="tag">At a time of day</span>
+  <div id="cues" class="cuelist"></div>
+</div>
 
 <div class="zone display" id="displayZone" hidden>
   <span class="tag">Display</span>
@@ -808,6 +825,40 @@ function paintRow(r, e, s) {
   if (r.cog) r.cog.classList.toggle("custom", !!e.customised);
 }
 
+// The cue zone. Rebuilt from the snapshot each second rather than diffed:
+// there are one or two of these, not sixty, and a chip that is rebuilt cannot
+// hold a stale time.
+function paintCues(cues) {
+  $("cuesZone").hidden = cues.length === 0;
+  const box = $("cues");
+  box.textContent = "";
+  for (const c of cues) {
+    const el = document.createElement("div");
+    el.className = "cue";
+    el.dataset.playing = String(!!c.playing);
+    const name = document.createElement("b");
+    name.textContent = c.name;
+    const at = document.createElement("span");
+    at.className = "at";
+    // Struck through once it has been today, so somebody looking at the page
+    // at ten in the morning can see the 9:25 has been and gone.
+    c.at.forEach((t, i) => {
+      if (i) at.append(document.createTextNode(" \u00b7 "));
+      const one = document.createElement("span");
+      one.textContent = t;
+      if ((c.fired_today || []).includes(t)) one.className = "done";
+      at.append(one);
+    });
+    const go = document.createElement("button");
+    go.type = "button";
+    go.textContent = c.playing ? "on air" : "Play now";
+    go.disabled = !!c.playing;
+    go.addEventListener("click", () => post("cue", { name: c.name }));
+    el.append(name, at, go);
+    box.append(el);
+  }
+}
+
 function paint(s) {
   // Rebuild only when the rotation itself changed, not once a second.
   const names = s.rotation.map(e => e.name).join(" ");
@@ -843,6 +894,7 @@ function paint(s) {
     + (s.group == null ? " · custom mix"
        : s.group === "all" ? "" : " · " + s.group);
 
+  paintCues(s.cues || []);
   $("nowName").textContent = s.now.name || "—";
   $("nowPos").textContent = s.now.position >= 0 ? (s.now.position + 1) + "/" + enabled : "";
   $("nextName").textContent = s.next.name || "—";
