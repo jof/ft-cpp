@@ -1275,7 +1275,7 @@ class Scheduler(object):
         if self.dirty.is_set():
             self.dirty.clear()
             try:
-                save_state(self.args.state_file, self.rot)
+                save_state(self.args.state_file, self.rot, self.fired)
             except OSError as exc:
                 self.warn("could not write %s (%s)" % (self.args.state_file, exc))
 
@@ -1362,7 +1362,7 @@ def load_state(path, entries, warn):
     return fired
 
 
-def save_state(path, rot, fired=()):
+def save_state(path, rot, fired):
     if not path:
         return
     # Only what differs from the rotation file. An entry left alone should not
@@ -1373,6 +1373,11 @@ def save_state(path, rot, fired=()):
              # Which cues have already gone off today. Without this a restart
              # at 9:26 -- which is exactly when somebody restarts it, having
              # just watched it -- plays the 9:25 cue a second time.
+             # Required rather than defaulted: this is called from the
+             # publish tick as well as at shutdown, and a call site that
+             # forgot it would quietly write an empty record over a good one
+             # -- which is precisely what happened the first time it had a
+             # default, and what a cue firing twice in a morning looks like.
              "fired": sorted(fired)}
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
