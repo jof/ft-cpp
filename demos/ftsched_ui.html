@@ -528,6 +528,45 @@ async function post(op, extra) {
   } catch (e) { toast("offline", true); }
 }
 
+/* ---- optimistic intent ------------------------------------------------- *
+ * post() refreshes as soon as the command is away, but the scheduler drains
+ * its queue at the top of its next frame, so that reply still describes the
+ * world before the tap. Painting it back takes the switch out from under the
+ * finger and puts it back a second later, which reads as the panel refusing
+ * you. The activeElement guard below only covers the case where the control
+ * takes focus when tapped -- which a switch wrapped in a label does not do on
+ * iOS, and the mode buttons never did anywhere.
+ *
+ * So the intent is held instead, and let go of when the state agrees with it
+ * -- or after a few seconds if it never does, because a command the scheduler
+ * refused should not stay lit for the rest of the evening.
+ */
+const ACK_MS = 4000;
+let wantGroup = null;             // {key, since}
+const wantEnabled = new Map();    // name -> {on, since}
+
+function settleGroup(s) {
+  if (wantGroup && (s.group === wantGroup.key ||
+                    performance.now() - wantGroup.since > ACK_MS))
+    wantGroup = null;
+  return wantGroup ? wantGroup.key : s.group;
+}
+
+function settleEnabled(e) {
+  const w = wantEnabled.get(e.name);
+  if (!w) return e.enabled;
+  if (w.on === e.enabled || performance.now() - w.since > ACK_MS) {
+    wantEnabled.delete(e.name);
+    return e.enabled;
+  }
+  return w.on;
+}
+
+function wantToggle(name, on) {
+  wantEnabled.set(name, {on, since: performance.now()});
+  post("toggle", {name, on});
+}
+
 /* ---- acknowledgement --------------------------------------------------- *
  * The loudest complaint about the old panel was that tapping something
  * appeared to do nothing: the command is queued and applied at the top of the
@@ -592,7 +631,7 @@ function thumbFor(name, onClick) {
    come back to it, which reads as a bug. Turn it on as well. */
 function jumpTo(e) {
   markPending(e.name);
-  if (!e.enabled) post("toggle", {name: e.name, on: true});
+  if (!e.enabled) wantToggle(e.name, true);
   post("jump", {index: positionOf(e.name)});
 }
 
@@ -657,7 +696,7 @@ function makeRow(e, withNumber) {
     box.type = "checkbox";
     box.checked = e.enabled;
     box.setAttribute("aria-label", "Play " + e.name + " in the rotation");
-    box.addEventListener("change", () => post("toggle", {name: e.name, on: box.checked}));
+    box.addEventListener("change", () => wantToggle(e.name, box.checked));
     sw.append(box, document.createElement("span"));
     row.append(sw);
   }
@@ -727,6 +766,7 @@ function buildIndex(rotation) {
       setmode.textContent = "Set as mode";
       setmode.addEventListener("click", (ev) => {
         ev.stopPropagation();
+        wantGroup = {key: b.key, since: performance.now()};
         post("select", {group: b.key});
       });
       head.append(setmode);
@@ -778,10 +818,11 @@ function applyOpen() {
 function paintRow(r, e, s) {
   const live = e.name === s.now.name;
   const st = statusOf(e.name);
+  const on = settleEnabled(e);
   r.row.classList.toggle("live", live);
   r.row.classList.toggle("pending", !live && !!st);
-  r.row.classList.toggle("disabled", !e.enabled);
-  if (r.box && document.activeElement !== r.box) r.box.checked = e.enabled;
+  r.row.classList.toggle("disabled", !on);
+  if (r.box && document.activeElement !== r.box) r.box.checked = on;
 
   r.chips.textContent = "";
   if (st) {
@@ -877,13 +918,14 @@ function paint(s) {
   // Section tallies and which one is the live mode. The scheduler answers
   // that -- it is `group` in the state, and null once somebody has flipped an
   // individual switch and the set matches no mode exactly.
+  const group = settleGroup(s);
   for (const sec of sections.children) {
     const p = sec._parts;
     const on = p.members.filter(n => { const e = entryFor(n); return e && e.enabled; }).length;
     p.tally.textContent = on + "/" + p.members.length + " on";
     p.tally.className = "tally " + (on === p.members.length ? "full" : on ? "part" : "");
     if (p.setmode) {
-      const active = s.group === p.key;
+      const active = group === p.key;
       p.setmode.setAttribute("aria-checked", String(active));
       p.setmode.textContent = active ? "Playing" : "Set as mode";
     }
@@ -891,8 +933,8 @@ function paint(s) {
 
   const enabled = s.rotation.filter(e => e.enabled).length;
   $("count").textContent = s.rotation.length + " effects · " + enabled + " on"
-    + (s.group == null ? " · custom mix"
-       : s.group === "all" ? "" : " · " + s.group);
+    + (group == null ? " · custom mix"
+       : group === "all" ? "" : " · " + group);
 
   paintCues(s.cues || []);
   $("nowName").textContent = s.now.name || "—";
