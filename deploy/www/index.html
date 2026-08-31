@@ -373,7 +373,19 @@ function paintAck() {
   ack.textContent = label;
 }
 
-/* ---- the modes --------------------------------------------------------- */
+/* ---- the modes --------------------------------------------------------- *
+ * A tap is held on the screen until the scheduler agrees with it. The command
+ * is queued and applied at the top of the scheduler's next frame, so the
+ * refresh fired straight after the POST can still answer with the old group
+ * -- and painting that back takes the tick out from under the finger, then
+ * puts it back a second later. Focus is not a usable guard for that: tapping
+ * a label does not focus the radio inside it on iOS, which is most of the
+ * people standing in front of the wall. So the intent is latched instead, and
+ * only let go of when the state confirms it -- or after a few seconds if it
+ * never does, because a select that was refused should not stay lit.
+ */
+let wantGroup = null;             // {key, since}
+const GROUP_ACK_MS = 4000;
 
 function buildModes(list) {
   groups = list;
@@ -391,6 +403,7 @@ function buildModes(list) {
     input.value = g.key;
     input.addEventListener("change", () => {
       if (input.checked) {
+        wantGroup = {key: g.key, since: performance.now()};
         post("select", {group: g.key});
         toast(g.label + " — takes over after this slot");
       }
@@ -416,9 +429,13 @@ function buildModes(list) {
 
 function paintModes(s) {
   if (!groups.length) return;
+  if (wantGroup && (s.group === wantGroup.key ||
+                    performance.now() - wantGroup.since > GROUP_ACK_MS))
+    wantGroup = null;
+  const shown = wantGroup ? wantGroup.key : s.group;
   for (const [key, input] of modeInputs)
-    if (document.activeElement !== input) input.checked = s.group === key;
-  $("custom").hidden = s.group != null;
+    if (document.activeElement !== input) input.checked = shown === key;
+  $("custom").hidden = shown != null;
 }
 
 /* ---- the wall ---------------------------------------------------------- */
