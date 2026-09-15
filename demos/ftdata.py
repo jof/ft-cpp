@@ -116,7 +116,34 @@ FAIL_FILE = ".ftdata-failures.json"
 # is a puzzle the moment there is a second wall.
 HOSTNAME = os.environ.get("FT_SITE") or socket.gethostname()
 
+# How much of a failing response body to keep. A 403 from an nginx in front of
+# a renamed portal is 146 bytes and says everything; an API that answers with a
+# stack trace can run to megabytes, and neither the state file nor Slack wants
+# it. Truncated at a kilobyte, which fits every real error page seen so far.
+BODY_MAX = int(os.environ.get("FT_DATA_BODY_MAX", "1024"))
+
+# Query parameters whose *values* must never reach a log, a state file or a
+# chat channel. 511.org's key travels in the query string -- that is the one
+# thing muni's fetcher was careful never to write into a record -- so the
+# moment failures started carrying their URL around, this became necessary
+# rather than tidy.
+SECRET_PARAMS = ("key", "api_key", "apikey", "api-key", "token", "access_token",
+                 "auth", "secret", "password", "passwd", "sig", "signature")
+
 SLACK_WEBHOOK_ENV = "FT_SLACK_WEBHOOK"
+# An incoming webhook cannot thread. It answers "ok" and nothing else -- no
+# message ts comes back -- so there is no parent for a reply to attach to, and
+# Slack's own advice for threading a webhook message is to go and find the ts
+# afterwards with conversations.history, which needs a token anyway. So: given
+# a bot token (xoxb-, scope chat:write) and a channel, alerts go through
+# chat.postMessage, which *does* return the ts, and the failing URL and
+# response body become a reply in the thread instead of noise in the channel.
+# With only a webhook configured it still works, with the body inlined and
+# hard-truncated, which is the honest degradation rather than a silent loss.
+SLACK_TOKEN_ENV = "FT_SLACK_TOKEN"
+SLACK_CHANNEL_ENV = "FT_SLACK_CHANNEL"
+SLACK_API = "https://slack.com/api/chat.postMessage"
+
 ALERT_AFTER = int(os.environ.get("FT_DATA_ALERT_AFTER", "3"))
 ALERT_REPEAT = float(os.environ.get("FT_DATA_ALERT_REPEAT", "86400"))
 
@@ -507,13 +534,76 @@ def sweep_blobs(keep=None, cache_dir=None,
             pass
 
 
+def redact_url(url):
+    """A URL safe to write down: secret-looking query values become <redacted>.
+
+    Name-based rather than value-based, because the fetcher cannot know which
+    of its own environment variables happens to be in a query string -- and
+    the one that is, 511's key, is passed as `api_key`.
+    """
+    try:
+        from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+        parts = urlsplit(str(url))
+        if not parts.query:
+            return str(url)
+        pairs = [(k, "<redacted>" if k.lower() in SECRET_PARAMS else v)
+                 for k, v in parse_qsl(parts.query, keep_blank_values=True)]
+        return urlunsplit(parts._replace(query=urlencode(pairs)))
+    except Exception:                                        # noqa: BLE001
+        return "<unparseable url>"
+
+
+def short_url(url):
+    """Host and path only -- what belongs in a one-line alert."""
+    try:
+        from urllib.parse import urlsplit
+        parts = urlsplit(str(url))
+        return "%s://%s%s" % (parts.scheme, parts.netloc, parts.path)
+    except Exception:                                        # noqa: BLE001
+        return str(url)
+
+
+def annotate_failure(exc, url=None):
+    """Hang the URL and a little of the response body off a failed fetch.
+
+    The body is readable exactly once -- HTTPError's `read()` drains the error
+    stream -- so this has to happen at the point of failure and the result has
+    to be kept. That is the whole reason it is a function and not a line in the
+    alert path: by the time anything wants to *report* the failure, the body is
+    long gone. Never raises: a failure being reported badly still beats the
+    reporting itself throwing.
+    """
+    try:
+        if getattr(exc, "ft_url", None) is None:
+            exc.ft_url = redact_url(url or getattr(exc, "url", "") or "")
+    except Exception:                                        # noqa: BLE001
+        pass
+    try:
+        if getattr(exc, "ft_body", None) is None and hasattr(exc, "read"):
+            raw = exc.read(BODY_MAX + 1) or b""
+            text = raw.decode("utf-8", "replace").strip()
+            if len(raw) > BODY_MAX:
+                text = text[:BODY_MAX] + "\u2026 (truncated)"
+            exc.ft_body = text
+    except Exception:                                        # noqa: BLE001
+        pass
+    return exc
+
+
 def get(url, timeout=20):
     """Fetch a URL as bytes. Imported lazily so `load()` stays network-free."""
+    import urllib.error
     import urllib.request
     req = urllib.request.Request(
         url, headers={"User-Agent": "flaschen-taschen-ftdata/1 (+wall display)"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        # Caught here, where the URL is certain, rather than left to the
+        # generic catch in fetch(): products that build their own requests are
+        # covered there, but this is the path most of them take.
+        raise annotate_failure(e, url)
 
 
 def get_json(url, timeout=20):
@@ -619,6 +709,8 @@ def note_failure(name, exc, cache_dir=None):
     count = int(got.get("count") or 0) + 1
 
     entry = {"count": count, "status": status, "error": repr(exc)[:200],
+             "url": getattr(exc, "ft_url", None),
+             "body": (getattr(exc, "ft_body", None) or "")[:BODY_MAX],
              "first": got.get("first") or now, "last": now,
              "alerted": got.get("alerted") or 0}
     # Only a 4xx defers. A 5xx or a timeout keeps the old behaviour of trying
@@ -657,49 +749,121 @@ def _status_phrase(status, exc=None):
     return type(exc).__name__ if exc is not None else "error"
 
 
-def alert(text, name=None, cache_dir=None, failing=True, entry=None):
-    """Post one line to the Slack webhook. Returns True if it went.
+def _slack_call(url, payload, headers, timeout=10):
+    """POST some JSON at Slack and hand back the parsed reply, or None.
 
-    Unset webhook means this installation does not alert, which is not an error
-    and not worth a log line every pass. Nothing in here may raise: an alerting
-    path that can break the fetcher would be a worse bug than the one it exists
-    to report.
+    Short timeout on purpose: this runs inside a fetch pass that systemd caps
+    at five minutes, and a chat service having a bad day must not be what
+    spends that budget. Nothing here may raise -- an alerting path able to
+    break the fetcher would be a worse bug than the one it reports.
     """
-    url = (os.environ.get(SLACK_WEBHOOK_ENV) or "").strip()
-    if not url:
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode(),
+            headers=dict(headers, **{"Content-Type": "application/json"}))
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+        try:
+            return json.loads(raw or b"{}")
+        except ValueError:
+            return {"ok": raw.strip() == b"ok"}      # a webhook just says "ok"
+    except Exception as e:                                   # noqa: BLE001
+        print("ftdata: alert failed: %r" % (e,), file=sys.stderr)
+        return None
+
+
+def _slack_say(text, thread_ts=None):
+    """Send one message. Returns its ts if we can know it, else True/False.
+
+    Two transports, and the difference is the whole reason threading needed
+    thinking about. chat.postMessage answers with the message's ts, which is
+    what a reply threads onto. An incoming webhook answers "ok" -- no ts, ever
+    -- so a webhook-only installation has no parent to reply to and gets the
+    detail inlined instead.
+    """
+    token = (os.environ.get(SLACK_TOKEN_ENV) or "").strip()
+    channel = (os.environ.get(SLACK_CHANNEL_ENV) or "").strip()
+    if token and channel:
+        payload = {"channel": channel, "text": text}
+        if thread_ts:
+            payload["thread_ts"] = thread_ts
+        got = _slack_call(SLACK_API, payload,
+                          {"Authorization": "Bearer " + token})
+        if not got:
+            return None
+        if not got.get("ok"):
+            # Slack reports its refusals in a 200, so this has to be read.
+            print("ftdata: slack refused the message: %s"
+                  % got.get("error", "unknown"), file=sys.stderr)
+            return None
+        return got.get("ts") or True
+
+    hook = (os.environ.get(SLACK_WEBHOOK_ENV) or "").strip()
+    if not hook:
+        return None
+    got = _slack_call(hook, {"text": text}, {})
+    return True if got and got.get("ok") else None
+
+
+def _thread_text(entry):
+    """The part nobody wants in the channel: the URL, and what came back."""
+    if not entry:
+        return ""
+    bits = []
+    if entry.get("url"):
+        bits.append("fetching: %s" % entry["url"])
+    if entry.get("error"):
+        bits.append("raised: %s" % entry["error"])
+    body = (entry.get("body") or "").strip()
+    if body:
+        bits.append("response body:\n```\n%s\n```" % body)
+    return "\n".join(bits)
+
+
+def alert(text, name=None, cache_dir=None, failing=True, entry=None):
+    """Say one line about a product, with the detail as a reply in its thread.
+
+    Returns True if something was delivered, which is what decides whether the
+    failure gets stamped as alerted -- a webhook that was down must not count
+    as having told anybody.
+    """
+    if not ((os.environ.get(SLACK_TOKEN_ENV) and
+             os.environ.get(SLACK_CHANNEL_ENV)) or
+            os.environ.get(SLACK_WEBHOOK_ENV)):
         return False
 
     detail = []
     if name:
         got = load(name, cache_dir)
-        if got is not None:
-            detail.append("record is %s old" % describe_age(got[1]))
-        else:
-            detail.append("no record at all")
+        detail.append("record is %s old" % describe_age(got[1])
+                      if got is not None else "no record at all")
     if entry and entry.get("until"):
         detail.append("next try in %s"
                       % describe_age(max(0.0, entry["until"] - time.time())))
-    if entry and entry.get("error"):
-        detail.append("`%s`" % entry["error"])
+    # Host and path only. The query string can carry a key, and it is in the
+    # thread reply in full -- redacted -- for whoever is actually debugging.
+    if entry and entry.get("url"):
+        detail.append(short_url(entry["url"]))
 
     line = "%s ftdata on %s: %s" % ("\U0001f534" if failing else "\U0001f7e2",
                                     HOSTNAME, text)
     if detail:
         line += "\n" + " \u2014 ".join(detail)
 
-    try:
-        import urllib.request
-        body = json.dumps({"text": line}).encode()
-        req = urllib.request.Request(
-            url, data=body, headers={"Content-Type": "application/json"})
-        # Short timeout: this runs inside a fetch pass that systemd caps, and a
-        # webhook that hangs must not be what uses the budget up.
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
-        return True
-    except Exception as e:                                   # noqa: BLE001
-        print("ftdata: alert failed: %r" % (e,), file=sys.stderr)
+    thread = _thread_text(entry)
+    sent = _slack_say(line)
+    if not sent:
         return False
+    if thread:
+        if sent is not True:
+            _slack_say(thread, thread_ts=sent)
+        else:
+            # Webhook only: there is no thread to put this in, and dropping it
+            # would lose the one thing worth reading. Inline and clipped.
+            _slack_say("%s (no bot token, so this cannot be threaded)\n%s"
+                       % (name or "", thread[:600]))
+    return True
 
 
 def fetch(name, cache_dir=None):
@@ -717,7 +881,18 @@ def fetch(name, cache_dir=None):
         payload, source = (spec["fn"](cache_dir) if spec.get("blob")
                            else spec["fn"]())
     except Exception as e:                                   # noqa: BLE001
-        print("ftdata: %s failed: %r" % (name, e), file=sys.stderr)
+        # Products that make their own requests never went through get(), and
+        # an HTTPError carries the URL it came from, so this catches those.
+        annotate_failure(e)
+        where = getattr(e, "ft_url", None)
+        print("ftdata: %s failed: %r%s" % (name, e, " -- " + where if where
+                                           else ""), file=sys.stderr)
+        body = getattr(e, "ft_body", None)
+        if body:
+            # One line, whatever the body did: a journal entry that is forty
+            # lines of somebody's HTML is not a better journal entry.
+            flat = " ".join(body.split())
+            print("ftdata: %s said: %s" % (name, flat[:300]), file=sys.stderr)
         note_failure(name, e, cache_dir)
         return False
     _store(name, payload, source, cache_dir)
@@ -9581,13 +9756,19 @@ def main():
         for name in sorted(state):
             got = state[name]
             wait = max(0.0, float(got.get("until") or 0) - time.time())
-            print("  %-22s %-9s %2d in a row since %s, next try %s\n%s%s"
+            print("  %-22s %-9s %2d in a row since %s, next try %s"
                   % (name, _status_phrase(got.get("status")),
                      got.get("count") or 0,
                      time.strftime("%Y-%m-%d %H:%M",
                                    time.localtime(got.get("first") or 0)),
-                     ("in " + describe_age(wait)) if wait else "now",
-                     " " * 26, got.get("error") or ""))
+                     ("in " + describe_age(wait)) if wait else "now"))
+            pad = " " * 26
+            print("%s%s" % (pad, got.get("error") or ""))
+            if got.get("url"):
+                print("%s%s" % (pad, got["url"]))
+            body = " ".join((got.get("body") or "").split())
+            if body:
+                print("%s%s" % (pad, body[:200]))
         return
 
     if args.list:

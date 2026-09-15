@@ -384,30 +384,65 @@ always attempts, backoff or not, because that is what you type when debugging
 the thing that is broken.
 
 **And something says so.** After three consecutive failures the fetcher posts
-one line to a Slack incoming webhook, repeating at most daily while it stays
-broken, and once more when it recovers. Put the URL in `/home/pi/.ft-env`,
-which both fetcher units read via `EnvironmentFile=-`:
+one line to Slack, repeating at most daily while it stays broken, and once more
+when it recovers. The line names the product, the status and the host and path
+it was fetching; the full URL and up to a kilobyte of the response body go in a
+**reply in that message's thread**, because the body is what you want when you
+are debugging and the last thing the channel wants at 9pm.
+
+Threading needs a bot token, not a webhook. An incoming webhook replies `ok`
+and nothing else -- no message `ts` comes back -- and a reply has nothing to
+attach to without one. So the preferred setup is a bot token with `chat:write`
+and a channel:
 
 ```sh
 sudo -u pi tee -a /home/pi/.ft-env >/dev/null <<'ENV'
-FT_SLACK_WEBHOOK=https://hooks.slack.com/services/T000/B000/xxxxxxxx
+FT_SLACK_TOKEN=xoxb-your-bot-token
+FT_SLACK_CHANNEL=#wall-alerts
 ENV
 sudo -u pi chmod 600 /home/pi/.ft-env
 ```
 
-No `daemon-reload` is needed -- systemd re-reads the file every time it starts
-the unit, so the next timer tick has it. Get the URL from Slack under *Add apps
--> Incoming Webhooks*; it is a credential, since anyone holding it can post to
-that channel, which is why it lives in a 0600 file and not in this tree. Leave
-it unset and the fetcher simply does not alert, which is not an error.
+Invite the bot to the channel (`/invite @yourbot`) or `chat.postMessage` will
+answer `not_in_channel` -- in a `200`, which the fetcher checks for and logs,
+rather than as an HTTP error.
+
+A webhook still works and needs no app config, it just cannot thread:
+
+```sh
+FT_SLACK_WEBHOOK=https://hooks.slack.com/services/T000/B000/xxxxxxxx
+```
+
+With only a webhook the detail is posted as a **second message** rather than a
+thread reply, clipped, saying that it could not be threaded -- losing the body
+entirely would be worse than one extra line. Set both and the token wins.
+
+Either way it is a credential, which is why it lives in a 0600 file and not in
+this tree, and no `daemon-reload` is needed: systemd re-reads the file every
+time it starts the unit, so the next timer tick has it. Leave all three unset
+and the fetcher simply does not alert, which is not an error.
+
+**URLs are redacted before they are written anywhere.** 511's key travels in
+the query string, and the muni fetcher was careful never to put it in a record;
+now that failures carry their URL into the journal, the state file and a chat
+channel, any query value whose name looks like a credential (`key`, `api_key`,
+`token`, `secret`, `signature`, ...) is replaced with `<redacted>` first.
 
 Knobs, all optional: `FT_DATA_ALERT_AFTER` (3) how many consecutive failures
 before it speaks, `FT_DATA_ALERT_REPEAT` (86400) how long before it repeats
-itself, and `FT_SITE` to name the installation in the message if the hostname
-is not what you want to read at 9pm.
+itself, `FT_DATA_BODY_MAX` (1024) how much response body to keep, and `FT_SITE`
+to name the installation in the message if the hostname is not what you want to
+read at 9pm.
+
+The journal gained the same detail, since that is where you look first:
+
+```
+ftdata: sf311-day failed: <HTTPError 403: 'Forbidden'> -- https://data.sfgov.org/resource/vw6y-z8j6.json?%24select=...
+ftdata: sf311-day said: <html> <head><title>403 Forbidden</title></head> <body> <center><h1>403 Forbidden</h1>...
+```
 
 ```sh
-python3 demos/scripts/test-ftdata-backoff.py   # 50 checks, no network
+python3 demos/scripts/test-ftdata-backoff.py   # 91 checks, no network
 ```
 
 ## Updating the checkout
