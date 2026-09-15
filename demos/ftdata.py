@@ -142,7 +142,10 @@ SLACK_WEBHOOK_ENV = "FT_SLACK_WEBHOOK"
 # hard-truncated, which is the honest degradation rather than a silent loss.
 SLACK_TOKEN_ENV = "FT_SLACK_TOKEN"
 SLACK_CHANNEL_ENV = "FT_SLACK_CHANNEL"
-SLACK_API = "https://slack.com/api/chat.postMessage"
+# Overridable so the end-to-end test can point it at a loopback stand-in, and
+# so a Slack-compatible endpoint elsewhere is a config change, not a patch.
+SLACK_API = os.environ.get("FT_SLACK_API",
+                           "https://slack.com/api/chat.postMessage")
 
 ALERT_AFTER = int(os.environ.get("FT_DATA_ALERT_AFTER", "3"))
 ALERT_REPEAT = float(os.environ.get("FT_DATA_ALERT_REPEAT", "86400"))
