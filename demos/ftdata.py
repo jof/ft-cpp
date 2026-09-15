@@ -3342,9 +3342,13 @@ MUNI_TTL = 259200
 MUNI_INTERVAL = 86400
 
 # Socrata: the metadata view (cheap, gives the version) and the blob itself.
+# The portal renamed itself data.sfgov.org -> data.sf.gov in September 2026.
+# The old host still 301s the plain paths, but it answers anything carrying a
+# $select or $where with a bare nginx 403, so the redirect is not a fallback to
+# lean on -- see SF311_URL, which is what noticed.
 MUNI_DATASET = "dni7-qpv3"
-MUNI_META_URL = "https://data.sfgov.org/api/views/%s.json" % MUNI_DATASET
-MUNI_ZIP_URL = ("https://data.sfgov.org/download/%s/application/x-zip-compressed"
+MUNI_META_URL = "https://data.sf.gov/api/views/%s.json" % MUNI_DATASET
+MUNI_ZIP_URL = ("https://data.sf.gov/download/%s/application/x-zip-compressed"
                 % MUNI_DATASET)
 
 # The routes the space's own wiki names as serving 1736 18th St. Route *ids*,
@@ -3493,7 +3497,7 @@ def _muni_calendar(zf, routes_services):
 
 @product(MUNI_PRODUCT, ttl=MUNI_TTL, interval=MUNI_INTERVAL,
          description="SFMTA timetable for the 19/22/55 stops nearest the "
-                     "installation, from the keyless GTFS on data.sfgov.org")
+                     "installation, from the keyless GTFS on data.sf.gov")
 def _muni_18th():
     """The six nearest 19/22/55 stops and every departure the timetable gives.
 
@@ -3646,7 +3650,7 @@ def _muni_18th():
         "n_near": len(near),
         "services": services,
         "stops": stops,
-        "source": "SFMTA GTFS, data.sfgov.org/%s" % MUNI_DATASET,
+        "source": "SFMTA GTFS, data.sf.gov/%s" % MUNI_DATASET,
     }, MUNI_ZIP_URL
 
 
@@ -8603,7 +8607,9 @@ def _sfport_cruise():
 # where it cannot be recovered by changing the demo.
 # --------------------------------------------------------------------------
 
-SF311_URL = "https://data.sfgov.org/resource/vw6y-z8j6.json"
+# data.sf.gov, not the old data.sfgov.org: the old host answers a $select with a
+# 403 rather than a redirect, which stalled this product for a week in Sep 2026.
+SF311_URL = "https://data.sf.gov/resource/vw6y-z8j6.json"
 
 # Six hours. Not the age of the *data* -- that is a day or so by construction
 # and the panel computes it from the record's own last-case timestamp -- but the
