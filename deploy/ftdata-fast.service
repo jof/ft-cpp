@@ -33,6 +33,20 @@ Type=oneshot
 User=pi
 WorkingDirectory=/home/pi/ft-cpp/demos
 
+# Credentials, and the alert webhook, as bare KEY=value lines. The leading "-"
+# makes the file optional: a checkout that has never heard of it still starts,
+# and an installation that does not alert simply leaves FT_SLACK_WEBHOOK out --
+# the same rule FT_511_KEY already follows, where unset is not an error but the
+# feature not existing. It stays 0600 and outside the source tree, because a
+# webhook URL is a credential: anyone holding it can post to the channel.
+#
+#   FT_SLACK_WEBHOOK=https://hooks.slack.com/services/T000/B000/xxxxxxxx
+#
+# Changing it needs no daemon-reload, only the next timer tick -- systemd reads
+# the file each time it starts the unit.
+EnvironmentFile=-/home/pi/.ft-env
+
+
 # --due is what makes a one-minute timer cheap: it is a stat and a JSON read
 # per fast product, and a fetch only when one is actually overdue.
 ExecStart=/home/pi/venv-np202/bin/python /home/pi/ft-cpp/demos/ftdata.py --once --due --fast

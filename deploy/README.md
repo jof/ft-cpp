@@ -355,6 +355,61 @@ A failed run does not stop later ones. A service in the failed state does not
 disable or hold off its timer, so there is nothing to reset after an afternoon
 when NOAA was unreachable; the next tick just works.
 
+#### When a product stays broken
+
+A single failing product is survivable. A *permanently* failing one is how the
+wall lies to you: in September 2026 the city renamed its open data portal, the
+old host began answering every query carrying a `$select` with a bare nginx
+403, and `sf311-day` failed 591 times over seven days while the panel drew a
+complete, correct, week-old Monday. Nothing was overloaded -- forty-odd
+requests a day is nothing -- but nothing said a word either, and a fetch
+failure deliberately keeps the previous record, so there was nothing to see.
+
+Two things now happen, and they are halves of one change:
+
+**A 4xx backs off.** A 4xx means the request itself is wrong -- moved dataset,
+expired token, deleted path -- and repeating it in fifteen minutes cannot fix
+it, so the wait doubles from `FT_DATA_BACKOFF_BASE` (15 min) to a ceiling of
+`FT_DATA_BACKOFF_MAX` (6 h). That week's 591 attempts would now be 32. A 5xx or
+a timeout does **not** back off: that is the source having a bad afternoon,
+which the next tick may well fix, and retrying costs one request. Deferred
+products are named in the journal line, so the shortfall stays visible:
+
+```
+ftdata: 32/33 products refreshed, 1 deferred (sf311-day 403 4h)
+```
+
+`--failures` prints what is currently backed off and why; `--only <name>`
+always attempts, backoff or not, because that is what you type when debugging
+the thing that is broken.
+
+**And something says so.** After three consecutive failures the fetcher posts
+one line to a Slack incoming webhook, repeating at most daily while it stays
+broken, and once more when it recovers. Put the URL in `/home/pi/.ft-env`,
+which both fetcher units read via `EnvironmentFile=-`:
+
+```sh
+sudo -u pi tee -a /home/pi/.ft-env >/dev/null <<'ENV'
+FT_SLACK_WEBHOOK=https://hooks.slack.com/services/T000/B000/xxxxxxxx
+ENV
+sudo -u pi chmod 600 /home/pi/.ft-env
+```
+
+No `daemon-reload` is needed -- systemd re-reads the file every time it starts
+the unit, so the next timer tick has it. Get the URL from Slack under *Add apps
+-> Incoming Webhooks*; it is a credential, since anyone holding it can post to
+that channel, which is why it lives in a 0600 file and not in this tree. Leave
+it unset and the fetcher simply does not alert, which is not an error.
+
+Knobs, all optional: `FT_DATA_ALERT_AFTER` (3) how many consecutive failures
+before it speaks, `FT_DATA_ALERT_REPEAT` (86400) how long before it repeats
+itself, and `FT_SITE` to name the installation in the message if the hostname
+is not what you want to read at 9pm.
+
+```sh
+python3 demos/scripts/test-ftdata-backoff.py   # 50 checks, no network
+```
+
 ## Updating the checkout
 
 A deploy is a fast-forward of `~/ft-cpp` and then a restart of the daemons that

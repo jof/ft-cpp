@@ -36,6 +36,7 @@ import argparse
 import json
 import math
 import os
+import socket
 import sys
 import tempfile
 import time
@@ -84,6 +85,40 @@ BLOB_MAX_BYTES = int(os.environ.get("FT_DATA_BLOBS_MAX", str(64 << 20)))
 # rest. Five minutes rather than sixty seconds so a product can ask for a
 # two-minute cadence without needing a third timer to give it one.
 FAST_INTERVAL = float(os.environ.get("FT_DATA_FAST_INTERVAL", "300"))
+
+# A failing product waits before it is tried again, and how long depends on why
+# it failed. A 4xx is the source telling us the *request* is wrong -- the
+# dataset moved, the token expired, the path is gone -- and sending it again in
+# fifteen minutes cannot make it right. A 5xx or a timeout is the source having
+# a bad afternoon, which the next tick very well might fix. So only the first
+# kind backs off; the second keeps the old every-pass behaviour, because that is
+# the case where retrying is the correct thing and costs one request.
+#
+# This exists because sf311-day 403ed 591 times over seven days in September
+# 2026 -- the city had renamed the portal -- and every one of those attempts was
+# a fresh 15-minute retry of a request that had no chance. The load was trivial;
+# the problem was that nothing distinguished "will never work" from "try again
+# shortly", so the wall drew a week-old day and nobody was told. Hence both
+# halves of this: the backoff below, and FT_SLACK_WEBHOOK further down.
+BACKOFF_BASE = float(os.environ.get("FT_DATA_BACKOFF_BASE", "900"))     # 15 min
+BACKOFF_MAX = float(os.environ.get("FT_DATA_BACKOFF_MAX", "21600"))     # 6 h
+
+# Where the consecutive-failure bookkeeping lives. In the cache rather than
+# tmpfs on purpose: a backoff that a reboot resets is a backoff that a crash
+# loop erases, and the alert state with it.
+FAIL_FILE = ".ftdata-failures.json"
+
+# Alerting. Unset webhook is not an error -- it is this feature not existing,
+# the same rule FT_511_KEY follows. Three consecutive failures rather than one
+# so a single flaky fetch stays in the journal where it belongs; a day between
+# repeats so a source that is down all weekend says so twice, not 288 times.
+# Which installation is talking. An alert that says only "sf311-day is down"
+# is a puzzle the moment there is a second wall.
+HOSTNAME = os.environ.get("FT_SITE") or socket.gethostname()
+
+SLACK_WEBHOOK_ENV = "FT_SLACK_WEBHOOK"
+ALERT_AFTER = int(os.environ.get("FT_DATA_ALERT_AFTER", "3"))
+ALERT_REPEAT = float(os.environ.get("FT_DATA_ALERT_REPEAT", "86400"))
 
 # Products are registered by name. `ttl` is how long a record stays worth
 # believing -- not how often it is fetched, which is the timer's business. A
@@ -485,6 +520,188 @@ def get_json(url, timeout=20):
     return json.loads(get(url, timeout))
 
 
+# --------------------------------------------------------------------------
+# Failure state: backing off, and saying so. Only the fetcher runs this.
+# --------------------------------------------------------------------------
+
+def _fail_path(cache_dir=None):
+    return os.path.join(cache_dir or CACHE_DIR, FAIL_FILE)
+
+
+def load_failures(cache_dir=None):
+    """The consecutive-failure record, as {name: {...}}. Never raises.
+
+    A missing or corrupt file reads as "nothing is failing", which is the safe
+    direction: the cost of forgetting is one extra attempt per product, and the
+    cost of raising here would be a fetcher that cannot run at all.
+    """
+    try:
+        with open(_fail_path(cache_dir)) as fh:
+            got = json.load(fh)
+        return got if isinstance(got, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_failures(state, cache_dir=None):
+    """Write it back, atomically, and never let the bookkeeping break a run."""
+    path = _fail_path(cache_dir)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path),
+                                   prefix=".fail", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(state, fh)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except (OSError, ValueError):
+        pass
+
+
+def http_status(exc):
+    """The HTTP status behind a failure, or None if it was not an HTTP error.
+
+    urllib's HTTPError carries `.code`; everything else here -- a timeout, a
+    JSONDecodeError, a product's own ValueError -- carries nothing, and None is
+    how the caller learns to treat it as transient.
+    """
+    code = getattr(exc, "code", None)
+    return code if isinstance(code, int) and 100 <= code < 600 else None
+
+
+def _retry_after(exc):
+    """A Retry-After header in seconds, if the source sent a plain number."""
+    headers = getattr(exc, "headers", None)
+    if headers is None:
+        return None
+    try:
+        raw = (headers.get("Retry-After") or "").strip()
+        return float(raw) if raw.isdigit() else None
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+def backoff_delay(count, interval=None, retry_after=None):
+    """How long to wait after `count` consecutive 4xx failures.
+
+    Doubling from BACKOFF_BASE and capped at BACKOFF_MAX, so a product that is
+    permanently broken settles at four attempts a day instead of ninety-six,
+    and one that 4xxed once by accident is back within the quarter hour. Never
+    shorter than the product's own interval -- backing off to *more* often than
+    the healthy cadence would be an odd thing to do.
+    """
+    delay = BACKOFF_BASE * (2 ** max(0, int(count) - 1))
+    if retry_after:
+        delay = max(delay, retry_after)
+    return max(min(delay, BACKOFF_MAX), interval or 0)
+
+
+def defer_seconds(name, cache_dir=None, now=None):
+    """Seconds still to wait before `name` is worth trying, 0 if it is due."""
+    got = load_failures(cache_dir).get(name)
+    if not isinstance(got, dict):
+        return 0.0
+    return max(0.0, float(got.get("until") or 0) - (now or time.time()))
+
+
+def note_failure(name, exc, cache_dir=None):
+    """Record one failure, set the backoff if it earned one, alert if it is time."""
+    state = load_failures(cache_dir)
+    got = state.get(name) if isinstance(state.get(name), dict) else {}
+    now = time.time()
+    status = http_status(exc)
+    count = int(got.get("count") or 0) + 1
+
+    entry = {"count": count, "status": status, "error": repr(exc)[:200],
+             "first": got.get("first") or now, "last": now,
+             "alerted": got.get("alerted") or 0}
+    # Only a 4xx defers. A 5xx or a timeout keeps the old behaviour of trying
+    # again on the next pass, which is what makes a transient outage invisible.
+    if status is not None and 400 <= status < 500:
+        entry["until"] = now + backoff_delay(count, interval_for(name),
+                                             _retry_after(exc))
+    state[name] = entry
+
+    if count >= ALERT_AFTER and (now - float(entry["alerted"])) >= ALERT_REPEAT:
+        if alert("%s has failed %d times in a row (%s)"
+                 % (name, count, _status_phrase(status, exc)),
+                 name=name, cache_dir=cache_dir, failing=True, entry=entry):
+            entry["alerted"] = now
+            state[name] = entry
+    _save_failures(state, cache_dir)
+
+
+def note_success(name, cache_dir=None):
+    """Clear a product's failure state, and say so if we had complained."""
+    state = load_failures(cache_dir)
+    got = state.pop(name, None)
+    if got is None:
+        return
+    _save_failures(state, cache_dir)
+    if isinstance(got, dict) and got.get("alerted"):
+        since = describe_age(time.time() - float(got.get("first") or time.time()))
+        alert("%s is fetching again, after %s of failures"
+              % (name, since), name=name, cache_dir=cache_dir, failing=False)
+
+
+def _status_phrase(status, exc=None):
+    """'HTTP 403', or the exception's class name when it was not an HTTP error."""
+    if status is not None:
+        return "HTTP %d" % status
+    return type(exc).__name__ if exc is not None else "error"
+
+
+def alert(text, name=None, cache_dir=None, failing=True, entry=None):
+    """Post one line to the Slack webhook. Returns True if it went.
+
+    Unset webhook means this installation does not alert, which is not an error
+    and not worth a log line every pass. Nothing in here may raise: an alerting
+    path that can break the fetcher would be a worse bug than the one it exists
+    to report.
+    """
+    url = (os.environ.get(SLACK_WEBHOOK_ENV) or "").strip()
+    if not url:
+        return False
+
+    detail = []
+    if name:
+        got = load(name, cache_dir)
+        if got is not None:
+            detail.append("record is %s old" % describe_age(got[1]))
+        else:
+            detail.append("no record at all")
+    if entry and entry.get("until"):
+        detail.append("next try in %s"
+                      % describe_age(max(0.0, entry["until"] - time.time())))
+    if entry and entry.get("error"):
+        detail.append("`%s`" % entry["error"])
+
+    line = "%s ftdata on %s: %s" % ("\U0001f534" if failing else "\U0001f7e2",
+                                    HOSTNAME, text)
+    if detail:
+        line += "\n" + " \u2014 ".join(detail)
+
+    try:
+        import urllib.request
+        body = json.dumps({"text": line}).encode()
+        req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json"})
+        # Short timeout: this runs inside a fetch pass that systemd caps, and a
+        # webhook that hangs must not be what uses the budget up.
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        return True
+    except Exception as e:                                   # noqa: BLE001
+        print("ftdata: alert failed: %r" % (e,), file=sys.stderr)
+        return False
+
+
 def fetch(name, cache_dir=None):
     """Fetch one product into the cache. Returns True on success.
 
@@ -501,13 +718,15 @@ def fetch(name, cache_dir=None):
                            else spec["fn"]())
     except Exception as e:                                   # noqa: BLE001
         print("ftdata: %s failed: %r" % (name, e), file=sys.stderr)
+        note_failure(name, e, cache_dir)
         return False
     _store(name, payload, source, cache_dir)
+    note_success(name, cache_dir)
     return True
 
 
 def fetch_all(cache_dir=None, only=None, due_only=False, max_interval=None):
-    """Fetch products into the cache; return (fetched, considered).
+    """Fetch products into the cache; return (fetched, considered, deferred).
 
     Two counts rather than one because with --due most passes fetch nothing and
     that is the healthy case, not a failure -- "0/1" in the journal every minute
@@ -515,8 +734,14 @@ def fetch_all(cache_dir=None, only=None, due_only=False, max_interval=None):
     the registry for the fast timer, by the product's own declared cadence
     rather than by a list of names in a unit file that would go stale the first
     time somebody added a product.
+
+    `deferred` is the products skipped because a recent 4xx bought them a wait,
+    as (name, seconds) pairs. They are counted in `considered` and not in
+    `fetched`, so the summary line still reads as a shortfall -- being quiet
+    about a backed-off product is how it would go stale unnoticed twice.
     """
     ok = considered = 0
+    deferred = []
     for name in sorted(PRODUCTS):
         if only and name not in only:
             continue
@@ -527,9 +752,17 @@ def fetch_all(cache_dir=None, only=None, due_only=False, max_interval=None):
         considered += 1
         if due_only and not is_due(name, cache_dir):
             continue
+        # A named product is always attempted. Somebody typing --only sf311-day
+        # is debugging the thing that is broken, and a tool that answers "no,
+        # I am sulking until four o'clock" would be useless exactly then.
+        if not only:
+            wait = defer_seconds(name, cache_dir)
+            if wait > 0:
+                deferred.append((name, wait))
+                continue
         if fetch(name, cache_dir):
             ok += 1
-    return ok, considered
+    return ok, considered, deferred
 
 
 # --------------------------------------------------------------------------
@@ -9306,6 +9539,21 @@ def _sfmix_ix():
             }, SFMIX_MAP_URL
 
 
+def _deferred_phrase(deferred, cache_dir=None):
+    """', 1 deferred (sf311-day 403, 4h)' -- or nothing at all when none are."""
+    if not deferred:
+        return ""
+    state = load_failures(cache_dir)
+    bits = []
+    for name, wait in sorted(deferred, key=lambda d: -d[1])[:4]:
+        got = state.get(name) or {}
+        status = got.get("status")
+        bits.append("%s %s %s" % (name, status or "err", describe_age(wait)))
+    if len(deferred) > 4:
+        bits.append("and %d more" % (len(deferred) - 4))
+    return ", %d deferred (%s)" % (len(deferred), "; ".join(bits))
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="fetch outside data into a cache the demos read",
@@ -9322,7 +9570,25 @@ def main():
                     help="only products with an interval of --fast-under or less")
     ap.add_argument("--fast-under", type=float, default=FAST_INTERVAL,
                     help="what --fast means, in seconds")
+    ap.add_argument("--failures", action="store_true",
+                    help="show what is failing and how long it is backed off")
     args = ap.parse_args()
+
+    if args.failures:
+        state = load_failures(args.cache_dir)
+        if not state:
+            print("  nothing is failing")
+        for name in sorted(state):
+            got = state[name]
+            wait = max(0.0, float(got.get("until") or 0) - time.time())
+            print("  %-22s %-9s %2d in a row since %s, next try %s\n%s%s"
+                  % (name, _status_phrase(got.get("status")),
+                     got.get("count") or 0,
+                     time.strftime("%Y-%m-%d %H:%M",
+                                   time.localtime(got.get("first") or 0)),
+                     ("in " + describe_age(wait)) if wait else "now",
+                     " " * 26, got.get("error") or ""))
+        return
 
     if args.list:
         for name in sorted(PRODUCTS):
@@ -9339,13 +9605,18 @@ def main():
     only = set(x for x in args.only.split(",") if x)
     max_interval = args.fast_under if args.fast else None
     if not args.loop:
-        n, seen = fetch_all(args.cache_dir, only, args.due, max_interval)
-        print("ftdata: %d/%d products refreshed" % (n, seen))
+        n, seen, deferred = fetch_all(args.cache_dir, only, args.due,
+                                      max_interval)
+        print("ftdata: %d/%d products refreshed%s"
+              % (n, seen, _deferred_phrase(deferred, args.cache_dir)))
         return
     while True:
         started = time.time()
-        n, seen = fetch_all(args.cache_dir, only, args.due, max_interval)
-        print("ftdata: %d/%d refreshed" % (n, seen), flush=True)
+        n, seen, deferred = fetch_all(args.cache_dir, only, args.due,
+                                      max_interval)
+        print("ftdata: %d/%d refreshed%s"
+              % (n, seen, _deferred_phrase(deferred, args.cache_dir)),
+              flush=True)
         time.sleep(max(5.0, args.loop - (time.time() - started)))
 
 
