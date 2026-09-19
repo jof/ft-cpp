@@ -514,9 +514,11 @@ def build_spectrogram(frame, lay, state, lut, escale, hours_span):
     t_now = float(state["t"][-1])
     t_first = max(float(state["t"][0]), t_now - hours_span * 3600.0)
     span = max(1.0, t_now - t_first)
-    # Row -> period: bottom row is T_MAX (swell), top row is T_MIN (chop).
+    # Row -> period: top row is T_MIN (short chop), bottom row is T_MAX (long
+    # swell), so the heavy groundswell lies along the base with the chop riding
+    # on top of it -- the way the sea is actually stacked.
     rows = np.arange(sgh)
-    per = T_MAX - (rows / max(1, sgh - 1)) * (T_MAX - T_MIN)
+    per = T_MIN + (rows / max(1, sgh - 1)) * (T_MAX - T_MIN)
     fq = 1.0 / per
     freqs = state["freq"]
     order = np.argsort(freqs)
@@ -537,8 +539,8 @@ def build_spectrogram(frame, lay, state, lut, escale, hours_span):
         if x0 <= gx < x1:
             frame[y0:y1, gx] = np.maximum(frame[y0:y1, gx], np.array(C_GRID))
 
-    # Two ticks naming the vertical axis: it is wave period in seconds, long
-    # swell at the top and short chop at the bottom. A dimmed chip behind each
+    # Two ticks naming the vertical axis: it is wave period in seconds, short
+    # chop at the top and long swell at the bottom. A dimmed chip behind each
     # keeps the light figures legible over whatever energy is under them, which
     # is cheaper than a full axis and says both the unit and the range.
     def _period_tick(yy, secs):
@@ -548,8 +550,8 @@ def build_spectrogram(frame, lay, state, lut, escale, hours_span):
         chip[:] = (chip.astype(np.float32) * 0.30).astype(np.uint8)
         blit_text(frame, yy + 1, x0 + 1, txt, C_TEXT)
     if sgh >= 16:
-        _period_tick(y0, T_MAX)
-        _period_tick(y1 - 7, T_MIN)
+        _period_tick(y0, T_MIN)
+        _period_tick(y1 - 7, T_MAX)
 
 
 def draw_card(frame, lay, lines):
