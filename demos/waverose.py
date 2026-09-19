@@ -537,6 +537,20 @@ def build_spectrogram(frame, lay, state, lut, escale, hours_span):
         if x0 <= gx < x1:
             frame[y0:y1, gx] = np.maximum(frame[y0:y1, gx], np.array(C_GRID))
 
+    # Two ticks naming the vertical axis: it is wave period in seconds, long
+    # swell at the top and short chop at the bottom. A dimmed chip behind each
+    # keeps the light figures legible over whatever energy is under them, which
+    # is cheaper than a full axis and says both the unit and the range.
+    def _period_tick(yy, secs):
+        txt = "%dS" % int(secs + 0.5)
+        bw = text_width(txt)
+        chip = frame[yy:yy + 7, x0:x0 + bw + 2]
+        chip[:] = (chip.astype(np.float32) * 0.30).astype(np.uint8)
+        blit_text(frame, yy + 1, x0 + 1, txt, C_TEXT)
+    if sgh >= 16:
+        _period_tick(y0, T_MAX)
+        _period_tick(y1 - 7, T_MIN)
+
 
 def draw_card(frame, lay, lines):
     total = sum(text_height(sc) + 3 for _, _, sc in lines)
