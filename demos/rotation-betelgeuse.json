@@ -138,6 +138,17 @@
     },
     {
       "kind": "py",
+      "name": "waverose",
+      "module": "waverose",
+      "seconds": 40.0,
+      "fps": 20,
+      "ms": 4.0,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "pong",
       "module": "pong",
       "seconds": 45.0,
