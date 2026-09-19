@@ -5300,6 +5300,45 @@ alongside six other agents editing these same demos, and a diff that touched
 every panel at once would have been a merge conflict in six directions. The
 schema takes new keys without a version bump, so they can move one at a time.
 
+### tracker
+
+![tracker](screenshots/tracker.png)
+
+The motion tracker from *Aliens*, watching a corridor. Hudson holds the thing
+up and the whole scene is on its little screen: a sweep going out, blips where
+it found something, and a range readout that only ever gets smaller. Here the
+panel is the plan view of a long corridor with the tracker at the left end,
+one metre to seven pixels, so forty metres of range ends just short of the
+readout box in the far corner. Two bulkhead walls, ribs every five metres,
+side doors, a blast door at the end -- and under it all the faint range arcs
+that say this is a sensor display and not a map.
+
+The blips are **what the last pulse saw, not where the contacts are.** A pulse
+leaves the tracker and walks down the corridor at forty metres a second; a
+contact lights up when the front crosses it and decays until the next one
+refreshes it. Between pulses the picture is stale, which is how the prop
+worked and what makes it frightening. Contacts move in bursts, drop out into
+the ducts and come back nearer, leaving a dim ghost or two where they were.
+
+The pulse rate follows the nearest contact -- two seconds apart with the
+corridor empty, under half a second with something at two metres -- so every
+pulse time depends on the one before it, and the whole train is simulated once
+in `build()` for `render(t)` to binary search. The cycle is a 76 s scene: a
+clean slow sweep, one contact at the edge of range, then more, the rate
+climbing, and around a minute in things start coming out of the side doors at
+short range. The readout drops to zero, the screen tears into static, a
+self-test banner, and the sweep resumes over an empty corridor.
+
+The sweep is the only per-frame field, and it is computed over the seventy-odd
+columns the ring can touch rather than the whole frame -- the wake is gone nine
+metres behind the front -- which is what brings a cycle to 7.4 ms median and
+18 ms worst on a 1.2 GHz Pi 3 under both numpy 1.19 and 2.0.
+
+```console
+$ python3 tracker.py --seed 11 --palette amber
+$ python3 tracker.py --cycle 50 --no-readout
+```
+
 ## demoscene.py
 
 The shared part. Each demo parses the usual options, precomputes what it can,
