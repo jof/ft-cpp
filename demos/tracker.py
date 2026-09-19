@@ -499,10 +499,23 @@ def build(args):
                 r_front = PULSE_SPEED_M * age
                 if r_front > RANGE_M + 4:
                     continue
-                d = r_front - R_m                          # >0 behind the front
+                # Only the columns the ring can touch: the wake is gone nine
+                # metres behind the front, so this is a 70-column band rather
+                # than the whole frame -- which on the Pi is most of the cost.
+                x1 = min(W, int(ORIGIN_X + (r_front + 1.0) * PX_PER_M) + 2)
+                behind = (r_front - 9.0) * PX_PER_M
+                s_px = math.sqrt(behind * behind - (H / 2.0) ** 2) if behind > H / 2.0 else 0.0
+                # Columns left of the tracker are inside the ring whenever it
+                # is small, so the band only ever starts to the right of it.
+                x0 = 0 if s_px <= ORIGIN_X else int(ORIGIN_X + s_px) - 1
+                if x1 <= x0:
+                    continue
+                Rm = R_m[:, x0:x1]
+                d = r_front - Rm                           # >0 behind the front
                 wake = np.exp(-d * 0.55) * (d >= 0)        # trailing glow
                 front = np.exp(-(d * d) * 6.0)             # the bright edge
-                np.maximum(dyn, (0.55 * front + 0.22 * wake) * (R_m <= RANGE_M + 0.3), out=dyn)
+                np.maximum(dyn[:, x0:x1], (0.55 * front + 0.22 * wake) * (Rm <= RANGE_M + 0.3),
+                           out=dyn[:, x0:x1])
             nearest = draw_blips(tc, k)
             # Pulse LED beside the readout: flashes on fire.
             since = tc - pulse_t[k]
