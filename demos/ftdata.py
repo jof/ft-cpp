@@ -1835,7 +1835,7 @@ SOFAR_INTERVAL = 5400.0                 # >= buoy cadence (30m) and rotation (~6
 SOFAR_SAMPLES = 16                      # spectra kept per record: about eight hours
 SOFAR_WAVES = 48                        # bulk-wave trend points kept
 SOFAR_UA = "flaschen-taschen-ftdata/1 (+wall display)"
-SOFAR_NAMES = {"SPOT-32653C": "ANO NUEVO", "SPOT-0564": "PIER 24"}
+SOFAR_NAMES = {"SPOT-32653C": "AÑO NUEVO", "SPOT-0564": "PIER 24"}
 ANO_NUEVO = "SPOT-32653C"               # off Ano Nuevo, its spectra transmit live
 
 
