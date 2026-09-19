@@ -72,6 +72,7 @@ column by column but only when the record changes.
 """
 
 import math
+import os
 import sys
 import time
 
@@ -210,6 +211,34 @@ def _blit_mask(dst, y, x, m, rgb):
         return gw
     dst[y0:y1, x0:x1][m[y0 - y:y1 - y, x0 - x:x1 - x]] = rgb
     return gw
+
+
+def _blit_rgba(dst, y, x, rgba):
+    """Alpha-composite an RGBA uint8 image onto dst at (y, x), clipped."""
+    gh, gw = rgba.shape[:2]
+    y0, x0 = max(0, y), max(0, x)
+    y1, x1 = min(dst.shape[0], y + gh), min(dst.shape[1], x + gw)
+    if y1 <= y0 or x1 <= x0:
+        return gw
+    sub = rgba[y0 - y:y1 - y, x0 - x:x1 - x]
+    a = sub[..., 3:4].astype(np.float32) / 255.0
+    reg = dst[y0:y1, x0:x1].astype(np.float32)
+    reg *= (1.0 - a)
+    reg += sub[..., :3].astype(np.float32) * a
+    dst[y0:y1, x0:x1] = reg.astype(np.uint8)
+    return gw
+
+
+def load_logo():
+    """The Sofar logomark, pre-scaled to an RGBA sidecar next to this file so
+    the demo needs no image library. Returns the array or None if absent."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "waverose-logo.npz")
+    try:
+        with np.load(path) as z:
+            return z["logo"]
+    except Exception:                                        # noqa: BLE001
+        return None
 
 
 def text_mask(s, scale=1):
@@ -417,7 +446,7 @@ class Layout(object):
         # Tall enough headline band to carry the tilde over ANO in row zero.
         self.top_h = 8 if h >= 44 else (6 if h >= 40 else 0)
         self.head_y = 2 if self.top_h >= 7 else 0
-        self.bot_h = 6 if h >= 52 else 0            # time axis / credit band
+        self.bot_h = 8 if h >= 52 else 0            # time axis / credit band
         self.body_y0 = self.top_h + 1
         self.body_y1 = h - self.bot_h - 1
         body_h = max(8, self.body_y1 - self.body_y0)
@@ -524,6 +553,9 @@ def add_arguments(ap):
                          "the record's own peak")
     ap.add_argument("--reload", type=float, default=600.0,
                     help="seconds between re-reads of the cache (0 = never)")
+    ap.add_argument("--no-logo", action="store_true",
+                    help="credit Sofar with a drawn wave mark instead of the "
+                         "logomark image sidecar")
 
 
 # --------------------------------------------------------------------------
@@ -539,7 +571,8 @@ def build(args):
 
     cell = {"loaded": -1e18, "state": None, "card": None, "base": None,
             "fidx": None, "ang": None, "mask": None, "escale": 1.0,
-            "rose": None, "bg": None}
+            "rose": None, "bg": None,
+            "logo": None if args.no_logo else load_logo()}
 
     def make_card(lines):
         base = np.zeros((h, w, 3), np.uint8)
@@ -578,16 +611,24 @@ def build(args):
 
         # Time axis under the spectrogram.
         if lay.bot_h and lay.has_sg:
-            ay = lay.h - lay.bot_h
+            ay = lay.h - lay.bot_h + 1
             blit_text(base, ay, lay.sg_x1 - text_width("NOW"), "NOW", C_DIM)
             blit_text(base, ay, lay.sg_x0, "-%dH" % int(args.hours), C_DIM)
 
-        # Data-source credit, bottom-left under the rose: an original buoy mark
-        # and the SOFAR wordmark, since the spectra are Sofar Ocean's.
+        # Data-source credit, bottom-left under the rose. The spectra are Sofar
+        # Ocean's, so the credit is their own logomark (a pre-scaled image
+        # sidecar) with the SOFAR name beside it; --no-logo falls back to a
+        # drawn wave mark for a tree with no sidecar.
         if lay.bot_h:
-            cy = lay.h - lay.bot_h
-            _blit_mask(base, cy, 1, MARK, C_CREDIT)
-            blit_text(base, cy, 1 + MARK.shape[1] + 2, "SOFAR", C_CREDIT)
+            ty = lay.h - lay.bot_h + 1
+            logo = cell.get("logo")
+            if logo is not None:
+                _blit_rgba(base, lay.h - lay.bot_h, 1, logo)
+                tx = 1 + logo.shape[1] + 2
+            else:
+                _blit_mask(base, ty, 1, MARK, C_CREDIT)
+                tx = 1 + MARK.shape[1] + 2
+            blit_text(base, ty, tx, "SOFAR", C_CREDIT)
 
         # Rose geometry for this record's frequency grid.
         fidx, ang, mask = rose_geometry(lay.R, state["period"])
@@ -689,7 +730,7 @@ def build(args):
                 left_x = lay.sg_x0 + text_width("-%dH" % int(args.hours)) + 3
                 now_x = lay.sg_x1 - text_width("NOW") - 2
                 if cxk > left_x and cxk + text_width(clk) < now_x:
-                    blit_text(frame, lay.h - lay.bot_h, cxk, clk, C_TEXT)
+                    blit_text(frame, lay.h - lay.bot_h + 1, cxk, clk, C_TEXT)
 
         # Observation age, called out only when it is old enough to matter.
         obs = state["obs_age"]
