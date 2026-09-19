@@ -77,11 +77,12 @@ WARMUP = {
     # a gateway; trench wants the targeting computer already down; esper wants
     # the last enhance, where the iron is what is on screen.
     "tron": 16.0, "sneakers": 11.0, "fsn": 22.0, "trench": 20.0, "esper": 46.0,
-    # tracker is a minute of a readout counting down and the last ten seconds
-    # are what it was counting down to: aimed at the swarm, where the pulse is
-    # firing twice a second and things are coming out of the side doors, so a
-    # two-second clip has a sweep, fresh blips and a low number in it.
-    "tracker": 58.0,
+    # tracker is a minute of a readout counting down. Aimed at 50 s, the
+    # middle of the approach: the sweep crosses most of the corridor inside
+    # the clip, four contacts are spread along it with ghosts behind them,
+    # and the readout is in single digits. The swarm at 58 s is the climax
+    # but has everything bunched at the origin and an empty corridor.
+    "tracker": 50.0,
     "sf-tree-bounce": 2.0, "space-invaders": 2.0, "pacman": 1.0, "sewing": 1.0,
     # voxel has to be at the Gate: the tour is 210 s of which the bridge is a
     # few, and every other second of it is a shoreline on the horizon that
