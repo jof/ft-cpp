@@ -57,9 +57,17 @@ few hours stale the observation age is called out, and past half a day the rose
 is not drawn at all -- animating a spectrum the ocean has stopped keeping is
 the one lie this panel could tell.
 
+**The panel opens on a credit.** The spectra are Sofar Ocean's, so the first
+few seconds are their logomark held on black, then a wavy tide rises up the
+wall and dissolves it to reveal the spectrum behind -- a wave washing the mark
+away, which is on the nose and is the point. It is their own logomark image,
+scaled to a sidecar, not a redraw; `--intro 0` or `--no-logo` skips it, and it
+skips itself if the sidecar is not in the tree.
+
     $ python3 ftdata.py --once --only sofar-SPOT-32653C
     $ python3 waverose.py --host 127.0.0.1
     $ python3 waverose.py --spotter SPOT-0564
+    $ python3 waverose.py --intro 0                     # straight to the data
     $ FT_DATA_CACHE=/tmp/empty python3 waverose.py      # the no-data card
 
 **Frame budget.** The headline, the spectrogram and the compass ring are baked
@@ -141,6 +149,16 @@ C_RING_N = (150, 120, 90)                # the north tick, warmer so it is found
 C_PLAY = (236, 246, 255)                 # the playhead
 C_PLAY_DIM = (70, 90, 110)
 C_CREDIT = (92, 150, 170)                # the SOFAR data-source credit
+C_FOAM = (198, 234, 252)                 # the crest of the intro's rising tide
+
+# Intro. The panel opens on the Sofar logomark held on black -- the data's
+# source, and a nod to the buoy people who might be watching -- then a wavy
+# tide rises up the wall and dissolves the mark to reveal the spectrum behind
+# it. Their real logomark image, not a redraw; see load_logo().
+INTRO_HOLD_FRAC = 0.42                   # share of the intro spent holding still
+WASH_AMP = 3.0                           # crest wobble of the rising tide, px
+WASH_FOAM = 2                            # foam band thickness at the crest, px
+WASH_SPEED = 6.0                         # crest travel, rad/s
 C_BG = (2, 5, 11)                        # the sea at rest: near-black blue
 C_GRID = (18, 26, 38)
 
@@ -192,15 +210,6 @@ GLYPH_W = _GLYPHS[" "].shape[1]
 _GLYPHS.setdefault("Ñ", _GLYPHS.get("N", _GLYPHS[" "]))
 TILDE = np.array([[0, 1, 1], [1, 1, 0]], bool)      # a 2x3 wave over the N
 
-# An original data-source mark: a buoy riding two rows of swell. Not Sofar's
-# logo -- their name below it is the credit; this is just a wave glyph.
-_MARK = ["....X....",
-         "...XXX...",
-         "....X....",
-         "X.X.X.X.X",
-         ".X.X.X.X."]
-MARK = np.array([[c == "X" for c in row] for row in _MARK], bool)
-
 
 def _blit_mask(dst, y, x, m, rgb):
     """Draw a boolean mask at (y, x), clipped to dst."""
@@ -230,15 +239,16 @@ def _blit_rgba(dst, y, x, rgba):
 
 
 def load_logo():
-    """The Sofar logomark, pre-scaled to an RGBA sidecar next to this file so
-    the demo needs no image library. Returns the array or None if absent."""
+    """The Sofar logomark, pre-scaled to RGBA sidecars next to this file (a
+    small credit mark and a large splash mark) so the demo needs no image
+    library. Returns {name: array}, empty if the sidecar is absent."""
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "waverose-logo.npz")
     try:
         with np.load(path) as z:
-            return z["logo"]
+            return {k: z[k] for k in z.files}
     except Exception:                                        # noqa: BLE001
-        return None
+        return {}
 
 
 def text_mask(s, scale=1):
@@ -446,7 +456,7 @@ class Layout(object):
         # Tall enough headline band to carry the tilde over ANO in row zero.
         self.top_h = 8 if h >= 44 else (6 if h >= 40 else 0)
         self.head_y = 2 if self.top_h >= 7 else 0
-        self.bot_h = 8 if h >= 52 else 0            # time axis / credit band
+        self.bot_h = 6 if h >= 52 else 0            # time axis band
         self.body_y0 = self.top_h + 1
         self.body_y1 = h - self.bot_h - 1
         body_h = max(8, self.body_y1 - self.body_y0)
@@ -553,9 +563,11 @@ def add_arguments(ap):
                          "the record's own peak")
     ap.add_argument("--reload", type=float, default=600.0,
                     help="seconds between re-reads of the cache (0 = never)")
+    ap.add_argument("--intro", type=float, default=3.4,
+                    help="seconds of Sofar logomark intro before a rising tide "
+                         "washes it away to reveal the spectrum; 0 disables")
     ap.add_argument("--no-logo", action="store_true",
-                    help="credit Sofar with a drawn wave mark instead of the "
-                         "logomark image sidecar")
+                    help="skip the Sofar logomark intro entirely")
 
 
 # --------------------------------------------------------------------------
@@ -568,11 +580,29 @@ def build(args):
     cache = args.cache_dir
     spotter = args.spotter
     lut = _ramp_lut(E_RAMP)
+    logos = {} if args.no_logo else load_logo()
 
     cell = {"loaded": -1e18, "state": None, "card": None, "base": None,
             "fidx": None, "ang": None, "mask": None, "escale": 1.0,
-            "rose": None, "bg": None,
-            "logo": None if args.no_logo else load_logo()}
+            "rose": None, "bg": None, "splash": None,
+            "intro": max(0.0, float(args.intro)),
+            "yy": np.arange(h, dtype=f32)[:, None]}
+
+    # Intro splash, built once: the large logomark held on black with the SOFAR
+    # OCEAN name under it. Its real image, scaled in load_logo(); no redraw.
+    big = logos.get("logo_big")
+    if big is not None and cell["intro"] > 0 and h >= 24:
+        splash = np.zeros((h, w, 3), np.uint8)
+        splash[:] = C_BG
+        lh, lw = big.shape[:2]
+        ly = max(0, h // 2 - lh // 2 - 3)
+        _blit_rgba(splash, ly, max(0, (w - lw) // 2), big)
+        cap = "SOFAR OCEAN"
+        blit_text(splash, min(h - 6, ly + lh + 2),
+                  max(0, (w - text_width(cap)) // 2), cap, C_CREDIT)
+        cell["splash"] = splash
+    if cell["splash"] is None:
+        cell["intro"] = 0.0
 
     def make_card(lines):
         base = np.zeros((h, w, 3), np.uint8)
@@ -615,21 +645,6 @@ def build(args):
             blit_text(base, ay, lay.sg_x1 - text_width("NOW"), "NOW", C_DIM)
             blit_text(base, ay, lay.sg_x0, "-%dH" % int(args.hours), C_DIM)
 
-        # Data-source credit, bottom-left under the rose. The spectra are Sofar
-        # Ocean's, so the credit is their own logomark (a pre-scaled image
-        # sidecar) with the SOFAR name beside it; --no-logo falls back to a
-        # drawn wave mark for a tree with no sidecar.
-        if lay.bot_h:
-            ty = lay.h - lay.bot_h + 1
-            logo = cell.get("logo")
-            if logo is not None:
-                _blit_rgba(base, lay.h - lay.bot_h, 1, logo)
-                tx = 1 + logo.shape[1] + 2
-            else:
-                _blit_mask(base, ty, 1, MARK, C_CREDIT)
-                tx = 1 + MARK.shape[1] + 2
-            blit_text(base, ty, tx, "SOFAR", C_CREDIT)
-
         # Rose geometry for this record's frequency grid.
         fidx, ang, mask = rose_geometry(lay.R, state["period"])
         cell["fidx"] = fidx
@@ -666,12 +681,40 @@ def build(args):
         t_now = float(state["t"][-1])
         t_first = max(float(state["t"][0]), t_now - args.hours * 3600.0)
         cycle = max(0.1, args.sweep + args.hold)
-        phase = t % cycle
+        # The sweep begins when the reveal does, so the first thing the wash
+        # uncovers is the oldest spectrum, not the middle of a cycle.
+        te = max(0.0, t - cell["intro"])
+        phase = te % cycle
         if phase < args.sweep:
             frac = phase / args.sweep
         else:
             frac = 1.0
         return t_first + (t_now - t_first) * frac, t_first, t_now
+
+    def intro_frame(main, t):
+        """The Sofar logomark, held then washed away by a rising tide to reveal
+        `main`. Only runs for the first `cell['intro']` seconds."""
+        splash = cell["splash"]
+        intro = cell["intro"]
+        hold = intro * INTRO_HOLD_FRAC
+        if t < 0.4:                                  # fade up from black
+            return (splash.astype(f32) * (t / 0.4)).astype(np.uint8)
+        if t <= hold:
+            return splash
+        p = (t - hold) / max(1e-3, intro - hold)     # 0..1 wash progress
+        cols = np.arange(w)
+        base_y = h + WASH_FOAM - p * (h + 2 * WASH_AMP + 2 * WASH_FOAM)
+        wl = base_y + WASH_AMP * np.sin(cols * 0.06 + t * WASH_SPEED)
+        rel = cell["yy"] - wl[None, :]               # (h, w): below the line > 0
+        below = rel >= 0.0
+        # The mark dissolves as the water climbs, rather than merely hiding.
+        spl = (splash.astype(f32) * (1.0 - 0.85 * p)).astype(np.uint8)
+        out = np.where(below[..., None], main, spl)
+        out[np.abs(rel) < 1.2] = C_FOAM              # the crest
+        glow = (rel >= 1.2) & (rel < 3.2)            # a lit skirt under it
+        out[glow] = np.clip(out[glow].astype(np.int16) + 44, 0, 255
+                            ).astype(np.uint8)
+        return out
 
     def render(t, i):
         if args.reload and time.monotonic() - cell["loaded"] >= args.reload:
@@ -738,6 +781,9 @@ def build(args):
             msg = "STALE %s" % ago(obs)
             blit_text(frame, lay.head_y, lay.w - text_width(msg) - 1, msg,
                       C_WARN)
+
+        if t < cell["intro"] and cell["splash"] is not None:
+            return intro_frame(frame, t)
         return frame
 
     render.state = cell
