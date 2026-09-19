@@ -1393,6 +1393,191 @@ for _bu in [SWELL_BUOY] + [s for s in
 
 
 # --------------------------------------------------------------------------
+# Sofar Ocean Spotter buoys. waverose.py draws the directional wave spectrum
+# these transmit -- energy against frequency and compass bearing -- as a polar
+# rose, animated through the last several hours of it.
+#
+# These do not sit on an open web server the way the NDBC buoys above do; the
+# Spotter data lives behind api.sofarocean.com and normally needs the account
+# token that owns the buoy. The buoys drawn here are ones their owners marked
+# public, and the Sofar dashboard reads those with a *view token* the site
+# hands to anybody who asks: GET /fetch/get-view-token?domain=spotters. That
+# token is fetched here, in the fetcher process, and used to read the public
+# spectra, so no account credential is stored in the tree. Set SOFAR_TOKEN in
+# the environment to use a real account token instead -- for a buoy shared
+# privately to the account, whose view token would not cover it.
+#
+# Cadence, and why it is slow. A Spotter transmits a new spectrum every thirty
+# minutes, and the wall shows this panel once a rotation -- about sixty-nine
+# minutes on betelgeuse. Fetching faster than either would pull records nobody
+# will ever see and lean on a buoy owner's API allowance for nothing, so the
+# interval is set above both: fetch_all's is_due fires at 0.9*interval, so
+# 5400 s means a refetch no sooner than about eighty-one minutes, comfortably
+# slower than the buoy and slower than the rotation. It costs nothing to be
+# generous here -- the record carries several hours of past spectra, so the
+# panel animates the sea state's own history no matter how stale the fetch is.
+# --------------------------------------------------------------------------
+
+SOFAR_API = "https://api.sofarocean.com"
+SOFAR_TTL = 3.0 * 3600.0                # a record stays believable for three hours
+SOFAR_INTERVAL = 5400.0                 # >= buoy cadence (30m) and rotation (~69m)
+SOFAR_SAMPLES = 16                      # spectra kept per record: about eight hours
+SOFAR_WAVES = 48                        # bulk-wave trend points kept
+SOFAR_UA = "flaschen-taschen-ftdata/1 (+wall display)"
+SOFAR_NAMES = {"SPOT-32653C": "ANO NUEVO", "SPOT-0564": "PIER 24"}
+ANO_NUEVO = "SPOT-32653C"               # off Ano Nuevo, its spectra transmit live
+
+
+def _sofar_iso(s):
+    """'2026-09-19T04:30:00.000Z' -> epoch seconds, or None. Always UTC."""
+    import calendar
+    if not s:
+        return None
+    head = str(s).strip().replace("Z", "").split(".")[0]
+    try:
+        return float(calendar.timegm(time.strptime(head, "%Y-%m-%dT%H:%M:%S")))
+    except ValueError:
+        return None
+
+
+def _sofar_rnd(v, nd):
+    try:
+        return round(float(v), nd)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sofar_get(path, token, timeout=25):
+    """A Sofar API GET returning parsed JSON, with the read token in a header."""
+    import urllib.request
+    req = urllib.request.Request(SOFAR_API + path,
+                                 headers={"User-Agent": SOFAR_UA,
+                                          "token": token})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def _sofar_view_token(timeout=20):
+    """The anonymous read token the public Spotter dashboard uses."""
+    import urllib.request
+    url = SOFAR_API + "/fetch/get-view-token?domain=spotters"
+    req = urllib.request.Request(url, headers={"User-Agent": SOFAR_UA})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        doc = json.loads(resp.read().decode("utf-8", "replace"))
+    tok = (doc.get("data") or {}).get("viewToken")
+    if not tok:
+        raise ValueError("Sofar returned no view token")
+    return tok
+
+
+def _sofar_payload(spotter_id):
+    """One Spotter: its directional spectra history and a bulk-wave trend.
+
+    The heavy part of the record is `spectra`: up to SOFAR_SAMPLES frames, each
+    the energy density, mean direction and directional spread at every one of
+    the buoy's frequency bins. That is what waverose.py animates. The frequency
+    grid is stored once, not per frame, because the buoy's bins do not move.
+    """
+    token = os.environ.get("SOFAR_TOKEN") or _sofar_view_token()
+
+    doc = _sofar_get(
+        "/api/spotter-wave-data?spotterId=%s&includeWaves=true"
+        "&includeFrequencyData=true&includeDirectionalMoments=true"
+        "&processingSources=all" % spotter_id, token)
+    data = doc.get("data") or doc
+    frames = sorted(data.get("frequencyData") or [],
+                    key=lambda s: s.get("timestamp") or "")
+    if not frames:
+        raise ValueError("no spectra for Spotter %s" % spotter_id)
+
+    freq = [round(float(x), 5) for x in frames[-1]["frequency"]]
+    nf = len(freq)
+
+    spectra = []
+    for s in frames[-SOFAR_SAMPLES:]:
+        t = _sofar_iso(s.get("timestamp"))
+        dens = s.get("varianceDensity") or []
+        drc = s.get("direction") or []
+        spr = s.get("directionalSpread") or []
+        if t is None or len(dens) != nf or len(drc) < nf or len(spr) < nf:
+            continue
+        spectra.append({
+            "t": t,
+            "e": [round(float(v), 5) for v in dens],
+            "d": [round(float(v), 1) for v in drc[:nf]],
+            "s": [round(float(v), 1) for v in spr[:nf]],
+        })
+    if not spectra:
+        raise ValueError("no usable spectra for Spotter %s" % spotter_id)
+
+    waves = sorted(data.get("waves") or [],
+                   key=lambda w: w.get("timestamp") or "")
+    whist = []
+    for w in waves[-SOFAR_WAVES:]:
+        t = _sofar_iso(w.get("timestamp"))
+        if t is None:
+            continue
+        whist.append({"t": t,
+                      "hs": _sofar_rnd(w.get("significantWaveHeight"), 2),
+                      "tp": _sofar_rnd(w.get("peakPeriod"), 1)})
+    latest = waves[-1] if waves else {}
+
+    # Name and position come from latest-data, which carries the buoy's own
+    # nickname and GPS track; the wave-data endpoint carries neither. It is a
+    # nice-to-have and is allowed to fail without losing the spectra.
+    name = SOFAR_NAMES.get(spotter_id)
+    lat = lon = None
+    try:
+        ld = (_sofar_get("/api/latest-data?spotterId=%s" % spotter_id, token)
+              .get("data") or {})
+        name = name or ld.get("spotterName")
+        track = ld.get("track") or []
+        if track:
+            lat = _sofar_rnd(track[-1].get("latitude"), 4)
+            lon = _sofar_rnd(track[-1].get("longitude"), 4)
+    except Exception as e:                                   # noqa: BLE001
+        print("ftdata: %s latest-data unavailable: %r" % (spotter_id, e),
+              file=sys.stderr)
+
+    payload = {
+        "spotter_id": spotter_id,
+        "name": (name or spotter_id).upper(),
+        "lat": lat, "lon": lon,
+        "freq": freq,
+        "obs_t": spectra[-1]["t"],
+        "spectra": spectra,
+        "hs": _sofar_rnd(latest.get("significantWaveHeight"), 2),
+        "tp": _sofar_rnd(latest.get("peakPeriod"), 1),
+        "tm": _sofar_rnd(latest.get("meanPeriod"), 1),
+        "pdir": _sofar_rnd(latest.get("peakDirection"), 0),
+        "mdir": _sofar_rnd(latest.get("meanDirection"), 0),
+        "pspread": _sofar_rnd(latest.get("peakDirectionalSpread"), 0),
+        "waves": whist,
+        "units": {"h": "m", "p": "s", "dir": "degT", "e": "m2/Hz"},
+    }
+    return payload, SOFAR_API + "/api/spotter-wave-data?spotterId=" + spotter_id
+
+
+def register_spotter(spotter_id):
+    """Register a `sofar-<id>` product. Returns the product name."""
+    name = "sofar-" + spotter_id
+
+    def fetch_spotter(spotter_id=spotter_id):
+        return _sofar_payload(spotter_id)
+
+    fetch_spotter.__name__ = "_sofar_" + spotter_id.replace("-", "_")
+    product(name, ttl=SOFAR_TTL, interval=SOFAR_INTERVAL,
+            description="Sofar Spotter %s: directional wave spectrum and trend"
+                        % spotter_id)(fetch_spotter)
+    return name
+
+
+for _sp in [ANO_NUEVO] + [s for s in
+                          os.environ.get("FT_SPOTTERS", "").split(",") if s]:
+    register_spotter(_sp.strip())
+
+
+# --------------------------------------------------------------------------
 # GOES GeoColor imagery, from NESDIS STAR. goes.py plays these as a time lapse.
 #
 # This is the first product whose payload is not numbers, and it changes what
