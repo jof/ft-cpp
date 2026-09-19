@@ -962,6 +962,17 @@
     },
     {
       "kind": "py",
+      "name": "tracker",
+      "module": "tracker",
+      "seconds": 78.0,
+      "fps": 24,
+      "ms": 7.4,
+      "enabled": true,
+      "solo": false,
+      "options": {}
+    },
+    {
+      "kind": "py",
       "name": "laser",
       "module": "laser",
       "seconds": 45.0,
@@ -1089,7 +1100,7 @@
       "solo": false,
       "options": {
         "plasma_frames": 60,
-        "text": "SEQUOIA FABRICA  \u2726  FLASCHENTASCHEN LIVES  \u2726  320 X 64 OF PURE PHOTONS  \u2726     "
+        "text": "SEQUOIA FABRICA  ✦  FLASCHENTASCHEN LIVES  ✦  320 X 64 OF PURE PHOTONS  ✦     "
       }
     },
     {
