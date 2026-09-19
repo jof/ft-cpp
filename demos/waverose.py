@@ -139,6 +139,7 @@ C_RING = (30, 40, 54)                    # the compass ring and its ticks
 C_RING_N = (150, 120, 90)                # the north tick, warmer so it is found
 C_PLAY = (236, 246, 255)                 # the playhead
 C_PLAY_DIM = (70, 90, 110)
+C_CREDIT = (92, 150, 170)                # the SOFAR data-source credit
 C_BG = (2, 5, 11)                        # the sea at rest: near-black blue
 C_GRID = (18, 26, 38)
 
@@ -184,6 +185,32 @@ for _ch, _rows in defcon._FONT.items():
 GLYPH_H = _GLYPHS[" "].shape[0]
 GLYPH_W = _GLYPHS[" "].shape[1]
 
+# The 3x5 font has no N-with-tilde, so the base letter is the plain N and the
+# tilde is drawn as a two-row accent in the margin above it -- which is why the
+# headline sits a couple of rows down. AÑO reads as a place, not a typo.
+_GLYPHS.setdefault("Ñ", _GLYPHS.get("N", _GLYPHS[" "]))
+TILDE = np.array([[0, 1, 1], [1, 1, 0]], bool)      # a 2x3 wave over the N
+
+# An original data-source mark: a buoy riding two rows of swell. Not Sofar's
+# logo -- their name below it is the credit; this is just a wave glyph.
+_MARK = ["....X....",
+         "...XXX...",
+         "....X....",
+         "X.X.X.X.X",
+         ".X.X.X.X."]
+MARK = np.array([[c == "X" for c in row] for row in _MARK], bool)
+
+
+def _blit_mask(dst, y, x, m, rgb):
+    """Draw a boolean mask at (y, x), clipped to dst."""
+    gh, gw = m.shape
+    y0, x0 = max(0, y), max(0, x)
+    y1, x1 = min(dst.shape[0], y + gh), min(dst.shape[1], x + gw)
+    if y1 <= y0 or x1 <= x0:
+        return gw
+    dst[y0:y1, x0:x1][m[y0 - y:y1 - y, x0 - x:x1 - x]] = rgb
+    return gw
+
 
 def text_mask(s, scale=1):
     s = str(s).upper()
@@ -218,6 +245,19 @@ def blit_text(dst, y, x, s, rgb, scale=1):
     sub = m[y0 - y:y1 - y, x0 - x:x1 - x]
     dst[y0:y1, x0:x1][sub] = rgb
     return gw
+
+
+def blit_name(dst, y, x, s, rgb):
+    """Like blit_text, but draws the tilde over any N-with-tilde. Needs two
+    rows of clear margin above `y`; the caller gives it that headroom."""
+    s = str(s).upper()
+    cx = x
+    for ch in s:
+        blit_text(dst, y, cx, ch, rgb)
+        if ch == "Ñ":
+            _blit_mask(dst, y - 2, cx, TILDE, rgb)
+        cx += GLYPH_W + 1
+    return max(1, cx - x - 1)
 
 
 POINTS = ("N NNE NE ENE E ESE SE SSE S SSW SW WSW W WNW NW NNW").split()
@@ -374,8 +414,10 @@ def rose_geometry(R, period_bins):
 class Layout(object):
     def __init__(self, w, h):
         self.w, self.h = w, h
-        self.top_h = 6 if h >= 40 else 0            # headline band
-        self.bot_h = 6 if h >= 52 else 0            # time axis band
+        # Tall enough headline band to carry the tilde over ANO in row zero.
+        self.top_h = 8 if h >= 44 else (6 if h >= 40 else 0)
+        self.head_y = 2 if self.top_h >= 7 else 0
+        self.bot_h = 6 if h >= 52 else 0            # time axis / credit band
         self.body_y0 = self.top_h + 1
         self.body_y1 = h - self.bot_h - 1
         body_h = max(8, self.body_y1 - self.body_y0)
@@ -521,23 +563,31 @@ def build(args):
         draw_ring(base, lay)
         build_spectrogram(base, lay, state, lut, cell["escale"], args.hours)
 
-        # Headline: name, then significant height, peak period, peak bearing.
+        # Headline: name (with its tilde), height, peak period, peak bearing.
         if lay.top_h:
+            hy = lay.head_y
             xx = 1
-            xx += blit_text(base, 0, xx, state["name"][:12], C_TEXT) + 4
-            xx += blit_text(base, 0, xx, feet(state["hs"]), C_SWELL) + 3
+            xx += blit_name(base, hy, xx, state["name"][:12], C_TEXT) + 4
+            xx += blit_text(base, hy, xx, feet(state["hs"]), C_SWELL) + 3
             if state["tp"]:
-                xx += blit_text(base, 0, xx, "%dS" % int(round(state["tp"])),
+                xx += blit_text(base, hy, xx, "%dS" % int(round(state["tp"])),
                                 C_PERIOD) + 3
             pk = compass(state["pdir"])
             if pk:
-                xx += blit_text(base, 0, xx, pk, C_DIRN) + 3
+                xx += blit_text(base, hy, xx, pk, C_DIRN) + 3
 
         # Time axis under the spectrogram.
         if lay.bot_h and lay.has_sg:
             ay = lay.h - lay.bot_h
             blit_text(base, ay, lay.sg_x1 - text_width("NOW"), "NOW", C_DIM)
             blit_text(base, ay, lay.sg_x0, "-%dH" % int(args.hours), C_DIM)
+
+        # Data-source credit, bottom-left under the rose: an original buoy mark
+        # and the SOFAR wordmark, since the spectra are Sofar Ocean's.
+        if lay.bot_h:
+            cy = lay.h - lay.bot_h
+            _blit_mask(base, cy, 1, MARK, C_CREDIT)
+            blit_text(base, cy, 1 + MARK.shape[1] + 2, "SOFAR", C_CREDIT)
 
         # Rose geometry for this record's frequency grid.
         fidx, ang, mask = rose_geometry(lay.R, state["period"])
@@ -645,7 +695,8 @@ def build(args):
         obs = state["obs_age"]
         if obs is not None and obs > OBS_WARN and lay.top_h:
             msg = "STALE %s" % ago(obs)
-            blit_text(frame, 0, lay.w - text_width(msg) - 1, msg, C_WARN)
+            blit_text(frame, lay.head_y, lay.w - text_width(msg) - 1, msg,
+                      C_WARN)
         return frame
 
     render.state = cell
