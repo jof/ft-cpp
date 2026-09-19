@@ -208,7 +208,11 @@ GLYPH_W = _GLYPHS[" "].shape[1]
 # tilde is drawn as a two-row accent in the margin above it -- which is why the
 # headline sits a couple of rows down. AÑO reads as a place, not a typo.
 _GLYPHS.setdefault("Ñ", _GLYPHS.get("N", _GLYPHS[" "]))
-TILDE = np.array([[0, 1, 1], [1, 1, 0]], bool)      # a 2x3 wave over the N
+# The mark over the N. A wavy tilde is illegible at three pixels wide, so this
+# is a plain bar -- a macron, strictly -- set one row above the letter with a
+# row of gap between, which is what actually reads as "this N has a diacritic"
+# at this size.
+TILDE = np.array([[1, 1, 1]], bool)
 
 
 def _blit_mask(dst, y, x, m, rgb):
